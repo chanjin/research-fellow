@@ -1,0 +1,28 @@
+[project]
+name = "shared-phenomena-research-fellow"
+version = "0.1.0"
+description = "A compact M1/M2 research fellow built around Jackson-style shared phenomena."
+requires-python = ">=3.11"
+dependencies = [
+  "streamlit>=1.38",
+  "pypdf>=5.0",
+  "pymupdf>=1.24",
+  "pydantic>=2.0",
+  "requests>=2.32",
+  "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+llamaindex = [
+  "llama-index-core>=0.11",
+  "llama-index-embeddings-ollama>=0.3",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+research_fellow = ["prompts/*.j2"]

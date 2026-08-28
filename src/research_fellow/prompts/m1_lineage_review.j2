@@ -5,7 +5,7 @@ Rules:
 - Propose an edge only when claims, conditions, and limits make the relation explicit enough.
 - Allowed relation types: defines, builds_on, operationalizes, enables, applies_to, supports, limits, contrasts_with, shares_topic.
 - If the evidence is not adequate, omit the edge and describe the gap.
-- Do not write graph data, approvals, or memory state. Write in Korean.
+- Do not write graph data, approvals, or memory state. Write in English.
 
 Topic:
 {{ topic }}
@@ -21,10 +21,10 @@ Limits: {{ item.limits }}
 {% endfor %}
 
 Return exactly this structure:
-노드 역할:
+Node roles:
 - K1 | definition|premise|method|application|finding|limitation|counterclaim | ...
-관계 후보:
+Relation candidates:
 - K1 -> K2 | relation: ... | rationale: ... | condition: ...
-계보 요약: ...
-열린 공백:
+Lineage summary: ...
+Open gaps:
 - ...

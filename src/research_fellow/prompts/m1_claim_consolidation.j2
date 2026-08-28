@@ -1,0 +1,22 @@
+Review the candidate claims below.
+
+Apply only these constraints:
+- Retain independent, substantive claims.
+- Merge only claims that express the same proposition.
+- Discard claims that are redundant, peripheral, unsupported, or publication metadata.
+- Do not rewrite the claims and do not add evidence, citations, labels,
+  conditions, limits, or new claims.
+
+Return one block for every supplied claim, separated by `---`.
+
+Candidate claims:
+{% for item in claims %}
+{{ item.claim_id }}: {{ item.claim }}
+{% endfor %}
+
+Return exactly:
+Claim: C1
+Decision: retain|merge|discard
+Merge with: C2 or blank
+Reason: concise English explanation
+---

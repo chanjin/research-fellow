@@ -5,13 +5,13 @@ Rules:
 - Allowed relations: supports, extends, contradicts, qualifies, uses_method, addresses_gap.
 - Do not treat a broad topical similarity as a knowledge relation.
 - This is only a draft for researcher confirmation. Do not generate JSON, IDs, state transitions, or approval outcomes.
-- Write values in Korean, but keep the relation token and confidence token exactly as specified below.
+- Write every value in English, and keep the relation token and confidence token exactly as specified below.
 
 Return exactly this readable structure:
-관계: supports|extends|contradicts|qualifies|uses_method|addresses_gap
-근거: a short explanation tying both cards' claims and conditions together
-조건: conditions under which the relation holds
-신뢰: low|medium|high
+Relation: supports|extends|contradicts|qualifies|uses_method|addresses_gap
+Evidence: a short explanation tying both cards' claims and conditions together
+Conditions: conditions under which the relation holds
+Confidence: low|medium|high
 
 Source card:
 - ID: {{ source.card_id }}

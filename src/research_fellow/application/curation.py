@@ -4,7 +4,7 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from research_fellow.domain.knowledge import KnowledgeCard, page_markers, parse_text_draft
+from research_fellow.domain.knowledge import KnowledgeCard, parse_text_draft
 from research_fellow.infrastructure.document_reader import ExtractedPage
 from research_fellow.infrastructure.prompt_renderer import render_prompt
 from research_fellow.storage import Ledger
@@ -40,8 +40,30 @@ def _compact_title(claim: str, limit: int = 42) -> str:
     return (shortened or title[:limit]) + "…"
 
 
+def _normalise_for_evidence_match(text: str) -> str:
+    return re.sub(r"[^\w가-힣]+", " ", text.lower()).strip()
+
+
+def _evidence_is_grounded(excerpt: str, source_text: str) -> bool:
+    """Accept a literal excerpt, or a near-literal bounded fragment only.
+
+    Evidence is deliberately not translated or summarised here.  The card
+    claim may be a Korean M1 interpretation; its evidence must remain a
+    traceable source fragment.
+    """
+    excerpt_normalized = _normalise_for_evidence_match(excerpt)
+    source_normalized = _normalise_for_evidence_match(source_text)
+    if len(excerpt_normalized) < 12 or not source_normalized:
+        return False
+    if excerpt_normalized in source_normalized:
+        return True
+    excerpt_terms = [term for term in excerpt_normalized.split() if len(term) >= 2]
+    source_terms = set(source_normalized.split())
+    return len(excerpt_terms) >= 4 and (sum(term in source_terms for term in excerpt_terms) / len(excerpt_terms)) >= 0.85
+
+
 def normalize_candidate_draft(
-    *, title: str, source_kind: str, page: ExtractedPage, labels: list[str], index: int, text_draft: str = "",
+    *, title: str, source_kind: str, page: ExtractedPage, labels: list[str], index: int, text_draft: str = "", source_text: str | None = None,
 ) -> CandidateDraftResult:
     """Normalize a readable M1/LLM draft using only document-derived fallback evidence.
 
@@ -51,19 +73,17 @@ def normalize_candidate_draft(
     """
     fields = parse_text_draft(text_draft)
     warnings: list[str] = []
-    excerpt = fields.get("evidence_excerpt", page.text[:1200]).strip()
+    evidence_source = source_text or page.text
+    excerpt = fields.get("evidence_excerpt", evidence_source[:1200]).strip()
     if not fields.get("evidence_excerpt"):
         warnings.append("근거 발췌가 초안에 없어 원문 해당 쪽의 발췌로 보완했습니다.")
+    elif not _evidence_is_grounded(excerpt, evidence_source):
+        excerpt = evidence_source[:1200].strip()
+        warnings.append("초안의 근거가 원문 발췌로 확인되지 않아 추출 원문 발췌로 교체했습니다.")
     claim = fields.get("claim", "").strip()
     if not claim:
         claim = _first_claim(excerpt)
         warnings.append("주장이 초안에 없어 근거 첫 문장을 후보 주장으로 사용했습니다. 승인 전 보완을 권장합니다.")
-    raw_pages = fields.get("evidence_pages", "")
-    pages = [int(number) for number in re.findall(r"\d+", raw_pages)] or [page.page_number]
-    if not raw_pages:
-        warnings.append("쪽수 표기가 없어 추출된 쪽수로 보완했습니다.")
-    raw_markers = fields.get("citation_markers", "")
-    markers = [part.strip() for part in raw_markers.split(",") if part.strip()] or page_markers(page.page_number, page.text)
     card = KnowledgeCard(
         card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}",
         title=fields.get("title", "").strip() or _compact_title(claim),
@@ -71,17 +91,25 @@ def normalize_candidate_draft(
         claim=claim,
         labels=[part.strip() for part in fields.get("labels", ",".join(labels)).split(",") if part.strip()],
         evidence_excerpt=excerpt,
-        evidence_pages=pages,
-        citation_markers=markers,
-        conditions=fields.get("conditions", "원문 전체 맥락과 적용 대상을 연구자가 검토해야 합니다."),
-        limits=fields.get("limits", "이 카드는 원문 전체의 결론을 대체하지 않는 후보 지식입니다."),
-        provenance={"source_name": title, "page_or_section": page.section or f"p.{page.page_number}"},
+        evidence_pages=[],
+        citation_markers=[],
+        conditions=fields.get("conditions", "The researcher should review the full source context and scope of application."),
+        limits=fields.get("limits", "This candidate card does not replace the source document's full conclusion."),
+        provenance={"source_name": title},
     )
     return CandidateDraftResult(card=card.model_dump(mode="json"), normalized_from="text_draft" if text_draft.strip() else "document_fallback", warnings=warnings)
 
 
 def curation_text_prompt(title: str, source_kind: str, pages: list[ExtractedPage]) -> str:
-    return render_prompt("m1_curation.j2", document_title=title, source_kind=source_kind, pages=pages[:3], max_cards=3)
+    """Make one small-context claim-discovery prompt, not a page-number task."""
+    selected, used = [], 0
+    for page in pages:
+        remaining = 14_000 - used
+        if remaining <= 0:
+            break
+        selected.append(page.text[:remaining])
+        used += len(selected[-1])
+    return render_prompt("m1_curation.j2", document_title=title, source_kind=source_kind, source_text="\n\n".join(selected), max_cards=3)
 
 
 def create_document_candidates(
@@ -92,12 +120,17 @@ def create_document_candidates(
     useful_pages = [page for page in pages if page.text.strip()][:3]
     if not useful_pages:
         raise ValueError("추출 가능한 텍스트가 없습니다.")
+    if text_draft.strip().upper() == "NO_CANDIDATE":
+        return [], ["LLM이 제공된 범위에서 논문 본문 지식으로 쓸 만한 내용을 찾지 못했습니다."]
     request_ids, warnings = [], []
     drafts = [block.strip() for block in re.split(r"(?m)^---+\s*$", text_draft) if block.strip()]
-    for index, page in enumerate(useful_pages, 1):
+    source_text = "\n\n".join(page.text for page in useful_pages)
+    candidate_drafts = drafts or [""]
+    for index, draft in enumerate(candidate_drafts[:3], 1):
+        page = useful_pages[min(index - 1, len(useful_pages) - 1)]
         result = normalize_candidate_draft(
             title=title, source_kind=source_kind, page=page, labels=labels, index=index,
-            text_draft=drafts[index - 1] if index <= len(drafts) else "",
+            text_draft=draft, source_text=source_text,
         )
         card = result.card
         warnings.extend(f"후보 {index}: {warning}" for warning in result.warnings)

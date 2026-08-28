@@ -1,0 +1,20 @@
+Read the academic text and produce at most {{ max_claims }} independent candidate knowledge cards.
+
+For every item, use exactly this small text format:
+1.
+Claim: one clear, self-contained proposition.
+Explanation: one or two sentences explaining the finding, mechanism, implication, comparison, or scope.
+Labels: one, two, or three short topic labels
+
+Rules:
+- A claim and its explanation belong to the same item. Do not make the explanation a second claim.
+- `Explanation:` and `Labels:` are required for every item; do not return an item with Claim alone.
+- Keep genuinely independent claims; omit duplicates, subclaims, and publication metadata.
+- Ignore copyright/licence notices, URLs, references, author biographies, headers, footers, and formatting.
+- Labels must be concise concepts, methods, problems, or application areas.
+- Write every Claim, Explanation, and Label in English, even when the source text is Korean.
+- Do not return evidence, quotations, citations, conditions, limitations, JSON, recommendations, a preface, or a conclusion.
+- Do not use Markdown, bold text, bullets, or headings. Use the literal field names `Claim:`, `Explanation:`, and `Labels:`.
+
+Academic text:
+{{ source_text }}

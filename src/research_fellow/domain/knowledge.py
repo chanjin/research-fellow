@@ -13,9 +13,12 @@ RelationType = Literal["supports", "extends", "contradicts", "qualifies", "uses_
 class Evidence(BaseModel):
     """A page-addressable extract; the original document remains the authority."""
 
-    excerpt: str = Field(min_length=1, max_length=1600)
-    pages: list[int] = Field(min_length=1)
-    citation_markers: list[str] = Field(min_length=1)
+    excerpt: str = Field(default="", max_length=1600)
+    # Page locations from PDF text extraction are often not reliable enough to
+    # be treated as research evidence.  The canonical reference is the source
+    # document plus the exact excerpt; legacy cards may still retain pages.
+    pages: list[int] = Field(default_factory=list)
+    citation_markers: list[str] = Field(default_factory=list)
     section: str | None = None
 
     @field_validator("pages")
@@ -33,12 +36,14 @@ class KnowledgeCard(BaseModel):
     title: str = Field(min_length=1)
     source_kind: SourceKind
     claim: str = Field(min_length=8)
+    # Optional so existing approved JSONL cards remain valid.
+    explanation: str = ""
     labels: list[str] = Field(default_factory=list)
-    evidence_excerpt: str = Field(min_length=1, max_length=1600)
-    evidence_pages: list[int] = Field(min_length=1)
-    citation_markers: list[str] = Field(min_length=1)
-    conditions: str = Field(min_length=1)
-    limits: str = Field(min_length=1)
+    evidence_excerpt: str = Field(default="", max_length=1600)
+    evidence_pages: list[int] = Field(default_factory=list)
+    citation_markers: list[str] = Field(default_factory=list)
+    conditions: str = ""
+    limits: str = ""
     provenance: dict[str, str]
 
     @field_validator("evidence_pages")

@@ -59,9 +59,11 @@ def decide_request(
             request["case_id"], "curation_intent", "m2", ["m1"], "curation_intent",
             payload["intent"], request["subject_id"], status="ready",
         )
+        ledger.create_search_profile(payload["intent"])
     elif request["subject_type"] == "knowledge_relation":
         assert relation_memory is not None
         relation = relation_memory.add(payload["relation"])
+        ledger.upsert_knowledge_relation(relation)
         ledger.record(
             request["case_id"], "knowledge_update", "m1", ["m2", "researcher"], "knowledge_relation",
             {"title": f"승인 관계 추가: {relation['relation_type']}", "relation_id": relation["relation_id"],

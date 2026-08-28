@@ -4,7 +4,7 @@ Rules:
 - Refer only to the supplied source keys (S1, S2, ...), each at most once.
 - A relevance judgement is not verified knowledge and must not be written as a fact.
 - Do not create source IDs, citations, approvals, or state changes.
-- Write in Korean.
+- Write in English.
 
 Knowledge gap:
 {{ knowledge_gap }}
@@ -21,7 +21,7 @@ URL: {{ item.url }}
 {% endfor %}
 
 Return exactly this structure:
-후보 문헌:
+Candidate sources:
 - S1 | relevance: ... | expected contribution: ... | caveat: ...
-커버리지 메모: ...
-남은 공백: ... 또는 없음
+Coverage note: ...
+Remaining gap: ... or none

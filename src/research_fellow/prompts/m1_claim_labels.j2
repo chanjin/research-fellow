@@ -1,0 +1,14 @@
+Assign one to three concise English topic labels to each claim below.
+
+Rules:
+- Use only short concepts, methods, problems, or application areas.
+- Do not explain, assess evidence, add conditions or limits, rewrite a claim,
+  create new claims, or use a card format.
+
+Claims:
+{% for item in claims %}
+{{ item.claim_id }}: {{ item.claim }}
+{% endfor %}
+
+Return only one line per claim:
+C1: label one, label two

@@ -10,6 +10,7 @@ from research_fellow.domain.research import CurationIntent, ResearchState
 PhenomenonType = Literal[
     "research_update", "advice_report", "decision_request", "decision",
     "curation_intent", "knowledge_update", "advisory_exchange",
+    "activity_summary",
 ]
 
 
@@ -42,6 +43,7 @@ class DecisionPayload(Payload):
 class CurationIntentPayload(Payload):
     title: str = Field(min_length=1)
     question: str = Field(min_length=1)
+    research_context: str = "The approved research question and its stated constraints define this search context."
     labels: list[str] = Field(default_factory=list)
     priority: str = Field(min_length=1)
     purpose: str = "후속 탐색의 목적을 연구자가 검토해야 합니다."
@@ -63,6 +65,14 @@ class AdviceReportPayload(Payload):
 
 class KnowledgeUpdatePayload(Payload):
     title: str = Field(min_length=1)
+
+
+class ActivitySummaryPayload(Payload):
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    baseline: dict[str, list[str]] = Field(default_factory=dict)
+    delta: dict[str, list[str]] = Field(default_factory=dict)
+    is_initial_baseline: bool = False
 
 
 class PhenomenonDraft(BaseModel):
@@ -91,6 +101,7 @@ def validate_payload(phenomenon_type: str, payload: dict[str, Any]) -> dict[str,
         "research_update": ResearchUpdatePayload,
         "advice_report": AdviceReportPayload,
         "knowledge_update": KnowledgeUpdatePayload,
+        "activity_summary": ActivitySummaryPayload,
     }
     model = models.get(phenomenon_type, Payload)
     return model.model_validate(payload).model_dump(mode="json")

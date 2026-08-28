@@ -30,6 +30,19 @@ def latest_research_state(ledger: Ledger) -> ResearchState | None:
     return None
 
 
+def recent_research_questions(ledger: Ledger, limit: int = 8) -> list[str]:
+    """Researcher-owned question history, newest first and without duplicates."""
+    questions: list[str] = []
+    for item in ledger.phenomena(type_="research_update"):
+        state = item["payload"].get("state", {})
+        question = state.get("question") if isinstance(state, dict) else None
+        if isinstance(question, str) and question.strip() and question not in questions:
+            questions.append(question)
+        if len(questions) >= limit:
+            break
+    return questions
+
+
 def recent_knowledge_updates(ledger: Ledger, limit: int = 8) -> list[dict[str, Any]]:
     """M2's observable input inbox; updates themselves remain owned by M1."""
     return ledger.phenomena(recipient="m2", type_="knowledge_update")[:limit]
@@ -39,6 +52,35 @@ def direction_prompt(state: ResearchState, evidence: list[RetrievalResult], upda
     from research_fellow.infrastructure.prompt_renderer import render_prompt
 
     return render_prompt("m2_research_direction.j2", state=state, evidence=evidence, recent_updates=updates, max_intents=3)
+
+
+def research_context_mapping_prompt(question: str, note: str) -> str:
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+
+    return render_prompt("m2_research_context_mapping.j2", question=question, researcher_note=note)
+
+
+def parse_research_context_mapping(text: str) -> dict[str, object]:
+    """Accept a small readable draft; researcher confirmation remains the state gate."""
+    fields: dict[str, object] = {"hypothesis": "", "constraints": [], "unresolved": [], "changes": []}
+    current: str | None = None
+    aliases = {
+        "current hypothesis": "hypothesis", "현재 가설": "hypothesis",
+        "constraints": "constraints", "제약": "constraints",
+        "unresolved issues": "unresolved", "미결 사항": "unresolved",
+        "recent evidence changes": "changes", "최근 근거 변화": "changes",
+    }
+    for line in text.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            current = aliases.get(key.strip().lower())
+            if current == "hypothesis":
+                fields[current] = value.strip()
+            elif current and value.strip():
+                fields[current] = [value.strip()]
+        elif current in {"constraints", "unresolved", "changes"} and line.strip().lstrip("-• "):
+            fields[current] = [*fields[current], line.strip().lstrip("-• ")]
+    return fields
 
 
 def draft_research_direction(
@@ -102,7 +144,7 @@ def record_update_report(ledger: Ledger, state: ResearchState | None, update_rep
 def _split_direction_draft(text: str) -> tuple[str, list[str]]:
     if not text.strip():
         return "", []
-    marker = re.search(r"(?im)^##?\s*(?:탐색\s*Intent\s*후보|curation\s*intent(?:s)?)\s*$", text)
+    marker = re.search(r"(?im)^##?\s*(?:탐색\s*Intent\s*후보|curation\s*intent(?:s)?(?:\s+candidates)?)\s*$", text)
     if not marker:
         return text.strip(), []
     report = text[:marker.start()].strip()
@@ -114,6 +156,7 @@ def _fields(block: str) -> dict[str, str]:
     aliases = {
         "목적": "purpose", "purpose": "purpose", "제목": "title", "title": "title",
         "질문": "question", "question": "question", "레이블": "labels", "labels": "labels",
+        "연구 맥락": "research_context", "research context": "research_context",
         "우선순위": "priority", "priority": "priority", "기대 근거": "expected_evidence",
         "expected evidence": "expected_evidence", "완료 조건": "completion_condition", "completion condition": "completion_condition",
     }
@@ -139,7 +182,7 @@ def _normalize_intents(blocks: list[str], state: ResearchState) -> list[Curation
         try:
             intents.append(CurationIntent(
                 intent_id=f"intent-{uuid.uuid4().hex[:12]}", title=fields["title"], purpose=fields["purpose"],
-                question=fields["question"], labels=[item.strip() for item in fields.get("labels", "").split(",")],
+                question=fields["question"], research_context=fields.get("research_context") or _intent_context_from_state(state), labels=[item.strip() for item in fields.get("labels", "").split(",")],
                 priority=priority, expected_evidence=fields["expected_evidence"], completion_condition=fields["completion_condition"],
             ))
         except ValueError:
@@ -152,24 +195,37 @@ def _fallback_intents(state: ResearchState, updates: list[dict[str, Any]]) -> li
     intents = []
     for index, topic in enumerate(topics, start=1):
         intent = CurationIntent(
-            intent_id=f"intent-{uuid.uuid4().hex[:12]}", title=f"{topic[:32]} 근거 탐색",
-            purpose="연구 상태의 미결 사항을 출처 기반 근거로 좁힙니다.", question=topic,
+            intent_id=f"intent-{uuid.uuid4().hex[:12]}", title=f"Evidence search: {topic[:32]}",
+            purpose="Narrow an unresolved research issue with source-grounded evidence in the stated research domain.", question=topic,
+            research_context=_intent_context_from_state(state),
             labels=[], priority="높음" if index == 1 else "보통",
-            expected_evidence="상반된 근거, 적용 조건, 출처·쪽수로 연결된 지식 카드",
-            completion_condition="최소 한 개의 출처 기반 후보 카드 또는 명시된 지식 공백을 M2·연구자에게 보고합니다.",
+            expected_evidence="Contrary evidence, conditions of application, and source-grounded knowledge cards.",
+            completion_condition="Report at least one source-grounded candidate card or an explicit knowledge gap to M2 and the researcher.",
         )
         intents.append(intent)
     return intents
 
 
+def _intent_context_from_state(state: ResearchState) -> str:
+    """Carry the whole research situation into every search, not only its topic label."""
+    parts = [f"Research question: {state.question}", f"Working hypothesis: {state.current_hypothesis}"]
+    if state.constraints:
+        parts.append("Constraints: " + "; ".join(state.constraints))
+    if state.unresolved_issues:
+        parts.append("Unresolved issues: " + "; ".join(state.unresolved_issues))
+    if state.researcher_note:
+        parts.append("Researcher note: " + state.researcher_note)
+    return "\n".join(parts)
+
+
 def _deterministic_report(state: ResearchState, evidence: list[RetrievalResult], updates: list[dict[str, Any]]) -> str:
-    evidence_lines = "\n".join(f"- [{item.card['card_id']}] {item.card['claim']}" for item in evidence) or "- 관련 승인 지식이 없습니다."
-    update_lines = "\n".join(f"- {item['payload'].get('title', 'M1 업데이트')}" for item in updates) or "- 최근 M1 업데이트가 없습니다."
-    issues = "\n".join(f"- {item}" for item in state.unresolved_issues) or "- 명시된 미결 사항이 없습니다."
+    evidence_lines = "\n".join(f"- [{item.card['card_id']}] {item.card['claim']}" for item in evidence) or "- 관련 승인 지식카드가 아직 없습니다."
+    update_lines = "\n".join(f"- {item['payload'].get('title', 'M1 새 정보')}" for item in updates) or "- 최근 M1 새 정보가 없습니다."
+    issues = "\n".join(f"- {item}" for item in state.unresolved_issues) or "- 연구자가 명시한 미결 사항이 없습니다."
     return (
         f"## 현재 해석\n{state.question}\n\n## 지지 근거\n{evidence_lines}\n\n"
-        f"## 반대 근거 또는 숨은 가정\n- 현재 가설과 근거의 적용 조건을 별도로 비교해야 합니다.\n\n"
-        f"## 적용 조건과 한계\n- 제약: {', '.join(state.constraints) or '명시되지 않음'}\n"
-        f"- 확신 수준: {state.confidence}\n\n## 최근 근거 변화\n{update_lines}\n\n"
+        f"## 반대 근거 또는 숨은 가정\n- 현재 가설과 근거의 적용 조건을 분리해 비교할 필요가 있습니다.\n\n"
+        f"## 조건과 한계\n- 연구 제약: {', '.join(state.constraints) or '명시되지 않았습니다.'}\n"
+        f"- 현재 확신 수준: {state.confidence}\n\n## 최근 근거 변화\n{update_lines}\n\n"
         f"## 공백과 다음 판단\n{issues}"
     )

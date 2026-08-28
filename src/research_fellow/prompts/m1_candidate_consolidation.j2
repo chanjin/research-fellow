@@ -20,7 +20,7 @@ Rules:
 - Judge only the supplied candidate IDs. Do not create a new card, citation, page, or ID.
 - An implication or common topic alone is not containment.
 - Do not merge a method card, finding card, condition card, or limitation card merely because they concern the same study.
-- Write the reason in Korean.
+- Write the reason in English.
 - Return one block per pair, separated by `---`. You may omit a pair only when its relation cannot be judged from supplied cards.
 
 Candidate pairs:
@@ -29,7 +29,6 @@ Candidate pairs:
 First candidate: {{ pair.first.candidate_id }}
 Title: {{ pair.first.title }}
 Claim: {{ pair.first.claim }}
-Evidence pages: {{ pair.first.evidence_pages | join(', ') }}
 Excerpt: {{ pair.first.evidence_excerpt }}
 Labels: {{ pair.first.labels | join(', ') }}
 Conditions: {{ pair.first.conditions }}
@@ -38,7 +37,6 @@ Limits: {{ pair.first.limits }}
 Second candidate: {{ pair.second.candidate_id }}
 Title: {{ pair.second.title }}
 Claim: {{ pair.second.claim }}
-Evidence pages: {{ pair.second.evidence_pages | join(', ') }}
 Excerpt: {{ pair.second.evidence_excerpt }}
 Labels: {{ pair.second.labels | join(', ') }}
 Conditions: {{ pair.second.conditions }}
@@ -47,8 +45,8 @@ Limits: {{ pair.second.limits }}
 {% endfor %}
 
 Return exactly this format:
-후보: first_candidate_id, second_candidate_id
-관계: independent|related_but_distinct|duplicate|contains|contained_by|partial_overlap
-처리: retain_both|keep_first|keep_second|merge_into_first|merge_into_second|flag_for_researcher
-이유: ...
+Candidates: first_candidate_id, second_candidate_id
+Relation: independent|related_but_distinct|duplicate|contains|contained_by|partial_overlap
+Action: retain_both|keep_first|keep_second|merge_into_first|merge_into_second|flag_for_researcher
+Reason: ...
 ---

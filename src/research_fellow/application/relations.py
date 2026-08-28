@@ -17,6 +17,17 @@ def relation_text_prompt(source: dict[str, object], target: dict[str, object]) -
     return render_prompt("m1_relation_proposal.j2", source=source, target=target)
 
 
+def lineage_overview_prompt(cards: list[dict[str, object]], relations: list[dict[str, object]]) -> str:
+    """Prompt only; the graph and approved relations remain the source of truth."""
+    visible = cards[:10]
+    card_index = {str(card["card_id"]): card for card in visible}
+    edges = [
+        {**relation, "source_title": card_index[str(relation["source_card_id"])]["title"], "target_title": card_index[str(relation["target_card_id"])]["title"]}
+        for relation in relations if str(relation["source_card_id"]) in card_index and str(relation["target_card_id"]) in card_index
+    ]
+    return render_prompt("m1_lineage_overview.j2", cards=visible, relations=edges)
+
+
 def _parse_relation_text(text: str) -> dict[str, str]:
     aliases = {"관계": "relation_type", "relation": "relation_type", "근거": "evidence", "evidence": "evidence",
                "조건": "conditions", "conditions": "conditions", "신뢰": "confidence", "confidence": "confidence"}
@@ -53,18 +64,37 @@ def normalize_relation_draft(
 
 def create_relation_candidate(
     ledger: Ledger, source_card_id: str, target_card_id: str, relation_type: str, text_draft: str, evidence: str, conditions: str, confidence: str,
+    source_card: dict[str, object] | None = None, target_card: dict[str, object] | None = None,
 ) -> tuple[str, list[str]]:
     relation, warnings = normalize_relation_draft(
         source_card_id, target_card_id, relation_type, text_draft, evidence, conditions, confidence
     )
     case_id = ledger.create_case("research", f"지식 관계: {source_card_id} → {target_card_id}")
+    source_summary = _card_summary(source_card) if source_card else {"card_id": source_card_id}
+    target_summary = _card_summary(target_card) if target_card else {"card_id": target_card_id}
+    relation_summary = _relation_summary(relation, source_summary, target_summary)
     request_id = ledger.record(
         case_id, "decision_request", "m1", ["researcher"], "knowledge_relation",
-        {"title": f"지식 관계 승인: {relation['relation_type']}", "relation": relation, "warnings": warnings,
+        {"title": f"지식 관계 승인: {relation['relation_type']}", "relation": relation,
+         "source_card_summary": source_summary, "target_card_summary": target_summary,
+         "relation_summary": relation_summary, "warnings": warnings,
          "next_action": "승인 시 관계 기억에 저장하고 M2·연구자에게 통지"},
         subject_id=str(relation["relation_id"]),
     )
     return request_id, warnings
+
+
+def _card_summary(card: dict[str, object]) -> dict[str, object]:
+    """Readable approval snapshot; card ID remains the relation's canonical reference."""
+    return {key: card.get(key, "") for key in ("card_id", "title", "claim", "explanation", "labels")}
+
+
+def _relation_summary(relation: dict[str, object], source: dict[str, object], target: dict[str, object]) -> str:
+    return (
+        f"‘{source.get('title') or source.get('card_id')}’의 주장이 "
+        f"‘{target.get('title') or target.get('card_id')}’의 주장과 "
+        f"{relation['relation_type']} 관계인지 검토합니다."
+    )
 
 
 def _heuristic_relation(source: dict[str, object], target: dict[str, object]) -> tuple[str, str, str, str]:
@@ -93,12 +123,12 @@ def propose_relation_candidates(
         draft = draft_for(source, target) if draft_for else None
         try:
             request_id, item_warnings = create_relation_candidate(
-                ledger, str(source["card_id"]), str(target["card_id"]), relation_type, draft or "", evidence, conditions, confidence,
+                ledger, str(source["card_id"]), str(target["card_id"]), relation_type, draft or "", evidence, conditions, confidence, source, target,
             )
         except ValueError:
             # A malformed LLM draft is ignored; deterministic heuristic proposal remains reviewable.
             request_id, item_warnings = create_relation_candidate(
-                ledger, str(source["card_id"]), str(target["card_id"]), relation_type, "", evidence, conditions, confidence,
+                ledger, str(source["card_id"]), str(target["card_id"]), relation_type, "", evidence, conditions, confidence, source, target,
             )
             item_warnings.append("Gemma 초안을 해석할 수 없어 근거 카드 기반 보수적 제안으로 대체했습니다.")
         request_ids.append(request_id)

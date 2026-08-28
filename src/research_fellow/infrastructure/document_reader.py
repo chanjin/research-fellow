@@ -1,8 +1,8 @@
-"""Structured, cached document extraction for M1 curation.
+"""Plain-text-first, cached document extraction for M1 curation.
 
-PyMuPDF is the primary PDF reader because it exposes page text blocks and
-coordinates.  ``pypdf`` remains a compatibility fallback.  The optional cache
-stores only derived text/structure, never uploaded PDF bytes or page images.
+Poppler's ``pdftotext`` is the primary reader for scholarly prose. PyMuPDF and
+pypdf remain fallbacks; neither coordinates nor PDF page numbers are exposed
+as canonical knowledge-card evidence. The cache stores derived text only.
 """
 
 from __future__ import annotations
@@ -10,6 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import asdict, dataclass, replace
 from io import BytesIO
 from pathlib import Path
@@ -18,7 +21,7 @@ from typing import Any
 
 DEFAULT_MAX_PAGES = 20
 DEFAULT_CHARS_PER_PAGE = 6_000
-EXTRACTION_SCHEMA_VERSION = 2
+EXTRACTION_SCHEMA_VERSION = 4
 
 
 class DocumentExtractionError(ValueError):
@@ -63,7 +66,7 @@ class ExtractedDocument:
 
 
 def extracted_document_text(document: ExtractedDocument) -> str:
-    """Render a deterministic plain-text export with page and block markers."""
+    """Render a deterministic plain-text export without PDF-page claims."""
     header = [
         f"# {document.title}", f"Source: {document.file_name}", f"Format: {document.source_format}",
         f"Engine: {document.extraction_engine}", f"Extraction note: {document.extraction_note}",
@@ -71,8 +74,8 @@ def extracted_document_text(document: ExtractedDocument) -> str:
     if document.author:
         header.append(f"Author: {document.author}")
     body = []
-    for page in document.pages:
-        body.append(f"\n\n===== Page {page.page_number}" + (f" · {page.section}" if page.section else "") + " =====\n")
+    for index, page in enumerate(document.pages, start=1):
+        body.append(f"\n\n===== Extracted segment {index}" + (f" · {page.section}" if page.section else "") + " =====\n")
         if page.blocks:
             body.extend(f"[block {block.block_id}]\n{block.text}\n" for block in page.blocks)
         else:
@@ -179,9 +182,15 @@ def _write_cache(path: Path, document: ExtractedDocument) -> None:
 
 
 def _extract_pdf_document(file_name: str, content: bytes, document_id: str, max_pages: int, chars_per_page: int) -> ExtractedDocument:
+    try:
+        return _extract_pdftotext_document(file_name, content, document_id, max_pages, chars_per_page)
+    except (FileNotFoundError, subprocess.SubprocessError, OSError, DocumentExtractionError):
+        pass
+
     pymupdf_error: Exception | None = None
     try:
-        return _extract_pymupdf_document(file_name, content, document_id, max_pages, chars_per_page)
+        fallback = _extract_pymupdf_document(file_name, content, document_id, max_pages, chars_per_page)
+        return replace(fallback, extraction_note=f"{fallback.extraction_note} pdftotext를 사용할 수 없어 PyMuPDF fallback을 사용했습니다.")
     except DocumentExtractionError as error:
         if "암호" in str(error):
             raise
@@ -198,7 +207,56 @@ def _extract_pdf_document(file_name: str, content: bytes, document_id: str, max_
                 "스캔 PDF라면 OCR 처리 후 다시 업로드하세요."
             ) from pymupdf_error
         raise
-    return replace(fallback, extraction_note=f"{fallback.extraction_note} PyMuPDF를 사용할 수 없어 pypdf fallback을 사용했습니다.")
+    detail = "pdftotext를 사용할 수 없어 "
+    if pymupdf_error:
+        detail += "PyMuPDF fallback을 거쳐 pypdf fallback을 사용했습니다."
+    else:
+        detail += "pypdf fallback을 사용했습니다."
+    return replace(fallback, extraction_note=f"{fallback.extraction_note} {detail}")
+
+
+def _extract_pdftotext_document(file_name: str, content: bytes, document_id: str, max_pages: int, chars_per_page: int) -> ExtractedDocument:
+    """Extract reading-order prose with Poppler, preserving only internal chunks.
+
+    ``pdftotext`` emits form-feed page separators by default. They are used to
+    keep local LLM prompts bounded, but are intentionally not placed in cards.
+    """
+    executable = shutil.which("pdftotext")
+    if not executable:
+        raise FileNotFoundError("pdftotext command not found")
+    with tempfile.TemporaryDirectory(prefix="research-fellow-pdf-") as directory:
+        source = Path(directory) / "source.pdf"
+        output = Path(directory) / "source.txt"
+        source.write_bytes(content)
+        completed = subprocess.run(
+            [executable, "-enc", "UTF-8", str(source), str(output)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if completed.returncode != 0 or not output.exists():
+            detail = (completed.stderr or completed.stdout or "unknown pdftotext error").strip()[:300]
+            raise DocumentExtractionError(f"pdftotext 추출 실패: {detail}")
+        raw_text = output.read_text(encoding="utf-8", errors="replace")
+    raw_segments = raw_text.split("\f")
+    pages: list[ExtractedPage] = []
+    for source_index, raw_segment in enumerate(raw_segments, start=1):
+        text = _normalize_pdf_text(_remove_extraction_boilerplate(raw_segment))
+        if not text:
+            continue
+        text = text[:chars_per_page].rstrip()
+        block = ExtractedBlock(f"segment-{len(pages) + 1:02d}", text)
+        pages.append(ExtractedPage(source_index, text, _section_for(text), len(text) >= chars_per_page, (block,)))
+        if len(pages) >= max_pages:
+            break
+    if not pages:
+        raise DocumentExtractionError("pdftotext에서 추출 가능한 본문 텍스트를 찾지 못했습니다.")
+    notes = ["Poppler pdftotext 기본 읽기 순서로 본문을 추출했습니다. PDF 페이지 번호·좌표는 지식 카드에 저장하지 않습니다."]
+    if len(raw_segments) > max_pages:
+        notes.append(f"처음 {max_pages}개 텍스트 구간만 사용했습니다.")
+    return ExtractedDocument(
+        document_id=document_id, file_name=file_name, title=Path(file_name).stem, author="",
+        source_format="pdf", original_page_count=len(raw_segments), pages=pages,
+        extraction_note=" ".join(notes), extraction_engine="pdftotext",
+    )
 
 
 def _extract_pymupdf_document(file_name: str, content: bytes, document_id: str, max_pages: int, chars_per_page: int) -> ExtractedDocument:
@@ -227,7 +285,7 @@ def _extract_pymupdf_document(file_name: str, content: bytes, document_id: str, 
         if not pages:
             raise DocumentExtractionError("PyMuPDF에서 추출 가능한 텍스트 블록을 찾지 못했습니다.")
         metadata = document.metadata or {}
-        notes = ["PyMuPDF 블록·좌표 기반으로 추출했으며 원본 PDF 바이트와 이미지는 저장하지 않습니다."]
+        notes = ["PyMuPDF fallback으로 텍스트를 추출했으며 원본 PDF 바이트와 이미지는 저장하지 않습니다."]
         if document.page_count > max_pages:
             notes.append(f"처음 {max_pages}쪽만 추출했습니다(전체 {document.page_count}쪽).")
         if failed_pages:
@@ -247,7 +305,7 @@ def _pymupdf_blocks(raw_blocks: list[Any], page_number: int, chars_per_page: int
     for index, raw in enumerate(raw_blocks, start=1):
         if len(raw) < 5 or (len(raw) > 6 and raw[6] != 0):  # ignore non-text image blocks
             continue
-        text = _normalize_pdf_text(str(raw[4] or ""))
+        text = _normalize_pdf_text(_remove_extraction_boilerplate(str(raw[4] or "")))
         if not text:
             continue
         remaining = chars_per_page - consumed
@@ -276,7 +334,7 @@ def _extract_pypdf_document(file_name: str, content: bytes, document_id: str, ma
     pages, failed_pages = [], []
     for page_number, page in enumerate(reader.pages[:max_pages], start=1):
         try:
-            text = _normalize_pdf_text(page.extract_text() or "")
+            text = _normalize_pdf_text(_remove_extraction_boilerplate(page.extract_text() or ""))
         except Exception:
             failed_pages.append(page_number)
             continue
@@ -333,6 +391,38 @@ def _normalize_pdf_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" ?\n\s*\n+ ?", "\n\n", text)
     return text.strip()
+
+
+# Journal mastheads, page furniture, and licence notices are source metadata,
+# not evidence for a research claim.  Keep the rule deliberately narrow: we
+# remove only recognisable publication boilerplate before it reaches an LLM,
+# while leaving author names, DOIs, section headings, and article prose intact.
+_PUBLICATION_BOILERPLATE_PATTERNS = (
+    re.compile(r"^this work is licensed under a creative commons attribution", re.IGNORECASE),
+    re.compile(r"^for more information,? see https?://creativecommons\.org/licenses/", re.IGNORECASE),
+    re.compile(r"^https?://creativecommons\.org/licenses/", re.IGNORECASE),
+    re.compile(
+        r"^(?:january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"(?:/(?:january|february|march|april|may|june|july|august|september|october|november|december))?"
+        r"\s+\d{4}\s*\|\s*ieee software\s+\d+\s*$",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _remove_extraction_boilerplate(text: str) -> str:
+    """Drop known PDF furniture line-by-line before whitespace normalisation.
+
+    The function is public-by-convention for focused tests.  It must run before
+    ``_normalize_pdf_text`` because the latter intentionally joins line wraps.
+    """
+    kept = []
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line or any(pattern.match(line) for pattern in _PUBLICATION_BOILERPLATE_PATTERNS):
+            continue
+        kept.append(raw_line)
+    return "\n".join(kept)
 
 
 def _section_from_blocks(blocks: list[ExtractedBlock]) -> str | None:

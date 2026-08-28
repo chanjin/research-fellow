@@ -38,7 +38,19 @@ def create_document_candidates(
 def request_curation_intent(ledger: Ledger, title: str, question: str, labels: list[str], priority: str) -> str:
     case_id = ledger.create_case("research", title)
     intent_id = f"intent-{uuid.uuid4().hex[:12]}"
-    intent = {"intent_id": intent_id, "title": title, "question": question, "labels": labels, "priority": priority}
+    # Compatibility entry point: make even a manually-created intent a complete
+    # search contract rather than letting M1 search from a title and labels alone.
+    intent = {
+        "intent_id": intent_id,
+        "title": title,
+        "purpose": "Gather source-grounded evidence that directly informs the stated research question.",
+        "question": question,
+        "research_context": f"Research question: {question}",
+        "labels": labels,
+        "priority": priority,
+        "expected_evidence": "Methods, results, limitations, and contrary evidence directly relevant to the research question.",
+        "completion_condition": "Record source-grounded findings and any unresolved evidence gap for the stated research question.",
+    }
     return ledger.record(
         case_id,
         "decision_request",

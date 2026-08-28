@@ -20,12 +20,10 @@ def _card_view(card: dict[str, Any], reference: str) -> dict[str, Any]:
         "title": str(card.get("title", "")),
         "claim": str(card.get("claim", "")),
         "evidence_excerpt": str(card.get("evidence_excerpt", "")),
-        "evidence_pages": list(card.get("evidence_pages", [])),
         "labels": list(card.get("labels", [])),
         "conditions": str(card.get("conditions", "")),
         "limits": str(card.get("limits", "")),
         "source_name": str(provenance.get("source_name", "미상")),
-        "location": str(provenance.get("page_or_section", "")),
     }
 
 

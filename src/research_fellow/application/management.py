@@ -20,6 +20,7 @@ def delete_knowledge_relation(ledger: Ledger, relations: RelationMemory, relatio
     """Logically delete a relation while retaining a recoverable audit record."""
     if not relations.remove(relation_id, note):
         return False
+    ledger.delete_knowledge_relation(relation_id, note)
     case_id = ledger.create_case("knowledge_maintenance", f"지식 관계 삭제: {relation_id}")
     ledger.record(
         case_id, "knowledge_update", "researcher", ["m1", "m2"], "knowledge_relation",

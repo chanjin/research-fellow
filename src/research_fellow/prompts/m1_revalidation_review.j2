@@ -6,7 +6,7 @@ Rules:
 - Allowed conflict types: contradicts, condition_conflict, measurement_conflict.
 - Allowed freshness actions: keep, recheck_source, collect_counterevidence, manual_metadata_completion.
 - This is a proposal for researcher review. Do not delete, retract, approve, or change stored knowledge.
-- Write in Korean.
+- Write in English.
 
 Reason for review:
 {{ reason }}
@@ -14,7 +14,7 @@ Reason for review:
 Approved evidence:
 {% for item in evidence %}
 [{{ item.reference }}] {{ item.title }} ({{ item.card_id }})
-Source: {{ item.source_name }} · {{ item.location }}
+Source: {{ item.source_name }}
 Claim: {{ item.claim }}
 Conditions: {{ item.conditions }}
 Limits: {{ item.limits }}
@@ -22,8 +22,8 @@ Limits: {{ item.limits }}
 {% endfor %}
 
 Return exactly this structure:
-상충 후보:
+Conflict candidates:
 - E1 vs E2 | type: contradicts|condition_conflict|measurement_conflict | rationale: ... | comparison conditions: ... | recommended action: ...
-출처·신선성 검토:
+Source and freshness review:
 - E1 | action: keep|recheck_source|collect_counterevidence|manual_metadata_completion | reason: ...
-종합 메모: ...
+Overall note: ...

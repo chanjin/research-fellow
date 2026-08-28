@@ -59,7 +59,10 @@ def generate_page_candidates(
         if on_page:
             on_page(ordinal, len(selected_pages), cache_hit)
         if not draft:
-            warnings.append(f"p.{page.page_number}: LLM 초안을 만들지 못해 이 페이지를 건너뛰었습니다.")
+            warnings.append(f"구간 {ordinal}: LLM 초안을 만들지 못해 건너뛰었습니다.")
+            continue
+        if draft.strip().upper() == "NO_CANDIDATE":
+            warnings.append(f"구간 {ordinal}: 논문 본문 지식으로 쓸 만한 내용을 찾지 못해 후보를 만들지 않았습니다.")
             continue
         blocks = [part.strip() for part in re.split(r"(?m)^---+\s*$", draft) if part.strip()][:2]
         for index, block in enumerate(blocks, start=1):
@@ -72,7 +75,7 @@ def generate_page_candidates(
                 candidate_id=candidate_id, card=card, page_number=page.page_number,
                 block_ids=[block.block_id for block in page.blocks], warnings=result.warnings,
             ))
-            warnings.extend(f"p.{page.page_number} 후보 {index}: {warning}" for warning in result.warnings)
+            warnings.extend(f"구간 {ordinal} 후보 {index}: {warning}" for warning in result.warnings)
     return candidates, warnings
 
 
@@ -136,7 +139,6 @@ def submit_progressive_candidates(
             {
                 "title": f"지식 카드 승인: {candidate.card['title']}", "card": candidate.card,
                 "normalization": "progressive_page_curation", "warnings": candidate.warnings,
-                "page_number": candidate.page_number, "block_ids": candidate.block_ids,
                 "next_action": "승인 시 의미 기억에 저장하고 M2에 통지; 보류 시 보완을 요청",
             },
             subject_id=candidate.candidate_id,
@@ -154,7 +156,7 @@ def _candidate_view(candidate: ProgressiveCandidate) -> dict[str, object]:
     card = candidate.card
     return {
         "candidate_id": candidate.candidate_id, "title": card["title"], "claim": card["claim"],
-        "evidence_excerpt": card["evidence_excerpt"], "evidence_pages": card["evidence_pages"],
+        "evidence_excerpt": card["evidence_excerpt"],
         "labels": card.get("labels", []), "conditions": card["conditions"], "limits": card["limits"],
     }
 
@@ -187,7 +189,7 @@ def _parse_consolidation(text: str, valid_ids: set[str]) -> list[ConsolidationDe
 def _merge_evidence(kept: ProgressiveCandidate, dropped: ProgressiveCandidate, reason: str) -> ProgressiveCandidate:
     card = dict(kept.card)
     dropped_card = dropped.card
-    card["evidence_pages"] = sorted(set(card["evidence_pages"]) | set(dropped_card["evidence_pages"]))
-    card["citation_markers"] = sorted(set(card["citation_markers"]) | set(dropped_card["citation_markers"]))
+    card["evidence_pages"] = []
+    card["citation_markers"] = []
     card["evidence_excerpt"] = f"{card['evidence_excerpt']}\n\n{dropped_card['evidence_excerpt']}"[:1600]
     return replace(kept, card=card, warnings=[*kept.warnings, f"{dropped.candidate_id}와 병합: {reason}"])

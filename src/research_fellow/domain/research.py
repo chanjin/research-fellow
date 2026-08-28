@@ -19,6 +19,7 @@ class ResearchState(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     unresolved_issues: list[str] = Field(default_factory=list)
     recent_evidence_changes: list[str] = Field(default_factory=list)
+    researcher_note: str = ""
     confidence: ConfidenceLevel = "medium"
 
     @field_validator("constraints", "unresolved_issues", "recent_evidence_changes")
@@ -34,6 +35,7 @@ class CurationIntent(BaseModel):
     title: str = Field(min_length=3)
     purpose: str = Field(min_length=3)
     question: str = Field(min_length=3)
+    research_context: str = Field(min_length=3)
     labels: list[str] = Field(default_factory=list)
     priority: Priority = "보통"
     expected_evidence: str = Field(min_length=3)

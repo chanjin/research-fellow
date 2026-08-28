@@ -20,6 +20,8 @@ class RetrievalResult:
     score: float
     method: str
     reason: str
+    lexical_score: float | None = None
+    semantic_score: float | None = None
 
 
 def _tokens(text: str) -> set[str]:
@@ -122,7 +124,7 @@ class KnowledgeRetriever:
             matched = sorted(query_tokens & _tokens(_card_text(card)))
             if matched:
                 score = len(matched) / max(len(query_tokens), 1)
-                ranked[card["card_id"]] = RetrievalResult(card, score, "lexical", f"키워드 일치: {', '.join(matched[:5])}")
+                ranked[card["card_id"]] = RetrievalResult(card, score, "lexical", f"키워드 일치: {', '.join(matched[:5])}", lexical_score=score)
         if semantic and cards:
             embedded = self._semantic_vectors(cards, query, embedding_model)
             if embedded:
@@ -131,7 +133,7 @@ class KnowledgeRetriever:
                     score = self._cosine(vector, query_vector)
                     existing = ranked.get(card["card_id"])
                     if existing:
-                        ranked[card["card_id"]] = RetrievalResult(card, max(existing.score, score), "lexical+semantic", f"{existing.reason}; 임베딩 유사도 {score:.2f}")
+                        ranked[card["card_id"]] = RetrievalResult(card, max(existing.score, score), "lexical+semantic", f"{existing.reason}; 임베딩 유사도 {score:.2f}", lexical_score=existing.lexical_score, semantic_score=score)
                     elif score > 0:
-                        ranked[card["card_id"]] = RetrievalResult(card, score, "semantic", f"Ollama 임베딩 유사도 {score:.2f}")
+                        ranked[card["card_id"]] = RetrievalResult(card, score, "semantic", f"Ollama 임베딩 유사도 {score:.2f}", semantic_score=score)
         return sorted(ranked.values(), key=lambda item: item.score, reverse=True)[:limit]

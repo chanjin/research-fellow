@@ -5,14 +5,16 @@ import unittest
 from pathlib import Path
 
 from research_fellow.application.curation import _compact_title, normalize_candidate_draft
+from research_fellow.application.claim_curation import parse_claim_review, parse_discovered_claims, retained_claims
 from research_fellow.application.decisions import decide_request
 from research_fellow.application.management import delete_knowledge_card, delete_knowledge_relation
 from research_fellow.application.prompt_tasks import claim_verification_prompt, gap_search_plan_prompt, lineage_review_prompt
 from research_fellow.application.advising import draft_research_direction, record_research_direction
+from research_fellow.application.progressive_curation import ProgressiveCandidate, consolidate_candidates, submit_progressive_candidates
 from research_fellow.domain.research import ResearchState
 from research_fellow.infrastructure.prompt_templates import PROMPT_CATALOG, validate_prompt_template
 from research_fellow.application.relations import create_relation_candidate, lineage_dot, propose_relation_candidates
-from research_fellow.infrastructure.document_reader import ExtractedDocument, ExtractedPage, _normalize_pdf_text, extract_document, extracted_document_text
+from research_fellow.infrastructure.document_reader import ExtractedDocument, ExtractedPage, _normalize_pdf_text, _remove_extraction_boilerplate, extract_document, extracted_document_text
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever
 from research_fellow.infrastructure.retrieval import RetrievalResult
 from research_fellow.memory import KnowledgeMemory, RelationMemory
@@ -43,7 +45,7 @@ class DecisionFlowTests(unittest.TestCase):
         self.assertTrue(decide_request(self.ledger, self.memory, requests[0], "approved"))
         self.assertTrue(decide_request(self.ledger, self.memory, requests[1], "rejected", "근거가 부족함"))
         self.assertEqual(len(self.memory.all()), 1)
-        self.assertEqual(self.memory.all()[0]["evidence_pages"], [1])
+        self.assertEqual(self.memory.all()[0]["evidence_pages"], [])
         self.assertFalse(decide_request(self.ledger, self.memory, requests[0], "approved"))
         self.assertEqual(len(self.memory.all()), 1)
 
@@ -63,6 +65,19 @@ class DecisionFlowTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0]["payload"]["finding"], "탐색 결과")
 
+    def test_p4_question_creates_report_and_at_most_three_approval_intents(self) -> None:
+        state = ResearchState(question="명세 우선 설계가 에이전트 검토 품질을 높이는가?")
+        draft = draft_research_direction(state, [], [], None)
+        self.assertTrue(draft.report)
+        self.assertLessEqual(len(draft.intents), 3)
+        _, request_ids = record_research_direction(self.ledger, state, [], [], draft)
+        self.assertLessEqual(len(request_ids), 3)
+        pending = self.ledger.phenomena(recipient="researcher", type_="decision_request", status="proposed")
+        self.assertEqual(len(pending), len(request_ids))
+        self.assertTrue(decide_request(self.ledger, self.memory, request_ids[0], "approved"))
+        ready = self.ledger.phenomena(recipient="m1", type_="curation_intent", status="ready")
+        self.assertEqual(len(ready), 1)
+
     def test_text_draft_is_normalized_to_page_grounded_candidate(self) -> None:
         result = normalize_candidate_draft(
             title="note.md", source_kind="연구자의 아이디어 노트",
@@ -72,15 +87,55 @@ class DecisionFlowTests(unittest.TestCase):
         )
         card = result.card
         self.assertEqual(card["source_kind"], "researcher_idea_note")
-        self.assertEqual(card["evidence_pages"], [4])
-        self.assertEqual(card["citation_markers"], ["p.4"])
-        self.assertEqual(card["provenance"]["page_or_section"], "검증 범위")
+        self.assertEqual(card["evidence_pages"], [])
+        self.assertEqual(card["citation_markers"], [])
+        self.assertEqual(card["provenance"], {"source_name": "note.md"})
         self.assertIn("근거 발췌", result.warnings[0])
 
     def test_pdf_hyphenation_and_compact_title(self) -> None:
         self.assertEqual(_normalize_pdf_text("informa-\ntion"), "information")
         self.assertEqual(_normalize_pdf_text("informa\n-\ntion"), "information")
         self.assertTrue(_compact_title("에이전트 명세는 구현 전에 승인 가능한 판단 단위를 명확히 하고 연구자 검토 흐름까지 연결해야 한다.").endswith("…"))
+
+    def test_publication_boilerplate_is_removed_before_llm_curation(self) -> None:
+        raw = (
+            "JULY/AUGUST 2026 | IEEE SOFTWARE 19\n"
+            "This work is licensed under a Creative Commons Attribution 4.0 License.\n"
+            "For more information, see https://creativecommons.org/licenses/by/4.0/\n"
+            "The study evaluates an explicit review workflow."
+        )
+        self.assertEqual(
+            _normalize_pdf_text(_remove_extraction_boilerplate(raw)),
+            "The study evaluates an explicit review workflow.",
+        )
+
+    def test_untraceable_llm_evidence_is_replaced_by_source_excerpt(self) -> None:
+        page = ExtractedPage(1, "The study evaluates review workflows under constrained context windows.")
+        result = normalize_candidate_draft(
+            title="paper.pdf", source_kind="외부 논문", page=page, labels=[], index=1,
+            text_draft="주장: 제한된 문맥에서는 검토 워크플로우가 필요하다.\n근거: 원문에 없는 한국어 근거 문장\n쪽수: 1\n인용: p.1\n조건: 제한된 문맥\n한계: 추가 검증 필요",
+        )
+        self.assertEqual(result.card["evidence_excerpt"], page.text)
+        self.assertTrue(any("원문 발췌" in warning for warning in result.warnings))
+
+    def test_claim_first_flow_keeps_independent_claims_before_card_constraints(self) -> None:
+        claims = parse_discovered_claims(
+            "1. Explicit approval boundaries make research-agent collaboration auditable.\n"
+            "2. Explicit approval boundaries make research-agent collaboration auditable.\n"
+            "3. Creative Commons Attribution 4.0 License"
+        )
+        self.assertEqual(len(claims), 1)
+        reviews = parse_claim_review("Claim: C1\nDecision: retain\nMerge with:\nReason: Independent finding", claims)
+        self.assertEqual(retained_claims(reviews), claims)
+
+    def test_minimal_claim_card_can_be_saved_after_researcher_approval(self) -> None:
+        card = self.memory.add({
+            "card_id": "kc-minimal", "title": "Auditable approval boundaries", "source_kind": "external_paper",
+            "claim": "Explicit approval boundaries improve collaboration auditability.", "labels": ["governance"],
+            "provenance": {"source_name": "paper.pdf", "grounding": "source_document_only"},
+        })
+        self.assertEqual(card["evidence_excerpt"], "")
+        self.assertEqual(card["conditions"], "")
 
     def test_python_extracted_text_export_keeps_page_markers(self) -> None:
         document = ExtractedDocument(
@@ -90,8 +145,8 @@ class DecisionFlowTests(unittest.TestCase):
             extraction_note="텍스트만 사용합니다.",
         )
         text = extracted_document_text(document)
-        self.assertIn("===== Page 1 =====", text)
-        self.assertIn("===== Page 2 · METHOD =====", text)
+        self.assertIn("===== Extracted segment 1 =====", text)
+        self.assertIn("===== Extracted segment 2 · METHOD =====", text)
         self.assertIn("둘째 쪽 텍스트", text)
 
     def test_text_extraction_cache_reuses_derived_content(self) -> None:
@@ -214,6 +269,27 @@ class DecisionFlowTests(unittest.TestCase):
         self.assertEqual(len(queue), 1)
         self.assertTrue(queue[0]["payload"]["expected_evidence"])
         self.assertTrue(queue[0]["payload"]["completion_condition"])
+
+    def test_progressive_llm_duplicate_judgement_keeps_independent_card_set_clean(self) -> None:
+        def candidate(identifier: str, page: int) -> ProgressiveCandidate:
+            return ProgressiveCandidate(identifier, {
+                "card_id": identifier, "title": f"후보 {identifier}", "source_kind": "external_paper",
+                "claim": "같은 검증 가능한 연구 주장을 제시합니다.", "labels": ["evaluation"],
+                "evidence_excerpt": "동일한 원문 근거 발췌입니다.", "evidence_pages": [page], "citation_markers": [f"p.{page}"],
+                "conditions": "같은 적용 조건", "limits": "단일 문헌",
+                "provenance": {"source_name": "paper.pdf", "page_or_section": f"p.{page}"},
+            }, page, [f"p{page}-b01"], [])
+        first, second = candidate("kc-page-1", 1), candidate("kc-page-2", 2)
+        review = "후보: kc-page-1, kc-page-2\n관계: duplicate\n처리: merge_into_first\n이유: 같은 주장을 반복한다."
+        kept, decisions, _ = consolidate_candidates([first, second], review)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(decisions[0].relation, "duplicate")
+        requests = submit_progressive_candidates(self.ledger, ExtractedDocument(
+            "pdf-test", "paper.pdf", "paper", "", "pdf", 2, [], "test"
+        ), kept, decisions, [])
+        self.assertEqual(self.memory.all(), [])
+        self.assertTrue(decide_request(self.ledger, self.memory, requests[0], "approved"))
+        self.assertEqual(len(self.memory.all()), 1)
 
 
 if __name__ == "__main__":

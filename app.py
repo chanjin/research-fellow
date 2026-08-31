@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Callable
 
 import streamlit as st
 
-from research_fellow.llm import OllamaDraftResult, ollama_draft, ollama_draft_result, ollama_status, set_llm_audit_log_path, set_llm_audit_logger
+from research_fellow.llm import OllamaDraftResult, gemini_api_available, gemini_draft_result, ollama_draft, ollama_draft_result, ollama_status, set_llm_audit_log_path, set_llm_audit_logger
 from research_fellow.application.claim_curation import (
     build_simple_claim_cards, discovery_prompt, parse_candidate_claims, submit_claim_cards,
 )
@@ -13,6 +14,12 @@ from research_fellow.application.advising import (
     direction_prompt, draft_research_direction, latest_research_state, recent_knowledge_updates, recent_research_questions,
     parse_research_context_mapping, record_research_direction, record_update_report, research_context_mapping_prompt,
 )
+from research_fellow.application.advisory_workflow import (
+    AdvisoryPlan, advisory_plan_prompt, advisory_synthesis_prompt, collect_evidence_clusters,
+    deterministic_advisory, deterministic_subquestion_judgment, parse_advisory_plan,
+    subquestion_judgment_prompt,
+)
+from research_fellow.application.episodic_memory import recall_act_spec, recall_context, store_advisory_episode, store_researcher_curation_episode
 from research_fellow.application.prompt_tasks import knowledge_update_report_prompt
 from research_fellow.application.meaning_summary import (
     attach_reports, build_fact_groups, delta_inputs, delta_meaning_summary_prompt, deterministic_delta_summary,
@@ -23,13 +30,16 @@ from research_fellow.application.search_profiles import (
 )
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.paper_shelf import document_from_shelf_path, paper_analysis_prompt, store_paper_upload, suggested_paper_labels
+from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, promote_ontology_candidate, reading_prompt
 from research_fellow.application.duplicate_review import similar_approved_cards
 from research_fellow.application.management import delete_knowledge_card, delete_knowledge_relation
 from research_fellow.application.relations import lineage_dot, lineage_overview_prompt, propose_relation_candidates, relation_text_prompt
 from research_fellow.infrastructure.document_reader import extract_document
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever, RetrievalResult
 from research_fellow.infrastructure.knowledge_graph import build_graph, evidence_paths
+from research_fellow.infrastructure.episodic_retrieval import EpisodicRetriever
 from research_fellow.infrastructure.prompt_renderer import render_prompt
+from research_fellow.domain.episodes import EpisodicMemory
 from research_fellow.memory import KnowledgeMemory, RelationMemory
 from research_fellow.services import (
     complete_intent,
@@ -52,6 +62,7 @@ memory = KnowledgeMemory(DATA / "knowledge_cards.jsonl")
 relations = RelationMemory(DATA / "knowledge_relations.jsonl")
 ledger.sync_knowledge_relations(relations.all())
 retriever = KnowledgeRetriever(DATA / "retrieval_index.json")
+episodic_retriever = EpisodicRetriever(DATA / "episodic_retrieval_index.json")
 
 
 def bullet_evidence(results: list[RetrievalResult]) -> str:
@@ -82,6 +93,13 @@ def search_knowledge(query: str, semantic: bool, embedding_model: str, limit: in
     return retriever.search(memory.all(), query, limit=limit, semantic=semantic, embedding_model=embedding_model)
 
 
+def paper_draft_result(
+    prompt: str, model: str, use_ollama: bool, use_external_model: bool, profile: str, on_chunk: Callable[[str], None] | None = None,
+) -> OllamaDraftResult:
+    """Long public-paper prompts may use Gemini only after an explicit UI opt-in."""
+    return gemini_draft_result(prompt, profile=profile) if use_external_model else ollama_draft_result(prompt, model, use_ollama, profile=profile, on_chunk=on_chunk)
+
+
 def show_retrieval_results(results: list[RetrievalResult], detailed: bool = False) -> None:
     if not results:
         st.info("관련 승인 지식을 찾지 못했습니다. 키워드를 바꾸거나 M1 탐색 Intent를 제안하세요.")
@@ -103,6 +121,52 @@ def show_retrieval_results(results: list[RetrievalResult], detailed: bool = Fals
             lexical = "없음" if result.lexical_score is None else f"{result.lexical_score:.2f}"
             semantic = "사용 안 함" if result.semantic_score is None else f"{result.semantic_score:.2f}"
             st.caption(f"검색 방식: {result.method} | 키워드 점수: {lexical} | 임베딩 유사도: {semantic} | 최종 정렬 점수: {result.score:.2f}")
+
+
+def show_evidence_clusters(clusters: list[tuple[object, object]]) -> None:
+    """Show the algorithm-selected local graph neighbourhood, not an LLM guess."""
+    for subquestion, cluster in clusters:
+        with st.expander(f"근거 클러스터 · {subquestion.question}"):
+            if not cluster.members:
+                st.warning("직접 일치 카드나 연결된 승인 카드가 없습니다.")
+                continue
+            for member in cluster.members:
+                card = member.result.card
+                route = "시드 카드" if member.distance == 0 else " → ".join(member.relation_types)
+                st.markdown(f"**[{card['card_id']}] {card['title']}**")
+                st.caption(f"{member.distance}-hop · {route} · {member.result.reason}")
+                st.write(card["claim"])
+
+
+def show_recalled_episodes(act_spec: object) -> None:
+    if not act_spec.recalled_episodes:
+        st.caption("유사한 과거 질문·자문 사례가 리콜되지 않았습니다. 새 계획 경로로 진행합니다.")
+        return
+    st.markdown(f"**일화 리콜 · {act_spec.response_strategy}**")
+    for recall in act_spec.recalled_episodes:
+        episode = recall.episode
+        with st.expander(f"[{episode.episode_id}] 유사도 {recall.score:.2f} · {episode.episode_type}"):
+            st.write(episode.situation_summary)
+            st.caption(f"과거 판단: {episode.decision_question}")
+            st.caption(f"과거 답변 요약(현재 근거가 아닌 선례): {episode.answer_summary[:700]}")
+            if episode.unresolved_items:
+                st.caption("당시 미결 사항: " + "; ".join(episode.unresolved_items))
+
+
+def execute_plan_first_advisory(
+    plan: AdvisoryPlan, context: str, recipient: str, model: str, use_ollama: bool, semantic: bool, embedding_model: str,
+) -> tuple[list[tuple[object, object]], list[str], str]:
+    """LLMs judge and synthesize; card selection remains deterministic in retriever.cluster."""
+    clusters = collect_evidence_clusters(
+        plan, retriever, memory.all(), ledger.active_knowledge_relations({card["card_id"] for card in memory.all()}),
+        context=context, semantic=semantic, embedding_model=embedding_model,
+    )
+    judgments: list[str] = []
+    for subquestion, cluster in clusters:
+        draft = ollama_draft(subquestion_judgment_prompt(subquestion, cluster, context), model, use_ollama)
+        judgments.append(draft or deterministic_subquestion_judgment(subquestion, cluster))
+    answer = ollama_draft(advisory_synthesis_prompt(plan, judgments, [cluster for _, cluster in clusters], recipient), model, use_ollama)
+    return clusters, judgments, answer or deterministic_advisory(plan, judgments)
 
 
 def show_ollama_failure(result: OllamaDraftResult, model: str) -> None:
@@ -154,10 +218,20 @@ def show_decision_request(item: dict[str, object]) -> None:
     if subject_type == "knowledge_relation":
         show_relation_request(payload)
         return
+    if subject_type == "ontology_candidate":
+        candidate = payload.get("ontology_candidate", {})
+        st.markdown(f"**온톨로지 후보 · {candidate.get('statement', '')}**")
+        st.caption(f"출처 논문: {candidate.get('paper_title', '미상')}")
+        if candidate.get("evidence"):
+            st.write("원문 근거: " + " · ".join(candidate["evidence"]))
+        if candidate.get("researcher_comment"):
+            st.caption(f"제안 메모: {candidate['researcher_comment']}")
+        st.info("승인하면 이 일반화는 M1 관계·계보 정리의 온톨로지 정리 대상으로 남습니다. 아직 자동 추론 규칙으로 적용되지는 않습니다.")
+        return
     if subject_type == "knowledge_card":
         card = payload.get("card", {})
-        st.markdown(f"**{card.get('title', '후보 지식카드')}**")
-        st.write(f"주장: {card.get('claim', '')}")
+        st.markdown(f"**주장(Claim) 후보 · {card.get('title', '후보 지식카드')}**")
+        st.write(f"제안 주장: {card.get('claim', '')}")
         if card.get("explanation"):
             st.write(f"보충 설명: {card['explanation']}")
         if card.get("labels"):
@@ -167,7 +241,7 @@ def show_decision_request(item: dict[str, object]) -> None:
             st.caption(f"출처: {provenance.get('source_name', '미상')}")
         if card.get("evidence_excerpt"):
             st.caption(f"근거 발췌: {card['evidence_excerpt']}")
-        st.info("승인하면 이 카드만 승인 지식 JSONL에 저장되고 M2에 지식 업데이트가 통지됩니다.")
+        st.info("승인하면 이 주장이 지식카드로 저장되고 M2에 지식 업데이트가 통지됩니다.")
         return
     if subject_type == "curation_intent":
         intent = payload.get("intent", {})
@@ -406,7 +480,13 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
 def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     st.header("연구위원 홈")
     st.caption("연구자에게 필요한 판단과 M1·M2의 최근 공유현상을 한곳에서 봅니다.")
-    pending = ledger.phenomena(recipient="researcher", type_="decision_request", status="proposed")
+    # Paper reading already includes the researcher's evidence review and card
+    # authoring. It therefore creates knowledge directly, not another approval
+    # task. Legacy card requests remain in the ledger but are not work items.
+    pending = [
+        item for item in ledger.phenomena(recipient="researcher", type_="decision_request", status="proposed")
+        if item["subject_type"] != "knowledge_card"
+    ]
     updates = ledger.phenomena(recipient="researcher", type_="knowledge_update")
     active_relations = relations.active_for_cards({card["card_id"] for card in memory.all()})
     cols = st.columns(4)
@@ -476,41 +556,159 @@ def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> 
         st.caption(item["payload"].get("title") or item["payload"].get("finding", ""))
 
 
-def render_paper_shelf(model: str, use_ollama: bool) -> None:
-    """M1's paper asset view; it is intentionally separate from approved cards."""
-    st.subheader("중요 논문 서재")
-    st.caption("중요 논문·보류 문헌·분석 메모를 보관합니다. 이 화면의 요약과 중요도는 승인 지식이나 논문 사실의 확정이 아닙니다.")
-    with st.expander("논문 직접 등록", expanded=not ledger.shelf_papers()):
-        with st.form("paper-shelf-register"):
-            title = st.text_input("논문 제목")
-            authors = st.text_input("저자 (쉼표로 구분)")
-            year = st.text_input("발행 연도", max_chars=4)
-            source_url = st.text_input("원문·DOI URL (선택)")
-            uploaded = st.file_uploader("원문 파일 보관 (PDF/TXT/MD, 선택)", type=["pdf", "txt", "md"], key="paper-shelf-upload")
-            submitted = st.form_submit_button("서재에 등록")
-        if submitted:
-            try:
-                pdf_path = store_paper_upload(uploaded, DATA / "paper_shelf") if uploaded else ""
-                paper = ledger.upsert_shelf_paper({
-                    "title": title, "authors": [item.strip() for item in authors.split(",") if item.strip()],
-                    "publication_year": year, "source_url": source_url, "pdf_path": pdf_path,
-                    "shelf_status": "reference", "reading_status": "unread",
-                })
-                st.success(f"서재에 등록했습니다: {paper['title']}")
-                st.rerun()
-            except Exception as error:
-                st.error(f"논문 등록에 실패했습니다: {error}")
+def render_curation_precedents(situation: str, *, episode_types: set[str], semantic: bool, embedding_model: str) -> None:
+    """Put prior researcher decisions before the next curation action."""
+    episodes = [
+        EpisodicMemory.model_validate(item)
+        for item in ledger.episode_memories()
+        if item.get("episode_type") in episode_types
+    ]
+    recalls = episodic_retriever.recall(episodes, situation, limit=3, semantic=semantic, embedding_model=embedding_model)
+    if not recalls:
+        return
+    st.markdown("**유사한 과거 연구자 작업**")
+    st.caption("이전 결정을 참고하되, 현재 논문 근거와 조건을 다시 확인하세요.")
+    cards = {card["card_id"]: card for card in memory.all()}
+    for recall in recalls:
+        episode = recall.episode
+        with st.expander(f"선례 · {episode.decision_question[:72]} · {recall.score:.2f}"):
+            st.write(episode.situation_summary)
+            st.write(f"당시 결정: {episode.decision_question}")
+            st.write(f"결과: {episode.answer_summary}")
+            if episode.advisory_plan:
+                st.caption("수행 단계: " + " → ".join(episode.advisory_plan))
+            card_titles = [cards[card_id]["title"] for card_id in episode.evidence_card_ids if card_id in cards]
+            if card_titles:
+                st.caption("당시 등록·참조 카드: " + " · ".join(card_titles))
+            if episode.unresolved_items:
+                st.caption("미결 사항: " + " · ".join(episode.unresolved_items))
 
+
+def render_ontology_context(paper: dict[str, object], candidate: dict[str, object], *, semantic: bool, embedding_model: str, key_prefix: str = "shelf") -> None:
+    """Show local paper claims beside existing, related semantic-memory cards."""
+    all_cards = memory.all()
+    by_id = {card["card_id"]: card for card in all_cards}
+    local_ids = ledger.paper_card_ids(str(paper["paper_id"]))
+    local_cards = [by_id[card_id] for card_id in local_ids if card_id in by_id]
+    st.markdown("**온톨로지 작업 컨텍스트**")
+    render_curation_precedents(
+        f"온톨로지 작업\n논문: {paper['title']}\n후보: {candidate.get('candidate_text', '')}",
+        episode_types={"ontology_curation"}, semantic=semantic, embedding_model=embedding_model,
+    )
+    if local_cards:
+        st.caption("이 논문에서 직접 등록한 지식카드")
+        for card in local_cards:
+            st.write(f"- **{card['title']}** — {card['claim']}")
+            if card.get("concepts") or card.get("conditions"):
+                st.caption(f"개념: {', '.join(card.get('concepts', [])) or '미입력'} · 조건: {card.get('conditions') or '미입력'}")
+    else:
+        st.info("이 논문에서 등록한 지식카드가 아직 없습니다. 먼저 읽기 질문에서 지식카드를 등록하세요.")
+
+    local_id_set = set(local_ids)
+    connected = [
+        relation for relation in relations.all()
+        if relation["source_card_id"] in local_id_set or relation["target_card_id"] in local_id_set
+    ]
+    connected_ids = {
+        card_id for relation in connected for card_id in (relation["source_card_id"], relation["target_card_id"])
+    } - local_id_set
+    if connected_ids:
+        st.caption("승인 관계로 직접 연결된 기존 지식카드")
+        for card_id in sorted(connected_ids):
+            card = by_id.get(card_id)
+            if card:
+                st.write(f"- **{card['title']}** — {card['claim']}")
+        for relation in connected:
+            st.caption(f"관계: {relation['relation_type']} · {relation['evidence'][:180]}")
+
+    query = "\n".join([
+        str(candidate.get("candidate_text", "")),
+        *[" ".join([card["title"], card["claim"], *card.get("concepts", []), card.get("conditions", "")]) for card in local_cards],
+    ]).strip()
+    key = f"{key_prefix}-ontology-related-{candidate['candidate_id']}"
+    if query and st.button("관련 기존 지식카드 탐색", key=f"{key}-search"):
+        found = retriever.search(all_cards, query, limit=8, semantic=semantic, embedding_model=embedding_model)
+        st.session_state[key] = [
+            {"card_id": result.card["card_id"], "reason": result.reason, "score": round(result.score, 3)}
+            for result in found if result.card["card_id"] not in local_id_set and result.card["card_id"] not in connected_ids
+        ]
+    related_results = st.session_state.get(key, [])
+    if related_results:
+        st.caption("의미·키워드 유사도로 찾은 기존 지식카드")
+    for result in related_results:
+        card = by_id.get(result["card_id"])
+        if card:
+            st.write(f"- **{card['title']}** — {card['claim']}")
+            st.caption(f"선정 이유: {result['reason']} · 점수 {result['score']}")
+
+
+def render_ontology_workspace(semantic: bool, embedding_model: str) -> None:
+    """Cross-paper workspace for converting reviewed candidates into domain structure."""
+    st.subheader("온톨로지 구성")
+    st.caption("논문별 후보를 기존 지식카드와 대조해 개념·관계·조건을 연구자가 일반화하는 작업대입니다. 자동으로 관계를 확정하지 않습니다.")
+    candidates = ledger.all_paper_ontology_candidates()
+    if not candidates:
+        st.info("아직 온톨로지 후보가 없습니다. 서재함의 읽기 질문에서 지식카드를 등록한 뒤, ‘온톨로지 후보로 제안’을 선택하세요.")
+        return
+    status_labels = {
+        "proposed": "정리 전", "pending_approval": "연구위원 데스크 검토 대기",
+        "approved": "승인됨", "needs_revision": "수정 필요", "rejected": "제외",
+    }
+    status_filter = st.selectbox("후보 현황", ["all", *status_labels], format_func=lambda value: "전체" if value == "all" else status_labels[value], key="ontology-workspace-status")
+    visible = [item for item in candidates if status_filter == "all" or item["status"] == status_filter]
+    if not visible:
+        st.info("선택한 현황의 후보가 없습니다.")
+        return
+    options = {f"{item['paper_title']} · {status_labels.get(item['status'], item['status'])} · {item['candidate_text'][:64]}": item for item in visible}
+    selection = st.selectbox("작업할 온톨로지 후보", list(options), key="ontology-workspace-candidate")
+    candidate = options[selection]
+    paper = ledger.shelf_paper(candidate["paper_id"])
+    if not paper:
+        st.error("후보의 원 논문을 찾을 수 없습니다.")
+        return
+    st.markdown("### 후보와 원문 근거")
+    st.write(candidate["candidate_text"])
+    st.caption("원문 근거: " + " · ".join(candidate["evidence"]))
+    render_ontology_context(paper, candidate, semantic=semantic, embedding_model=embedding_model, key_prefix="workspace")
+    st.markdown("### 연구자 일반화")
+    with st.form(f"ontology-workspace-edit-{candidate['candidate_id']}"):
+        candidate_text = st.text_area("일반화한 개념·관계·조건", value=candidate["candidate_text"], help="개별 논문의 사실을 그대로 반복하기보다, 어느 대상·조건에서 어떤 개념들이 어떤 관계를 갖는지 작성합니다.")
+        researcher_comment = st.text_area("연구자 메모", value=candidate["researcher_comment"], help="왜 이 일반화가 유지되는지, 보류할 근거는 무엇인지 기록합니다.")
+        next_status = st.selectbox("다음 상태", list(status_labels), index=list(status_labels).index(candidate["status"]), format_func=status_labels.get)
+        saved = st.form_submit_button("온톨로지 후보 저장")
+    if saved:
+        if len(candidate_text.strip()) < 8:
+            st.error("일반화한 표현을 8자 이상 입력하세요.")
+        else:
+            ledger.update_paper_ontology_candidate(candidate["candidate_id"], researcher_comment=researcher_comment, status=next_status, candidate_text=candidate_text)
+            st.success("온톨로지 후보를 저장했습니다. 승인된 후보의 실제 카드 관계는 ‘관계·계보 정리’에서 연결하세요.")
+            st.rerun()
+
+
+def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    """Paper assets are read and reviewed here, not converted to claims on intake."""
+    st.subheader("서재함")
+    st.caption("탐색 결과와 직접 업로드 자료가 한곳에 모입니다. 카드화는 논문 읽기·연구자 첨삭 이후에만 가능합니다.")
     status_labels = {"core": "핵심 참고", "reference": "참고", "held": "보류", "excluded": "제외"}
     reading_labels = {"unread": "미읽음", "reading": "읽는 중", "read": "읽음"}
     all_papers = ledger.shelf_papers()
-    filter_status = st.selectbox("상태 필터", ["all", *status_labels], format_func=lambda value: "전체" if value == "all" else status_labels[value], key="paper-shelf-filter")
+    reviewed_ids = {paper["paper_id"] for paper in all_papers if ledger.paper_reading_questions(paper["paper_id"]) or ledger.paper_card_ids(paper["paper_id"])}
+    knowledge_ids = {paper["paper_id"] for paper in all_papers if ledger.paper_card_ids(paper["paper_id"])}
+    metric_a, metric_b, metric_c = st.columns(3)
+    metric_a.metric("서재함", len(all_papers))
+    metric_b.metric("리뷰 진행·완료", len(reviewed_ids))
+    metric_c.metric("승인 지식 연결", len(knowledge_ids))
+    query = st.text_input("논문 검색", placeholder="제목, 저자, 레이블", key="paper-shelf-query")
+    filter_status = st.selectbox("중요도", ["all", *status_labels], format_func=lambda value: "전체" if value == "all" else status_labels[value], key="paper-shelf-filter")
+    review_filter = st.selectbox("검토·지식화 현황", ["all", "reviewed", "knowledge_linked", "not_reviewed"], format_func={"all": "전체", "reviewed": "리뷰됨", "knowledge_linked": "승인 지식 연결됨", "not_reviewed": "아직 읽기 전"}.get)
     all_labels = sorted({label for paper in all_papers for label in paper.get("labels", [])}, key=str.casefold)
     selected_labels = st.multiselect("레이블 필터 (선택한 레이블을 모두 포함)", all_labels, key="paper-shelf-label-filter")
     papers = [
         paper for paper in all_papers
         if (filter_status == "all" or paper["shelf_status"] == filter_status)
         and set(selected_labels).issubset(set(paper.get("labels", [])))
+        and (not query.strip() or query.casefold() in " ".join([paper["title"], *paper.get("authors", []), *paper.get("labels", [])]).casefold())
+        and (review_filter == "all" or (review_filter == "reviewed" and paper["paper_id"] in reviewed_ids) or (review_filter == "knowledge_linked" and paper["paper_id"] in knowledge_ids) or (review_filter == "not_reviewed" and paper["paper_id"] not in reviewed_ids))
     ]
     if not papers:
         st.info("등록된 논문이 없습니다. 탐색 로그의 후보를 추가하거나 원문을 직접 등록하세요.")
@@ -521,6 +719,13 @@ def render_paper_shelf(model: str, use_ollama: bool) -> None:
         with st.expander(f"{status_labels.get(paper['shelf_status'], paper['shelf_status'])} · {paper['title']}"):
             st.caption(f"{paper.get('publication_year') or '연도 미상'} · {', '.join(paper.get('authors', [])) or '저자 미상'} · {reading_labels.get(paper['reading_status'], paper['reading_status'])}")
             st.caption(f"레이블: {', '.join(paper.get('labels', [])) or '아직 없음'}")
+            analysis = ledger.paper_analysis(paper["paper_id"]) or {}
+            if analysis.get("summary"):
+                st.markdown("### 논문 읽기 요약")
+                st.markdown(analysis["summary"])
+            if analysis.get("reading_raw_output"):
+                with st.expander("모델이 생성한 논문 읽기 원문 보기"):
+                    st.text(analysis["reading_raw_output"])
             controls, actions = st.columns([3, 2])
             with controls:
                 with st.form(f"paper-shelf-state-{paper['paper_id']}"):
@@ -539,12 +744,26 @@ def render_paper_shelf(model: str, use_ollama: bool) -> None:
                     st.download_button("보관 원문 내려받기", data=path.read_bytes(), file_name=path.name, key=f"shelf-download-{paper['paper_id']}")
                 else:
                     st.caption("보관 원문 없음")
-            analysis = ledger.paper_analysis(paper["paper_id"]) or {}
+            external_default = gemini_api_available() and paper.get("asset_type", "paper") == "paper"
+            use_external_model = st.checkbox(
+                "Gemini 외부 API로 원문을 전송해 긴 문맥 독해 사용",
+                value=external_default,
+                key=f"paper-external-model-{paper['paper_id']}",
+                help="선택하면 공개 원문과 이 작업의 프롬프트가 외부 Gemini API로 전송됩니다. 해제하면 로컬 Ollama를 사용합니다.",
+            )
+            if use_external_model:
+                if gemini_api_available():
+                    st.caption("외부 모델 사용 · Gemini API · 공개 논문 본문 전송")
+                else:
+                    st.warning("GEMINI_API_KEY가 없어 외부 모델을 사용할 수 없습니다. 체크를 해제하면 로컬 Ollama를 사용합니다.")
+                    use_external_model = False
+            elif paper.get("asset_type") == "research_note":
+                st.caption("연구 노트는 기본적으로 외부 전송을 선택하지 않습니다.")
             question = st.text_area("이 논문을 읽는 연구 질문·활용 맥락", value=analysis.get("research_question", ""), key=f"shelf-question-{paper['paper_id']}")
             if st.button("본문 기반 서재 분석 요약 만들기", key=f"shelf-analyze-{paper['paper_id']}", disabled=not (path and path.exists())):
                 try:
                     document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
-                    result = ollama_draft_result(paper_analysis_prompt(document, paper, question), model, use_ollama, profile="p1_card_draft")
+                    result = paper_draft_result(paper_analysis_prompt(document, paper, question), model, use_ollama, use_external_model, profile="p1_card_draft")
                     if result.ok:
                         ledger.save_paper_analysis(paper["paper_id"], research_question=question, summary=result.text or "", researcher_note=analysis.get("researcher_note", ""), generated=True)
                         proposed_labels = suggested_paper_labels(result.text or "")
@@ -556,9 +775,162 @@ def render_paper_shelf(model: str, use_ollama: bool) -> None:
                         show_ollama_failure(result, model)
                 except Exception as error:
                     st.error(f"서재 분석에 실패했습니다: {error}")
-            if analysis.get("summary"):
-                st.markdown("**M1 분석 요약 (문헌 확인 / 해석 분리)**")
-                st.markdown(analysis["summary"])
+            st.markdown("**논문 읽기 · 질문–근거–첨삭**")
+            if st.button("M1 읽기 질문 만들기", key=f"paper-reading-{paper['paper_id']}", disabled=not (path and path.exists())):
+                try:
+                    document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
+                    streamed_parts: list[str] = []
+                    live_output = st.empty()
+
+                    def show_stream(fragment: str) -> None:
+                        streamed_parts.append(fragment)
+                        live_output.text("".join(streamed_parts))
+
+                    with st.spinner("논문을 읽고 있습니다. 생성되는 내용은 아래에 바로 표시됩니다."):
+                        result = paper_draft_result(
+                            reading_prompt(document, paper, question), model, use_ollama, use_external_model,
+                            profile="paper_reading", on_chunk=None if use_external_model else show_stream,
+                        )
+                    live_output.empty()
+                    if result.ok:
+                        summary = parse_reading_summary(result.text or "")
+                        # Keep the original model response even when its question blocks cannot be parsed.
+                        # It is a research reading record, not disposable transport output.
+                        ledger.save_paper_analysis(paper["paper_id"], research_question=question, summary=summary, reading_raw_output=result.text or "", researcher_note=analysis.get("researcher_note", ""), generated=True)
+                    questions = parse_reading_questions(result.text or "") if result.ok else []
+                    if questions:
+                        saved_question_ids = ledger.add_paper_reading_questions(paper["paper_id"], questions)
+                        if saved_question_ids:
+                            st.success(f"논문 요약과 원문 근거 읽기 질문 {len(saved_question_ids)}건을 추가했습니다.")
+                        else:
+                            st.info("논문 요약은 갱신했고, 같은 읽기 질문은 이미 저장되어 있어 중복 추가하지 않았습니다.")
+                        st.rerun()
+                    elif result.ok:
+                        st.warning("원문 근거 형식의 읽기 질문을 해석하지 못했습니다.")
+                    else:
+                        show_ollama_failure(result, model)
+                except Exception as error:
+                    st.error(f"논문 읽기 질문 생성에 실패했습니다: {error}")
+            reading_questions = ledger.paper_reading_questions(paper["paper_id"])
+            reading_decision_labels = {
+                "proposed": "결정 전", "registered": "지식카드 등록", "irrelevant": "무관",
+                # Historical states remain readable but are not used by the new flow.
+                "promoted": "이전 승인 흐름", "approved": "이전 승인 흐름", "needs_revision": "이전 보완 흐름",
+            }
+            for item in reading_questions:
+                with st.expander(f"{reading_decision_labels.get(item['status'], item['status'])} · {item['question']}", expanded=item["status"] == "proposed"):
+                    st.write(item["tentative_answer"])
+                    st.caption("근거: " + " · ".join(item["evidence"]))
+                    st.caption("유보: " + item["uncertainty"])
+                    render_curation_precedents(
+                        f"지식카드화 작업\n논문: {paper['title']}\n읽기 질문: {item['question']}\n잠정 해석: {item['tentative_answer']}",
+                        episode_types={"paper_card_registration"}, semantic=semantic, embedding_model=embedding_model,
+                    )
+                    if item["status"] == "registered":
+                        st.success("이 읽기 해석은 지식카드로 등록되었습니다.")
+                        continue
+                    with st.form(f"reading-review-{item['question_id']}"):
+                        decision_options = ["register", "irrelevant"]
+                        existing_decision = "register" if item["status"] == "promoted" else "irrelevant" if item["status"] == "irrelevant" else "register"
+                        decision = st.radio("연구자 결정", decision_options, index=decision_options.index(existing_decision), horizontal=True, format_func={"register": "지식카드 등록", "irrelevant": "무관"}.get)
+                        comment = st.text_area("근거 해석·첨삭", value=item["researcher_comment"])
+                        st.caption("질문은 논문을 읽는 렌즈이고, 원문 근거·첨삭은 Claim의 보충 설명으로 남습니다. 카드의 제목은 연구자가 확정한 Claim 자체입니다.")
+                        card_claim = st.text_area("주장 (Claim · 카드 제목)", value=item["tentative_answer"], disabled=decision != "register", help="한 문장으로 독립적으로 이해되는 주장입니다. 예: ‘LLM은 단일 설계 문제에서 적절한 설계 대안을 생성할 수 있다.’")
+                        card_labels = st.text_input("레이블 (쉼표 구분, 선택)", disabled=decision != "register", help="관리·검색용 분류어입니다. 예: LLM, 소프트웨어 아키텍처, 실증연구. 온톨로지의 핵심 개념과 꼭 일치할 필요는 없습니다.")
+                        card_concepts = st.text_input("핵심 개념 (쉼표 구분)", disabled=decision != "register", help="나중에 온톨로지에서 관계를 만들 도메인 개념입니다. 예: 설계 개념, 품질 속성, 트레이드오프.")
+                        card_applies_to = st.text_input("적용 대상 (쉼표 구분)", disabled=decision != "register", help="이 Claim이 다루는 객체·상황·과업의 유형입니다. 예: LLM 기반 소프트웨어 아키텍처 설계 지원.")
+                        card_conditions = st.text_area("적용 조건", disabled=decision != "register", help="주장이 성립한 전제·관찰 범위입니다. 예: 품질 속성과 설계 대안이 명시된 단일 설계 문제.")
+                        card_limits = st.text_area("한계·유보", value=item["uncertainty"], disabled=decision != "register")
+                        evidence_levels = {
+                            "empirical": "실증 — 논문의 데이터·실험·사례가 직접 뒷받침",
+                            "theoretical": "이론 — 개념적·논리적 논증이 중심",
+                            "review": "문헌 종합 — 여러 선행 연구를 검토·종합",
+                            "provisional": "잠정 — 연구자의 해석이거나 추가 검증 필요",
+                        }
+                        card_evidence_level = st.selectbox("근거 수준", list(evidence_levels), index=0, format_func=evidence_levels.get, disabled=decision != "register", help="논문이 Claim을 직접 얼마나 강하게 뒷받침하는지 고릅니다. 단일 실험 결과면 실증, 저자의 논증이면 이론, 리뷰 논문이면 문헌 종합, 본문을 넘어선 연구자 해석이면 잠정이 적합합니다.")
+                        ontology = st.checkbox("온톨로지 후보로 제안")
+                        ontology_text = st.text_input(
+                            "온톨로지 후보 표현 (개념·관계·조건을 일반화해 작성)",
+                            placeholder="예: 설계 문제는 품질속성·제약조건·설계개념의 트레이드오프로 구성된다.",
+                            disabled=not ontology,
+                            key=f"ontology-text-{item['question_id']}",
+                        )
+                        saved = st.form_submit_button("판단 저장")
+                    if saved:
+                        if decision == "register" and len(card_claim.strip()) < 8:
+                            st.error("지식카드 등록에는 8자 이상의 주장(Claim)이 필요합니다.")
+                            continue
+                        action_case_id = ledger.create_case("research", f"Researcher paper curation: {paper['title'][:72]}")
+                        if decision == "register":
+                            card = memory.add({
+                                "title": card_claim.strip(), "source_kind": "external_paper" if paper.get("asset_type") == "paper" else "researcher_idea_note",
+                                "claim": card_claim.strip(), "explanation": "\n".join(part for part in [f"읽기 질문: {item['question']}", f"연구자 해석·첨삭: {comment.strip()}" if comment.strip() else ""] if part),
+                                "labels": [value.strip() for value in card_labels.split(",") if value.strip()],
+                                "concepts": [value.strip() for value in card_concepts.split(",") if value.strip()],
+                                "applies_to": [value.strip() for value in card_applies_to.split(",") if value.strip()],
+                                "evidence_level": card_evidence_level, "status": "verified",
+                                "evidence_excerpt": "\n".join(item["evidence"])[:1600], "evidence_pages": [],
+                                "citation_markers": item["evidence"], "conditions": card_conditions.strip(), "limits": card_limits.strip(),
+                                "provenance": {"source_name": paper["title"], "paper_id": paper["paper_id"], "grounding": "paper_reading_researcher_registration", "reading_question": item["question"]},
+                            })
+                            existing_cards = ledger.paper_card_ids(paper["paper_id"])
+                            ledger.set_paper_card_links(paper["paper_id"], [*existing_cards, card["card_id"]])
+                            ledger.record(action_case_id, "knowledge_update", "m1", ["m2", "researcher"], "knowledge_card", {"title": f"논문 읽기에서 등록한 지식카드: {card['title']}", "card_id": card["card_id"], "paper_id": paper["paper_id"]}, card["card_id"], status="completed")
+                            ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="registered")
+                            store_researcher_curation_episode(
+                                ledger, case_id=action_case_id, episode_type="paper_card_registration", paper_title=paper["title"],
+                                situation=f"읽기 질문: {item['question']}\n원문 근거: {'; '.join(item['evidence'])}",
+                                decision="이 해석을 지식카드로 등록한다.", action_summary=f"등록 카드: {card['title']}\n주장: {card['claim']}",
+                                action_steps=["원문 근거 확인", "잠정 해석 첨삭", "Claim·개념·조건·한계 입력", "지식카드 등록"],
+                                evidence_card_ids=[card["card_id"]], unresolved_items=[card["limits"]] if card.get("limits") else [],
+                            )
+                        else:
+                            ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="irrelevant")
+                            store_researcher_curation_episode(
+                                ledger, case_id=action_case_id, episode_type="paper_card_registration", paper_title=paper["title"],
+                                situation=f"읽기 질문: {item['question']}\n원문 근거: {'; '.join(item['evidence'])}",
+                                decision="이 해석은 현재 연구 주제의 지식카드로 등록하지 않는다.", action_summary=f"무관 판단 사유: {comment or '연구자 판단에 따라 현재 지식화 범위에서 제외'}",
+                                action_steps=["원문 근거 확인", "현재 연구 주제와의 관련성 판단", "무관 처리"], evidence_card_ids=[], unresolved_items=[],
+                            )
+                        if ontology:
+                            if ontology_text.strip():
+                                candidate_id = ledger.add_paper_ontology_candidate(paper["paper_id"], item["question_id"], ontology_text.strip(), item["evidence"])
+                                store_researcher_curation_episode(
+                                    ledger, case_id=action_case_id, episode_type="ontology_curation", paper_title=paper["title"],
+                                    situation=f"읽기 질문: {item['question']}\n원문 근거: {'; '.join(item['evidence'])}",
+                                    decision="원문 해석을 도메인 온톨로지 후보로 일반화한다.", action_summary=f"온톨로지 후보 [{candidate_id}]: {ontology_text.strip()}",
+                                    action_steps=["관련 지식카드 대조", "공통 개념·관계·조건 일반화", "온톨로지 후보 기록"],
+                                    evidence_card_ids=ledger.paper_card_ids(paper["paper_id"]), unresolved_items=[],
+                                )
+                            else:
+                                st.warning("온톨로지 후보를 제안하려면 일반화한 개념·관계·조건 표현을 입력하세요.")
+                        st.success("연구자 판단을 저장했습니다.")
+                        st.rerun()
+            ontology_candidates = ledger.paper_ontology_candidates(paper["paper_id"])
+            if ontology_candidates:
+                st.markdown("**온톨로지 후보 · 연구자 일반화 대기**")
+                for candidate in ontology_candidates:
+                    with st.expander(f"{candidate['status']} · {candidate['candidate_text']}"):
+                        st.caption("근거: " + " · ".join(candidate["evidence"]))
+                        render_ontology_context(paper, candidate, semantic=semantic, embedding_model=embedding_model, key_prefix="shelf")
+                        with st.form(f"ontology-review-{candidate['candidate_id']}"):
+                            ontology_comment = st.text_area("연구자 메모", value=candidate["researcher_comment"])
+                            submit_ontology = st.checkbox("연구위원 데스크의 온톨로지 승인 안건으로 보내기", disabled=candidate["status"] != "proposed")
+                            ontology_saved = st.form_submit_button("온톨로지 후보 저장")
+                        if ontology_saved:
+                            if submit_ontology:
+                                promote_ontology_candidate(ledger, paper, candidate, ontology_comment)
+                                ledger.update_paper_ontology_candidate(candidate["candidate_id"], researcher_comment=ontology_comment, status="pending_approval")
+                                st.success("연구위원 데스크에 온톨로지 승인 안건을 보냈습니다.")
+                            else:
+                                ledger.update_paper_ontology_candidate(candidate["candidate_id"], researcher_comment=ontology_comment, status=candidate["status"])
+                                st.success("온톨로지 후보 메모를 저장했습니다.")
+                            st.rerun()
+            events = ledger.paper_asset_events(paper["paper_id"])
+            if events:
+                with st.expander(f"이 논문의 이력 · {len(events)}건"):
+                    for event in events:
+                        st.caption(f"{event['created_at'][:16].replace('T', ' ')} · {event['event_type']}")
             with st.form(f"paper-shelf-note-{paper['paper_id']}"):
                 labels = st.text_input("서재 레이블 (쉼표로 구분 · 최대 5개)", value=", ".join(paper.get("labels", [])), key=f"shelf-labels-{paper['paper_id']}")
                 note = st.text_area("연구자 메모", value=analysis.get("researcher_note", ""), key=f"shelf-note-{paper['paper_id']}")
@@ -575,23 +947,27 @@ def render_paper_shelf(model: str, use_ollama: bool) -> None:
 def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     st.header("M1 · 문헌조사·지식화 작업실")
     st.caption("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.")
-    upload_tab, relation_tab, search_tab, queue_tab, shelf_tab, memory_tab = st.tabs(["자료 지식화", "관계·계보 정리", "승인 지식 조회", "문헌 탐색 작업", "중요 논문 서재", "승인 지식 목록"])
+    upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs(["서재함", "온톨로지 구성", "관계·계보 정리", "승인 지식 조회", "문헌 탐색 작업", "승인 지식 목록"])
     with upload_tab:
+        st.caption("논문·연구 노트를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 업로드 자체는 지식카드 생성이 아닙니다.")
         uploaded = st.file_uploader("논문 PDF·연구 노트", type=["pdf", "txt", "md"])
         source_kind = st.selectbox("자료 성격", ["외부 논문", "연구자의 확정 문서", "연구자의 아이디어 노트"])
-        if uploaded and st.button("이 원문을 중요 논문 서재에 보관", key="claim-first-add-shelf"):
+        core_paper = st.checkbox("핵심 문헌으로 표시", key="asset-intake-core")
+        if uploaded and st.button("서재함에 추가", key="claim-first-add-shelf"):
             try:
                 document = extract_document(uploaded, cache_dir=EXTRACTION_CACHE)
                 paper = ledger.upsert_shelf_paper({
                     "title": document.title, "authors": [document.author] if document.author else [],
                     "source_id": document.document_id, "pdf_path": store_paper_upload(uploaded, DATA / "paper_shelf"),
-                    "shelf_status": "reference", "reading_status": "unread",
+                    "shelf_status": "core" if core_paper else "reference", "reading_status": "unread",
+                    "asset_type": "paper" if source_kind == "외부 논문" else "research_note", "intake_source": "upload",
                 })
-                st.success(f"중요 논문 서재에 보관했습니다: {paper['title']}")
+                st.success(f"서재함에 추가했습니다: {paper['title']}")
             except Exception as error:
-                st.error(f"원문을 서재에 보관하지 못했습니다: {error}")
-        st.caption("문서를 선택하면 Python이 본문을 추출한 뒤, LLM이 최대 10개의 주장·설명·레이블 카드 초안을 만듭니다.")
-        if st.button("지식 카드 초안 만들기 (최대 10개)", disabled=uploaded is None, type="primary", key="claim-first-discover"):
+                st.error(f"원문을 서재함에 보관하지 못했습니다: {error}")
+        render_paper_shelf(model, use_ollama, semantic, embedding_model)
+        st.info("직접 주장 추출은 이 흐름에서 사용하지 않습니다. 논문을 선택해 읽기 질문·근거·첨삭을 거친 항목만 그 자리에서 지식카드로 등록합니다.")
+        if False and st.button("지식 카드 초안 만들기 (최대 10개)", disabled=uploaded is None, type="primary", key="claim-first-discover"):
             try:
                 document = extract_document(uploaded, cache_dir=EXTRACTION_CACHE)
                 result = ollama_draft_result(discovery_prompt(document), model, use_ollama)
@@ -613,7 +989,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 st.error(f"Claim discovery failed: {error}")
         claim_document = st.session_state.get("claim-first-document")
         claim_cards = st.session_state.get("claim-first-cards", [])
-        if claim_cards and claim_document and uploaded and claim_document.document_id == extract_document(uploaded, cache_dir=EXTRACTION_CACHE).document_id:
+        if False and claim_cards and claim_document and uploaded and claim_document.document_id == extract_document(uploaded, cache_dir=EXTRACTION_CACHE).document_id:
             st.subheader("후보 지식 카드")
             st.caption("기존 승인 지식과의 중복 가능성을 먼저 점검합니다. 유사 후보는 새 카드 기본 선택에서 제외하고, 기존 카드에 이 문헌의 근거·조건을 보강할지 검토하도록 안내합니다.")
             duplicate_matches = similar_approved_cards(claim_cards, memory.all())
@@ -723,6 +1099,8 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                         st.caption("이 문서 범위의 최종 후보는 이미 승인함에 보냈습니다.")
             except Exception as error:
                 st.error(f"점진적 지식화에 실패했습니다: {error}")
+    with ontology_tab:
+        render_ontology_workspace(semantic, embedding_model)
     with relation_tab:
         cards = memory.all()
         selection_mode = st.radio(
@@ -839,7 +1217,17 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     st.rerun()
     with queue_tab:
         st.subheader("연구 Intent 탐색 작업 큐")
-        st.caption("승인된 연구 Intent가 탐색 프로필로 대기합니다. 실행은 arXiv 초록 최대 100편 LLM 맥락 검토 → 상위 5편 본문 비교 → 유사도 상위 3편의 P1 카드 초안 순서입니다. 마지막 지식 편입은 연구자 승인함에서만 처리합니다.")
+        st.caption("승인된 연구 Intent가 탐색 프로필로 대기합니다. 실행 결과는 논문 후보 서재함으로 보내며, 이 단계에서는 지식카드를 만들지 않습니다.")
+        use_external_full_text = st.checkbox(
+            "Gemini 외부 API로 공개 논문 본문 비교 사용",
+            value=gemini_api_available(), key="search-external-full-text",
+            help="선택하면 arXiv 공개 논문 본문과 탐색 맥락이 Gemini API로 전송됩니다. 해제하면 로컬 Ollama를 사용합니다.",
+        )
+        if use_external_full_text and not gemini_api_available():
+            st.warning("GEMINI_API_KEY가 없어 외부 모델을 사용할 수 없습니다. 체크를 해제하면 로컬 Ollama를 사용합니다.")
+            use_external_full_text = False
+        if use_external_full_text:
+            st.caption("외부 모델 사용 · Gemini API · 공개 arXiv 본문 전송")
         ready_intents = ledger.phenomena(recipient="m1", type_="curation_intent", status="ready")
         profiles = ledger.search_profiles()
         all_profiles = ledger.search_profiles(include_deleted=True)
@@ -914,19 +1302,11 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     running.markdown('<div class="rf-running">🟠 수행 중 · arXiv 검색과 논문 본문 비교를 진행하고 있습니다</div>', unsafe_allow_html=True)
                     outcome = run_profile(ledger, current, "manual", reviewer=lambda prompt: ollama_draft(prompt, model, use_ollama, profile="abstract_triage"))
                     if outcome["status"] == "completed":
-                        processed = process_top_papers(current, outcome["candidates"], DATA, lambda prompt: ollama_draft(prompt, model, use_ollama, profile="full_text_similarity"), make_cards=False)
-                        top_three = sorted(processed, key=lambda item: item.get("full_text_similarity", 0), reverse=True)[:3]
-                        drafted = process_top_papers(current, top_three, DATA, lambda prompt: ollama_draft(prompt, model, use_ollama, profile="p1_card_draft"), make_cards=True, review_full_text=False)
-                        drafted = [{**item, "auto_selected_for_cards": True} for item in drafted]
-                        for candidate in drafted:
-                            if candidate.get("candidate_cards"):
-                                doc = type("BatchDocument", (), {"title": candidate["title"]})()
-                                submit_claim_cards(ledger, doc, candidate["candidate_cards"], ["자동 탐색·PDF 본문 비교를 거친 후보입니다. 원문 발췌·조건·한계를 승인 시 검토하세요."], memory.all())
+                        processed = process_top_papers(current, outcome["candidates"], DATA, lambda prompt: paper_draft_result(prompt, model, use_ollama, use_external_full_text, "full_text_similarity").text, make_cards=False)
                         merged = {item["source_id"]: item for item in outcome["candidates"]}
                         merged.update({item["source_id"]: item for item in processed})
-                        merged.update({item["source_id"]: item for item in drafted})
                         ledger.update_search_run_candidates(outcome["run_id"], list(merged.values()))
-                        st.success(f"초록 후보 {len(outcome['candidates'])}건을 기록하고, 본문 유사도 상위 3편의 P1 카드 초안까지 준비했습니다.")
+                        st.success(f"초록 후보 {len(outcome['candidates'])}건을 기록하고, 상위 후보의 본문 비교 정보를 준비했습니다. 읽을 논문은 서재함에 추가하세요.")
                     elif outcome["status"] == "completed_no_candidates":
                         st.warning("arXiv 호출은 완료됐지만 이번 검색 전략으로는 후보가 없었습니다. 실행 이력에서 각 단계의 결과 수를 확인하세요. 이는 관련 논문이 없다는 뜻은 아닙니다.")
                     else:
@@ -956,14 +1336,14 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                     pdf_path = Path(candidate["pdf_path"])
                                     if pdf_path.exists():
                                         st.download_button("저장 PDF 내려받기 (P1 업로드용)", data=pdf_path.read_bytes(), file_name=pdf_path.name, mime="application/pdf", key=f"download-pdf-{run['run_id']}-{candidate['source_id']}")
-                                if st.button("중요 논문 서재에 추가", key=f"shelf-add-{run['run_id']}-{candidate['source_id']}"):
+                                if st.button("서재함에 추가", key=f"shelf-add-{run['run_id']}-{candidate['source_id']}"):
                                     saved = ledger.upsert_shelf_paper({
                                         "title": candidate["title"], "authors": candidate.get("authors", []),
                                         "publication_year": candidate.get("published", "")[:4], "source_url": candidate.get("url", ""),
                                         "source_id": candidate.get("source_id", ""), "pdf_path": candidate.get("pdf_path", ""),
-                                        "shelf_status": "reference", "reading_status": "unread",
+                                        "shelf_status": "reference", "reading_status": "unread", "asset_type": "paper", "intake_source": "search",
                                     })
-                                    st.success(f"서재에 추가했습니다: {saved['title']}")
+                                    st.success(f"서재함에 추가했습니다: {saved['title']}")
                                 scopes = " · ".join(candidate.get("query_scopes", [candidate.get("query_scope", "기존 실행")]))
                                 st.caption(f"발견 범위: {scopes} · 1차 맥락 점수: {candidate.get('context_match_score', '-')}")
                                 st.caption(candidate["summary"][:360])
@@ -987,17 +1367,9 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                     st.warning("초록 적합성 초안을 만들지 못했습니다.")
                             if st.button("상위 5편 PDF 수집·본문 비교 보고 만들기", key=f"p1-batch-{run['run_id']}", disabled=not run["candidates"]):
                                 progress = st.progress(0, text="상위 5편을 순차 처리합니다.")
-                                processed = process_top_papers(current, run["candidates"], DATA, lambda prompt: ollama_draft(prompt, model, use_ollama, profile="full_text_similarity"), make_cards=False)
-                                top_three = sorted(processed, key=lambda item: item.get("full_text_similarity", 0), reverse=True)[:3]
-                                drafted = process_top_papers(current, top_three, DATA, lambda prompt: ollama_draft(prompt, model, use_ollama, profile="p1_card_draft"), make_cards=True, review_full_text=False)
-                                drafted = [{**item, "auto_selected_for_cards": True} for item in drafted]
-                                for candidate in drafted:
-                                    if candidate.get("candidate_cards"):
-                                        doc = type("BatchDocument", (), {"title": candidate["title"]})()
-                                        submit_claim_cards(ledger, doc, candidate["candidate_cards"], ["자동 탐색·PDF 본문 비교를 거친 후보입니다. 원문 발췌·조건·한계를 승인 시 검토하세요."], memory.all())
+                                processed = process_top_papers(current, run["candidates"], DATA, lambda prompt: paper_draft_result(prompt, model, use_ollama, use_external_full_text, "full_text_similarity").text, make_cards=False)
                                 merged = {item["source_id"]: item for item in run["candidates"]}
                                 merged.update({item["source_id"]: item for item in processed})
-                                merged.update({item["source_id"]: item for item in drafted})
                                 ledger.update_search_run_candidates(run["run_id"], list(merged.values()))
                                 progress.progress(1.0, text="PDF 수집·본문 비교 보고 완료")
                                 st.rerun()
@@ -1005,20 +1377,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                             if completed:
                                 st.markdown("**본문 유사도 순위**")
                                 for rank, candidate in enumerate(sorted(completed, key=lambda item: item.get("full_text_similarity", 0), reverse=True), start=1):
-                                    marker = " · P1 카드 초안 생성 대상" if candidate.get("auto_selected_for_cards") else " · 이번 카드화에서는 제외 (로그 보존)"
-                                    st.caption(f"{rank}위 · {candidate.get('full_text_similarity', 0)}/100 · {candidate['title']}{marker}")
-                            paper_cards = [card for candidate in run["candidates"] if candidate.get("auto_selected_for_cards") for card in candidate.get("candidate_cards", [])]
-                            if paper_cards:
-                                st.markdown(f"**P1 본문 기반 후보 카드 {len(paper_cards)}건 · 업로드 P1과 동일한 승인 전 검토**")
-                                for index, card in enumerate(paper_cards, start=1):
-                                    st.markdown(f"**C{index}. {card['title']}**")
-                                    st.write(f"주장: {card['claim']}")
-                                    if card.get("explanation"):
-                                        st.caption(f"보충 설명: {card['explanation']}")
-                                    st.caption(f"레이블: {', '.join(card.get('labels', []))}")
-                                st.caption("이 후보 카드는 자동으로 연구자 승인함에 등록되었습니다. 여기서는 P1과 같은 내용 검토용으로 다시 확인할 수 있습니다.")
-    with shelf_tab:
-        render_paper_shelf(model, use_ollama)
+                                    st.caption(f"{rank}위 · 본문 맥락 적합성 {candidate.get('full_text_similarity', 0)}/100 · {candidate['title']}")
     with memory_tab:
         for card in memory.all():
             st.markdown(f"**{card['title']}** — {card['claim']}")
@@ -1062,33 +1421,77 @@ def _lines(value: str) -> list[str]:
 
 
 def research_advisory_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
-    """M2's concise, service-facing response to a researcher question."""
+    """M2's plan-first response to a researcher question."""
     st.subheader("연구자 질문 대응")
     st.caption("M2가 승인 지식·관계·검색 결과를 근거로 의견을 구성합니다. 답변과 내부 연구 판단은 분리하며, 근거 부족은 후속 탐색 필요로 표시합니다.")
     question = st.text_area("연구자 질문", placeholder="예: 다중 LLM 합의 평가는 설계 개념의 실현 가능성 판단에 어느 정도 신뢰할 수 있는가?", key="m2-service-question")
     context = st.text_area("현재 연구 맥락·제약 (선택)", placeholder="적용 대상, 비교하려는 대안, 현재 가설 또는 확인하려는 결정", key="m2-service-context")
-    if st.button("근거 기반 연구 의견 만들기", type="primary", disabled=not question.strip(), key="m2-service-answer"):
-        results = search_knowledge(f"{question}\n{context}", semantic, embedding_model)
+    if st.button("답변 계획 만들기", type="primary", disabled=not question.strip(), key="m2-service-plan"):
         case_id = ledger.create_case("research", f"연구자 질문: {question[:80]}")
         state = ResearchState(question=question, researcher_note=context)
         ledger.record(
             case_id, "research_update", "researcher", ["m2"], "research_question",
             {"state": state.model_dump(mode="json")}, status="completed",
         )
-        answer = report_for(question, results, model, use_ollama)
+        act_spec = recall_act_spec(
+            ledger, episodic_retriever, situation=f"연구자 질문: {question}\n연구 맥락: {context}",
+            active_card_ids={card["card_id"] for card in memory.all()}, semantic=semantic, embedding_model=embedding_model,
+        )
+        precedent = recall_context(act_spec)
+        draft = ollama_draft(advisory_plan_prompt("research_question", question, context, "researcher", precedent), model, use_ollama)
+        plan = parse_advisory_plan(draft or "", "research_question", question)
         ledger.record(
             case_id, "advice_report", "m2", ["researcher"], "research_question_response",
-            {"title": "M2 · 연구자 질문 대응", "question": question, "context": context, "report": answer, "state": state.model_dump(mode="json"),
-             "evidence_card_ids": [result.card["card_id"] for result in results]}, status="completed",
+            {"title": "M2 · 연구자 질문 답변 계획", "question": question, "context": context,
+             "report": plan.decision_question, "state": state.model_dump(mode="json"),
+             "advisory_plan": {"decision_question": plan.decision_question, "subquestions": [item.question for item in plan.subquestions]}}, status="completed",
         )
-        st.session_state["m2-service-results"] = results
-        st.session_state["m2-service-answer-result"] = answer
+        st.session_state["m2-service-case"] = case_id
+        st.session_state["m2-service-plan-result"] = plan
+        st.session_state["m2-service-act-spec"] = act_spec
+        st.session_state.pop("m2-service-answer-result", None)
+        st.session_state.pop("m2-service-clusters", None)
+    plan = st.session_state.get("m2-service-plan-result")
+    if plan:
+        act_spec = st.session_state.get("m2-service-act-spec")
+        if act_spec:
+            show_recalled_episodes(act_spec)
+        st.subheader("답변 계획")
+        st.write(f"**핵심 판단:** {plan.decision_question}")
+        for index, subquestion in enumerate(plan.subquestions, start=1):
+            st.write(f"{index}. {subquestion.question}")
+        if st.button("계획에 따라 근거 수집·연구 의견 만들기", type="primary", key="m2-service-run-plan"):
+            precedent = recall_context(act_spec) if act_spec else ""
+            clusters, judgments, answer = execute_plan_first_advisory(plan, f"{context}\n\n{precedent}", "researcher", model, use_ollama, semantic, embedding_model)
+            evidence_ids = [card_id for _, cluster in clusters for card_id in cluster.card_ids]
+            relation_ids = [relation_id for _, cluster in clusters for relation_id in cluster.relation_ids]
+            ledger.record(
+                st.session_state["m2-service-case"], "advice_report", "m2", ["researcher"], "research_question_response",
+                {"title": "M2 · 계획형 연구자 질문 대응", "question": question, "context": context, "report": answer,
+                 "evidence_card_ids": list(dict.fromkeys(evidence_ids)), "evidence_relation_ids": list(dict.fromkeys(relation_ids)),
+                 "subquestion_judgments": judgments}, status="completed",
+            )
+            episode = store_advisory_episode(
+                ledger, case_id=st.session_state["m2-service-case"], episode_type="research_question",
+                situation_summary=f"연구자 질문: {question}\n연구 맥락: {context}", decision_question=plan.decision_question,
+                advisory_plan=[item.question for item in plan.subquestions], answer=answer,
+                evidence_card_ids=list(dict.fromkeys(evidence_ids)), evidence_relation_ids=list(dict.fromkeys(relation_ids)),
+                unresolved_items=[subquestion.question for subquestion, cluster in clusters if not cluster.members],
+            )
+            st.session_state["m2-service-episode-id"] = episode.episode_id
+            st.session_state["m2-service-clusters"] = clusters
+            st.session_state["m2-service-answer-result"] = answer
+        if "m2-service-clusters" in st.session_state:
+            show_evidence_clusters(st.session_state["m2-service-clusters"])
     if "m2-service-answer-result" in st.session_state:
-        show_retrieval_results(st.session_state.get("m2-service-results", []))
         st.markdown("### M2 의견")
         st.markdown(st.session_state["m2-service-answer-result"])
-        if not st.session_state.get("m2-service-results", []):
-            st.info("현재 승인 지식만으로는 충분한 근거를 찾지 못했습니다. 아래 ‘연구 상태·방향 검토’에서 M1 탐색 Intent를 제안할 수 있습니다.")
+        if not any(cluster.members for _, cluster in st.session_state.get("m2-service-clusters", [])):
+            st.info("현재 승인 지식만으로는 충분한 근거를 찾지 못했습니다. 연구 상태·방향 검토에서 M1 탐색 Intent를 제안하세요.")
+        episode_id = st.session_state.get("m2-service-episode-id")
+        if episode_id and st.button("이 답변을 확인된 연구 선례로 표시", key="m2-confirm-episode"):
+            ledger.update_episode_memory_outcome(episode_id, "confirmed", "연구자가 답변을 유사 사례의 재사용 가능한 선례로 확인함")
+            st.success("다음 유사 질문에서 선례 기반 빠른 경로로 리콜할 수 있습니다.")
 
 
 def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
@@ -1238,23 +1641,69 @@ def external_advisory(model: str, use_ollama: bool, semantic: bool, embedding_mo
         case_id = create_external_case(ledger, requester, question, context, interpretation)
         st.session_state["external_case"] = case_id
         st.session_state["external_interpretation"] = interpretation
+        st.session_state.pop("external-plan-result", None)
+        st.session_state.pop("external-clusters", None)
+        st.session_state.pop("external-answer-result", None)
     if "external_interpretation" in st.session_state:
         st.subheader("M2의 요청 해석·범위 확인")
         st.markdown(st.session_state["external_interpretation"])
         confirmed = st.checkbox("요청자가 이 해석과 답변 범위에 동의함")
-        if st.button("근거 기반 자문 답변 만들기", disabled=not confirmed):
-            results = search_knowledge(question, semantic, embedding_model)
-            response_prompt = render_prompt(
-                "m2_external_response.j2", expertise=expertise, question=question, evidence=results,
+        if st.button("자문 답변 계획 만들기", disabled=not confirmed, type="primary"):
+            act_spec = recall_act_spec(
+                ledger, episodic_retriever, situation=f"외부 자문 요청: {question}\n요청자: {requester}\n맥락: {context}",
+                active_card_ids={card["card_id"] for card in memory.all()}, semantic=semantic, embedding_model=embedding_model,
             )
-            answer = ollama_draft(response_prompt, model, use_ollama) or report_for(question, results, model, False)
+            draft = ollama_draft(advisory_plan_prompt("external_advisory", question, context, requester, recall_context(act_spec)), model, use_ollama)
+            plan = parse_advisory_plan(draft or "", "external_advisory", question)
             ledger.record(
                 st.session_state["external_case"], "advisory_exchange", "m2", ["external_requester", "researcher"],
-                "advisory_response", {"title": "외부 자문 답변", "answer": answer, "evidence_count": len(results)}, status="completed",
+                "advisory_plan", {"title": "외부 자문 답변 계획", "interpretation": st.session_state["external_interpretation"],
+                                  "decision_question": plan.decision_question,
+                                  "subquestions": [item.question for item in plan.subquestions]}, status="completed",
             )
-            show_retrieval_results(results)
+            st.session_state["external-plan-result"] = plan
+            st.session_state["external-act-spec"] = act_spec
+            st.session_state.pop("external-answer-result", None)
+        plan = st.session_state.get("external-plan-result")
+        if plan:
+            act_spec = st.session_state.get("external-act-spec")
+            if act_spec:
+                show_recalled_episodes(act_spec)
+            st.subheader("자문 답변 계획")
+            st.write(f"**핵심 판단:** {plan.decision_question}")
+            for index, subquestion in enumerate(plan.subquestions, start=1):
+                st.write(f"{index}. {subquestion.question}")
+            if st.button("계획에 따라 근거 수집·자문 답변 만들기", type="primary", key="external-run-plan"):
+                precedent = recall_context(act_spec) if act_spec else ""
+                clusters, judgments, answer = execute_plan_first_advisory(plan, f"{context}\n\n{precedent}", requester, model, use_ollama, semantic, embedding_model)
+                evidence_ids = [card_id for _, cluster in clusters for card_id in cluster.card_ids]
+                relation_ids = [relation_id for _, cluster in clusters for relation_id in cluster.relation_ids]
+                ledger.record(
+                    st.session_state["external_case"], "advisory_exchange", "m2", ["external_requester", "researcher"],
+                    "advisory_response", {"title": "계획형 외부 자문 답변", "answer": answer,
+                                          "evidence_card_ids": list(dict.fromkeys(evidence_ids)),
+                                          "evidence_relation_ids": list(dict.fromkeys(relation_ids)),
+                                          "subquestion_judgments": judgments}, status="completed",
+                )
+                episode = store_advisory_episode(
+                    ledger, case_id=st.session_state["external_case"], episode_type="external_advisory",
+                    situation_summary=f"외부 자문 요청: {question}\n요청자: {requester}\n맥락: {context}", decision_question=plan.decision_question,
+                    advisory_plan=[item.question for item in plan.subquestions], answer=answer,
+                    evidence_card_ids=list(dict.fromkeys(evidence_ids)), evidence_relation_ids=list(dict.fromkeys(relation_ids)),
+                    unresolved_items=[subquestion.question for subquestion, cluster in clusters if not cluster.members],
+                )
+                st.session_state["external-episode-id"] = episode.episode_id
+                st.session_state["external-clusters"] = clusters
+                st.session_state["external-answer-result"] = answer
+            if "external-clusters" in st.session_state:
+                show_evidence_clusters(st.session_state["external-clusters"])
+        if "external-answer-result" in st.session_state:
             st.subheader("외부 자문 답변")
-            st.markdown(answer)
+            st.markdown(st.session_state["external-answer-result"])
+            episode_id = st.session_state.get("external-episode-id")
+            if episode_id and st.button("요청자 확인 후 재사용 가능한 자문 선례로 표시", key="external-confirm-episode"):
+                ledger.update_episode_memory_outcome(episode_id, "confirmed", "외부 요청자 확인 후 재사용 가능한 자문 선례로 지정")
+                st.success("다음 유사 자문에서 선례 기반 빠른 경로로 리콜할 수 있습니다.")
 
 
 def main() -> None:
@@ -1267,10 +1716,11 @@ def main() -> None:
     st.sidebar.title("도메인 전문 연구위원")
     model = st.sidebar.text_input("Ollama 모델", value="gpt-oss:20b")
     use_ollama = st.sidebar.checkbox("Ollama 초안 사용", value=True)
-    semantic = st.sidebar.checkbox("P3 Ollama 임베딩 검색", value=False)
+    semantic = st.sidebar.checkbox("시드카드 임베딩 검색", value=True, help="질문과 표현이 다른 카드도 시드 후보로 찾습니다. 사용할 수 없으면 lexical 검색으로 자동 전환됩니다.")
     embedding_model = st.sidebar.text_input("임베딩 모델", value="nomic-embed-text", disabled=not semantic)
     connected, status = ollama_status(model)
     st.sidebar.caption(f"Ollama · {status}")
+    st.sidebar.caption("첫 모델 호출 시 Ollama 모델 기본 설정을 읽습니다. 단, 논문 읽기는 Mac 메모리 사용을 위해 Ollama Chat과 동일하게 8K 컨텍스트를 명시합니다.")
     if use_ollama and not connected:
         st.sidebar.warning("초안 없이도 P1·P2 흐름은 동작합니다.")
     screen = st.sidebar.radio("작업공간", ["연구위원 데스크", "M1 · 문헌조사·지식화", "M2 · 지식 기반 자문", "지식 베이스·운영", "개발·프롬프트"])

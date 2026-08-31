@@ -24,6 +24,38 @@ class RetrievalResult:
     semantic_score: float | None = None
 
 
+@dataclass(frozen=True)
+class ClusterMember:
+    """One card selected for a local, relation-bounded evidence cluster."""
+
+    result: RetrievalResult
+    distance: int
+    seed_card_id: str
+    relation_ids: tuple[str, ...] = ()
+    relation_types: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class KnowledgeCluster:
+    """A deterministic evidence bundle around direct-match seed cards.
+
+    It deliberately stores the route by which an adjacent card entered the
+    bundle.  The LLM can therefore use the cluster for interpretation but
+    cannot silently invent the graph traversal.
+    """
+
+    query: str
+    members: tuple[ClusterMember, ...]
+
+    @property
+    def card_ids(self) -> list[str]:
+        return [member.result.card["card_id"] for member in self.members]
+
+    @property
+    def relation_ids(self) -> list[str]:
+        return [relation_id for member in self.members for relation_id in member.relation_ids]
+
+
 def _tokens(text: str) -> set[str]:
     return {token.lower() for token in re.findall(r"[\w가-힣]{2,}", text)}
 
@@ -31,7 +63,9 @@ def _tokens(text: str) -> set[str]:
 def _card_text(card: dict[str, Any]) -> str:
     return " ".join([
         card.get("title", ""), card.get("claim", ""), card.get("evidence_excerpt", ""),
-        " ".join(card.get("labels", [])), card.get("conditions", ""), card.get("limits", ""),
+        " ".join(card.get("labels", [])), " ".join(card.get("concepts", [])),
+        " ".join(card.get("applies_to", [])), " ".join(card.get("excludes", [])),
+        " ".join(card.get("supports_question_types", [])), card.get("conditions", ""), card.get("limits", ""),
     ])
 
 
@@ -130,10 +164,106 @@ class KnowledgeRetriever:
             if embedded:
                 vectors, query_vector = embedded
                 for card, vector in zip(cards, vectors):
-                    score = self._cosine(vector, query_vector)
+                    semantic_score = self._cosine(vector, query_vector)
                     existing = ranked.get(card["card_id"])
                     if existing:
-                        ranked[card["card_id"]] = RetrievalResult(card, max(existing.score, score), "lexical+semantic", f"{existing.reason}; 임베딩 유사도 {score:.2f}", lexical_score=existing.lexical_score, semantic_score=score)
-                    elif score > 0:
-                        ranked[card["card_id"]] = RetrievalResult(card, score, "semantic", f"Ollama 임베딩 유사도 {score:.2f}", semantic_score=score)
+                        # For semantic seed search the embedding match is the
+                        # primary signal. Lexical overlap is only a small,
+                        # reproducible preference for an exact expression.
+                        score = (semantic_score * 0.85) + (existing.score * 0.15)
+                        ranked[card["card_id"]] = RetrievalResult(
+                            card, score, "semantic_seed+lexical",
+                            f"임베딩 유사도 {semantic_score:.2f}; {existing.reason}",
+                            lexical_score=existing.lexical_score, semantic_score=semantic_score,
+                        )
+                    elif semantic_score > 0:
+                        ranked[card["card_id"]] = RetrievalResult(
+                            card, semantic_score, "semantic_seed", f"임베딩 유사도 {semantic_score:.2f}",
+                            semantic_score=semantic_score,
+                        )
         return sorted(ranked.values(), key=lambda item: item.score, reverse=True)[:limit]
+
+    @staticmethod
+    def _seed_eligible(card: dict[str, Any], query: str) -> bool:
+        """Apply non-generative safety gates before graph expansion."""
+        if card.get("status") == "obsolete":
+            return False
+        query_tokens = _tokens(query)
+        # `excludes` contains short contexts where the card must not be used.
+        # An overlap is only a conservative veto; absence of an overlap never
+        # claims that the card is applicable.
+        for excluded in card.get("excludes", []):
+            if query_tokens & _tokens(str(excluded)):
+                return False
+        return True
+
+    def cluster(
+        self, cards: list[dict[str, Any]], relations: list[dict[str, Any]], query: str, *,
+        seed_limit: int = 3, max_hops: int = 2, limit: int = 10,
+        semantic: bool = True, embedding_model: str = "nomic-embed-text",
+    ) -> KnowledgeCluster:
+        """Build a small approved-card neighbourhood without a generative call.
+
+        Hop 1 permits every approved relation because it can supply direct
+        support, contradiction, or a limitation. Hop 2 is restricted to
+        method, qualification, extension, gap, and argument relations so a
+        broadly connected card cannot pull in the whole memory.
+        """
+        # Embedding search is the normal seed finder because a question and a
+        # card rarely use the same wording. If local embeddings are unavailable
+        # `search` deliberately falls back to its lexical baseline.
+        candidates = self.search(cards, query, limit=max(seed_limit * 3, seed_limit), semantic=semantic, embedding_model=embedding_model)
+        seeds = [candidate for candidate in candidates if self._seed_eligible(candidate.card, query)][:seed_limit]
+        if not seeds:
+            return KnowledgeCluster(query=query, members=())
+        card_by_id = {str(card["card_id"]): card for card in cards}
+        active_relations = sorted(
+            [relation for relation in relations if str(relation.get("source_card_id")) in card_by_id and str(relation.get("target_card_id")) in card_by_id],
+            key=lambda relation: str(relation.get("relation_id", "")),
+        )
+        confidence = {"high": 1.0, "medium": 0.8, "low": 0.6}
+        allowed_second_hop = {"supports", "contradicts", "qualifies", "uses_method", "extends", "addresses_gap"}
+        selected: dict[str, ClusterMember] = {}
+        frontier: list[ClusterMember] = []
+        for seed in seeds:
+            member = ClusterMember(seed, 0, seed.card["card_id"])
+            selected[seed.card["card_id"]] = member
+            frontier.append(member)
+        for hop in range(1, max(0, max_hops) + 1):
+            next_frontier: list[ClusterMember] = []
+            for parent in frontier:
+                parent_id = parent.result.card["card_id"]
+                for relation in active_relations:
+                    relation_type = str(relation.get("relation_type", ""))
+                    if hop == 2 and relation_type not in allowed_second_hop:
+                        continue
+                    source, target = str(relation["source_card_id"]), str(relation["target_card_id"])
+                    if parent_id == source:
+                        neighbour_id = target
+                    elif parent_id == target:
+                        neighbour_id = source
+                    else:
+                        continue
+                    if neighbour_id in selected or neighbour_id not in card_by_id:
+                        continue
+                    score = parent.result.score * (0.72 if hop == 1 else 0.48) * confidence.get(str(relation.get("confidence")), 0.5)
+                    result = RetrievalResult(
+                        card_by_id[neighbour_id], score, "relation_cluster",
+                        f"[{parent_id}]에서 {relation_type} 관계 [{relation.get('relation_id')}]로 {hop}-hop 확장",
+                    )
+                    member = ClusterMember(
+                        result, hop, parent.seed_card_id,
+                        (*parent.relation_ids, str(relation.get("relation_id"))),
+                        (*parent.relation_types, relation_type),
+                    )
+                    selected[neighbour_id] = member
+                    next_frontier.append(member)
+                    if len(selected) >= limit:
+                        break
+                if len(selected) >= limit:
+                    break
+            frontier = next_frontier
+            if not frontier or len(selected) >= limit:
+                break
+        ordered = sorted(selected.values(), key=lambda member: (member.distance, -member.result.score, member.result.card["card_id"]))[:limit]
+        return KnowledgeCluster(query=query, members=tuple(ordered))

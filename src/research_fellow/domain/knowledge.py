@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 
 SourceKind = Literal["external_paper", "researcher_published_work", "researcher_idea_note"]
 RelationType = Literal["supports", "extends", "contradicts", "qualifies", "uses_method", "addresses_gap"]
+EvidenceLevel = Literal["review", "empirical", "theoretical", "provisional"]
+KnowledgeStatus = Literal["verified", "provisional", "contested", "obsolete"]
 
 
 class Evidence(BaseModel):
@@ -39,6 +41,14 @@ class KnowledgeCard(BaseModel):
     # Optional so existing approved JSONL cards remain valid.
     explanation: str = ""
     labels: list[str] = Field(default_factory=list)
+    # These fields make approved cards retrievable as knowledge records rather
+    # than as unstructured notes. Defaults preserve every existing JSONL card.
+    concepts: list[str] = Field(default_factory=list)
+    applies_to: list[str] = Field(default_factory=list)
+    excludes: list[str] = Field(default_factory=list)
+    supports_question_types: list[str] = Field(default_factory=list)
+    evidence_level: EvidenceLevel = "provisional"
+    status: KnowledgeStatus = "verified"
     evidence_excerpt: str = Field(default="", max_length=1600)
     evidence_pages: list[int] = Field(default_factory=list)
     citation_markers: list[str] = Field(default_factory=list)

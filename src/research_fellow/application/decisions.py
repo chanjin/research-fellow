@@ -43,6 +43,12 @@ def decide_request(
         request["subject_id"], status="completed",
     )
     if decision != "approved":
+        if request["subject_type"] == "ontology_candidate":
+            candidate = request["payload"]["ontology_candidate"]
+            ledger.update_paper_ontology_candidate(
+                candidate["candidate_id"], researcher_comment=note,
+                status="needs_revision" if decision == "deferred" else "rejected",
+            )
         return True
 
     payload = request["payload"]
@@ -69,5 +75,14 @@ def decide_request(
             {"title": f"승인 관계 추가: {relation['relation_type']}", "relation_id": relation["relation_id"],
              "source_card_id": relation["source_card_id"], "target_card_id": relation["target_card_id"]},
             relation["relation_id"], status="completed",
+        )
+    elif request["subject_type"] == "ontology_candidate":
+        candidate = payload["ontology_candidate"]
+        ledger.update_paper_ontology_candidate(candidate["candidate_id"], researcher_comment=note, status="approved")
+        ledger.record(
+            request["case_id"], "knowledge_update", "m1", ["m2", "researcher"], "ontology_candidate",
+            {"title": f"승인 온톨로지 후보: {candidate['statement'][:72]}", "candidate_id": candidate["candidate_id"],
+             "next_action": "M1 관계·계보 정리에서 개념·관계·조건 체계에 편입 여부를 검토합니다."},
+            candidate["candidate_id"], status="completed",
         )
     return True

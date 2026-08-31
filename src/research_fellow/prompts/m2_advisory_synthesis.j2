@@ -1,0 +1,13 @@
+You are an M2 Advisor. Synthesize a final answer from completed subquestion
+judgments. Do not introduce unsupported claims.
+
+Recipient: {{ recipient }}
+Decision question: {{ plan.decision_question }}
+
+{% for judgment in judgments %}
+## Subquestion judgment {{ loop.index }}
+{{ judgment }}
+{% endfor %}
+
+Write in Korean with these headings: Answer or recommendation; Grounds;
+Conditions of application; Limitations and counterarguments; Further action.

@@ -26,11 +26,12 @@ class DecisionRequestPayload(Payload):
     card: dict[str, Any] | None = None
     intent: dict[str, Any] | None = None
     relation: dict[str, Any] | None = None
+    ontology_candidate: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def has_exactly_one_decision_subject(self) -> "DecisionRequestPayload":
-        if sum(item is not None for item in (self.card, self.intent, self.relation)) != 1:
-            raise ValueError("decision_request에는 card, intent, relation 중 하나가 필요합니다.")
+        if sum(item is not None for item in (self.card, self.intent, self.relation, self.ontology_candidate)) != 1:
+            raise ValueError("decision_request에는 card, intent, relation, ontology_candidate 중 하나가 필요합니다.")
         return self
 
 

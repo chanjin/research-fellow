@@ -30,6 +30,7 @@ PROMPT_CATALOG = (
     PromptTemplate("m1_gap_search_plan.j2", "M1 · 공백 탐색 계획", "지식 공백을 위한 검색 쿼리 초안"),
     PromptTemplate("m1_source_triage.j2", "M1 · 문헌 후보 선별", "도구가 찾은 문헌 메타데이터 검토"),
     PromptTemplate("m1_paper_shelf_analysis.j2", "M1 · 중요 논문 서재 분석", "논문 본문과 연구 맥락을 분리해 읽기용 분석 요약 생성"),
+    PromptTemplate("m1_paper_reading_questions.j2", "M1 · 논문 읽기 질문", "원문 근거와 함께 연구자 첨삭을 요청하는 논문별 읽기 질문"),
     PromptTemplate("m1_lineage_review.j2", "M1 · 계보 검토", "승인 지식의 계보·관계 후보 검토"),
     PromptTemplate("m1_lineage_overview.j2", "M1 · 계보 종합 의견", "승인 관계 그래프의 중심 주제·흐름·공백 해석"),
     PromptTemplate("m1_revalidation_review.j2", "M1 · 재검증", "상충·출처 재확인 후보 검토"),
@@ -44,6 +45,9 @@ PROMPT_CATALOG = (
     PromptTemplate("m2_abstract_relevance.j2", "M2 · 초록 맥락 적합성", "M1 후보 논문의 초록을 승인된 탐색 맥락과 대조해 후보 적합성만 선별"),
     PromptTemplate("m2_external_interpretation.j2", "M2 · 외부 요청 해석", "외부 자문 범위 확인 초안"),
     PromptTemplate("m2_external_response.j2", "M2 · 외부 자문 답변", "근거·조건·한계를 분리한 외부 답변"),
+    PromptTemplate("m2_advisory_plan.j2", "M2 · 자문 답변 계획", "최종 답변 전 판단 질문과 하위 질문을 구성"),
+    PromptTemplate("m2_subquestion_judgment.j2", "M2 · 하위 질문 판단", "관계 기반 지식 클러스터로 하나의 하위 질문을 검토"),
+    PromptTemplate("m2_advisory_synthesis.j2", "M2 · 자문 통합", "하위 판단을 근거·조건·한계가 보이는 최종 답변으로 통합"),
 )
 
 _ALLOWED = {item.name for item in PROMPT_CATALOG}

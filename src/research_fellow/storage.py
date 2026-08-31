@@ -141,6 +141,8 @@ class Ledger:
                     labels_json TEXT NOT NULL DEFAULT '[]',
                     shelf_status TEXT NOT NULL DEFAULT 'reference',
                     reading_status TEXT NOT NULL DEFAULT 'unread',
+                    asset_type TEXT NOT NULL DEFAULT 'paper',
+                    intake_source TEXT NOT NULL DEFAULT 'manual',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -152,6 +154,7 @@ class Ledger:
                     paper_id TEXT PRIMARY KEY,
                     research_question TEXT NOT NULL DEFAULT '',
                     summary TEXT NOT NULL DEFAULT '',
+                    reading_raw_output TEXT NOT NULL DEFAULT '',
                     researcher_note TEXT NOT NULL DEFAULT '',
                     generated_at TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
@@ -164,6 +167,53 @@ class Ledger:
                     PRIMARY KEY(paper_id, card_id),
                     FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
                 );
+                CREATE TABLE IF NOT EXISTS paper_reading_questions (
+                    question_id TEXT PRIMARY KEY, paper_id TEXT NOT NULL, question TEXT NOT NULL,
+                    tentative_answer TEXT NOT NULL, evidence_json TEXT NOT NULL, uncertainty TEXT NOT NULL,
+                    researcher_comment TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'proposed',
+                    promotion_request_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
+                );
+                CREATE TABLE IF NOT EXISTS paper_ontology_candidates (
+                    candidate_id TEXT PRIMARY KEY, paper_id TEXT NOT NULL, question_id TEXT,
+                    candidate_text TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                    researcher_comment TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'proposed',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
+                );
+                CREATE TABLE IF NOT EXISTS paper_reading_reviews (
+                    review_id TEXT PRIMARY KEY, question_id TEXT NOT NULL, refined_answer TEXT NOT NULL,
+                    additional_evidence_json TEXT NOT NULL, remaining_uncertainty TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(question_id) REFERENCES paper_reading_questions(question_id)
+                );
+                CREATE TABLE IF NOT EXISTS paper_asset_events (
+                    event_id TEXT PRIMARY KEY, paper_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                    detail_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_asset_events_paper ON paper_asset_events(paper_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS episode_memories (
+                    episode_id TEXT PRIMARY KEY,
+                    case_id TEXT NOT NULL,
+                    episode_type TEXT NOT NULL,
+                    lifecycle_status TEXT NOT NULL,
+                    situation_summary TEXT NOT NULL,
+                    decision_question TEXT NOT NULL,
+                    advisory_plan_json TEXT NOT NULL,
+                    answer_summary TEXT NOT NULL,
+                    conditions_and_limits TEXT NOT NULL,
+                    unresolved_items_json TEXT NOT NULL,
+                    follow_up_intent_ids_json TEXT NOT NULL,
+                    evidence_card_ids_json TEXT NOT NULL,
+                    evidence_relation_ids_json TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(case_id) REFERENCES cases(case_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_episode_memories_recall
+                    ON episode_memories(lifecycle_status, episode_type, updated_at DESC);
                 """
             )
             # Safe for v0.1 databases: SQLite preserves all existing rows.
@@ -177,7 +227,14 @@ class Ledger:
             paper_columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_shelf)").fetchall()}
             if "labels_json" not in paper_columns:
                 conn.execute("ALTER TABLE paper_shelf ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "3"))
+            if "asset_type" not in paper_columns:
+                conn.execute("ALTER TABLE paper_shelf ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'paper'")
+            if "intake_source" not in paper_columns:
+                conn.execute("ALTER TABLE paper_shelf ADD COLUMN intake_source TEXT NOT NULL DEFAULT 'manual'")
+            analysis_columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_analyses)").fetchall()}
+            if "reading_raw_output" not in analysis_columns:
+                conn.execute("ALTER TABLE paper_analyses ADD COLUMN reading_raw_output TEXT NOT NULL DEFAULT ''")
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "6"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()
@@ -307,6 +364,63 @@ class Ledger:
     def cases(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM cases ORDER BY updated_at DESC").fetchall()]
+
+    def upsert_episode_memory(self, episode: dict[str, Any]) -> None:
+        """Store a recall projection without altering the immutable case timeline."""
+        timestamp = now()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO episode_memories
+                   (episode_id, case_id, episode_type, lifecycle_status, situation_summary, decision_question,
+                    advisory_plan_json, answer_summary, conditions_and_limits, unresolved_items_json,
+                    follow_up_intent_ids_json, evidence_card_ids_json, evidence_relation_ids_json, outcome,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(episode_id) DO UPDATE SET
+                    lifecycle_status=excluded.lifecycle_status, answer_summary=excluded.answer_summary,
+                    conditions_and_limits=excluded.conditions_and_limits,
+                    unresolved_items_json=excluded.unresolved_items_json,
+                    follow_up_intent_ids_json=excluded.follow_up_intent_ids_json,
+                    evidence_card_ids_json=excluded.evidence_card_ids_json,
+                    evidence_relation_ids_json=excluded.evidence_relation_ids_json,
+                    outcome=excluded.outcome, updated_at=excluded.updated_at""",
+                (
+                    episode["episode_id"], episode["case_id"], episode["episode_type"], episode.get("lifecycle_status", "provisional"),
+                    episode["situation_summary"], episode["decision_question"], json.dumps(episode.get("advisory_plan", []), ensure_ascii=False),
+                    episode.get("answer_summary", ""), episode.get("conditions_and_limits", ""),
+                    json.dumps(episode.get("unresolved_items", []), ensure_ascii=False),
+                    json.dumps(episode.get("follow_up_intent_ids", []), ensure_ascii=False),
+                    json.dumps(episode.get("evidence_card_ids", []), ensure_ascii=False),
+                    json.dumps(episode.get("evidence_relation_ids", []), ensure_ascii=False), episode.get("outcome", ""),
+                    timestamp, timestamp,
+                ),
+            )
+
+    def episode_memories(self, *, case_id: str | None = None) -> list[dict[str, Any]]:
+        query, values = "SELECT * FROM episode_memories", []
+        if case_id:
+            query += " WHERE case_id=?"
+            values.append(case_id)
+        query += " ORDER BY updated_at DESC"
+        with self.connect() as conn:
+            rows = conn.execute(query, values).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for key in ("advisory_plan", "unresolved_items", "follow_up_intent_ids", "evidence_card_ids", "evidence_relation_ids"):
+                item[key] = json.loads(item.pop(f"{key}_json"))
+            result.append(item)
+        return result
+
+    def update_episode_memory_outcome(self, episode_id: str, lifecycle_status: str, outcome: str = "") -> bool:
+        if lifecycle_status not in {"provisional", "confirmed", "superseded"}:
+            raise ValueError("지원하지 않는 일화 메모리 상태입니다.")
+        with self.connect() as conn:
+            result = conn.execute(
+                "UPDATE episode_memories SET lifecycle_status=?, outcome=?, updated_at=? WHERE episode_id=?",
+                (lifecycle_status, outcome, now(), episode_id),
+            )
+        return result.rowcount == 1
 
     def set_status(self, phenomenon_id: str, status: str) -> None:
         with self.connect() as conn:
@@ -499,19 +613,22 @@ class Ledger:
             paper_id = str(existing["paper_id"]) if existing else str(paper.get("paper_id") or f"paper-{uuid.uuid4().hex[:12]}")
             conn.execute(
                 """INSERT INTO paper_shelf
-                   (paper_id, title, authors_json, publication_year, source_url, source_id, pdf_path, labels_json, shelf_status, reading_status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (paper_id, title, authors_json, publication_year, source_url, source_id, pdf_path, labels_json, shelf_status, reading_status, asset_type, intake_source, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(paper_id) DO UPDATE SET
                      title=excluded.title, authors_json=excluded.authors_json, publication_year=excluded.publication_year,
                      source_url=excluded.source_url, source_id=excluded.source_id,
                      pdf_path=CASE WHEN excluded.pdf_path <> '' THEN excluded.pdf_path ELSE paper_shelf.pdf_path END,
                      labels_json=CASE WHEN excluded.labels_json <> '[]' THEN excluded.labels_json ELSE paper_shelf.labels_json END,
-                     shelf_status=excluded.shelf_status, reading_status=excluded.reading_status, updated_at=excluded.updated_at""",
+                     shelf_status=excluded.shelf_status, reading_status=excluded.reading_status,
+                     asset_type=excluded.asset_type, intake_source=excluded.intake_source, updated_at=excluded.updated_at""",
                 (paper_id, title, json.dumps(paper.get("authors", []), ensure_ascii=False), str(paper.get("publication_year", "")),
                  str(paper.get("source_url", "")), source_id, str(paper.get("pdf_path", "")),
                  json.dumps(_clean_paper_labels(paper.get("labels", [])), ensure_ascii=False),
-                 str(paper.get("shelf_status", "reference")), str(paper.get("reading_status", "unread")), timestamp, timestamp),
+                 str(paper.get("shelf_status", "reference")), str(paper.get("reading_status", "unread")),
+                 str(paper.get("asset_type", "paper")), str(paper.get("intake_source", "manual")), timestamp, timestamp),
             )
+            self._record_paper_event(conn, paper_id, "intake", {"source": paper.get("intake_source", "manual")})
         return self.shelf_paper(paper_id) or {}
 
     def shelf_papers(self) -> list[dict[str, Any]]:
@@ -540,26 +657,28 @@ class Ledger:
                 conn.execute("UPDATE paper_shelf SET shelf_status=?, reading_status=?, updated_at=? WHERE paper_id=?", (shelf_status, reading_status, now(), paper_id))
             else:
                 conn.execute("UPDATE paper_shelf SET shelf_status=?, reading_status=?, labels_json=?, updated_at=? WHERE paper_id=?", (shelf_status, reading_status, json.dumps(_clean_paper_labels(labels), ensure_ascii=False), now(), paper_id))
+            self._record_paper_event(conn, paper_id, "state_updated", {"importance": shelf_status, "reading_status": reading_status})
 
     def paper_analysis(self, paper_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM paper_analyses WHERE paper_id=?", (paper_id,)).fetchone()
         return dict(row) if row else None
 
-    def save_paper_analysis(self, paper_id: str, *, research_question: str = "", summary: str = "", researcher_note: str = "", generated: bool = False) -> None:
+    def save_paper_analysis(self, paper_id: str, *, research_question: str = "", summary: str = "", reading_raw_output: str = "", researcher_note: str = "", generated: bool = False) -> None:
         timestamp = now()
         previous = self.paper_analysis(paper_id) or {}
         with self.connect() as conn:
             conn.execute(
-                """INSERT INTO paper_analyses (paper_id, research_question, summary, researcher_note, generated_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO paper_analyses (paper_id, research_question, summary, reading_raw_output, researcher_note, generated_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(paper_id) DO UPDATE SET research_question=excluded.research_question,
-                     summary=excluded.summary, researcher_note=excluded.researcher_note,
+                     summary=excluded.summary, reading_raw_output=excluded.reading_raw_output, researcher_note=excluded.researcher_note,
                      generated_at=CASE WHEN excluded.generated_at <> '' THEN excluded.generated_at ELSE paper_analyses.generated_at END,
                      updated_at=excluded.updated_at""",
                 (paper_id, research_question or previous.get("research_question", ""), summary or previous.get("summary", ""),
-                 researcher_note, timestamp if generated else "", timestamp),
+                 reading_raw_output or previous.get("reading_raw_output", ""), researcher_note, timestamp if generated else "", timestamp),
             )
+            self._record_paper_event(conn, paper_id, "analysis_generated" if generated else "researcher_note_updated", {})
 
     def paper_card_ids(self, paper_id: str) -> list[str]:
         with self.connect() as conn:
@@ -570,6 +689,154 @@ class Ledger:
         with self.connect() as conn:
             conn.execute("DELETE FROM paper_card_links WHERE paper_id=?", (paper_id,))
             conn.executemany("INSERT INTO paper_card_links VALUES (?, ?, ?)", [(paper_id, card_id, now()) for card_id in dict.fromkeys(card_ids)])
+            self._record_paper_event(conn, paper_id, "approved_cards_linked", {"card_ids": list(dict.fromkeys(card_ids))})
+
+    @staticmethod
+    def _record_paper_event(conn: sqlite3.Connection, paper_id: str, event_type: str, detail: dict[str, Any]) -> None:
+        conn.execute("INSERT INTO paper_asset_events VALUES (?, ?, ?, ?, ?)", (
+            f"pae-{uuid.uuid4().hex[:12]}", paper_id, event_type, json.dumps(detail, ensure_ascii=False), now(),
+        ))
+
+    def paper_asset_events(self, paper_id: str, limit: int = 40) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM paper_asset_events WHERE paper_id=? ORDER BY created_at DESC LIMIT ?", (paper_id, limit)).fetchall()
+        return [{**dict(row), "detail": json.loads(row["detail_json"])} for row in rows]
+
+    def add_paper_reading_questions(self, paper_id: str, questions: list[dict[str, Any]]) -> list[str]:
+        timestamp, question_ids = now(), []
+        with self.connect() as conn:
+            # Early installations used two additional required columns
+            # (research_relevance and suggested_ontology). Newer databases no
+            # longer need them, but a running ledger must remain writable.
+            table_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(paper_reading_questions)").fetchall()
+            }
+            existing_questions = {
+                " ".join(str(row["question"]).split())
+                for row in conn.execute("SELECT question FROM paper_reading_questions WHERE paper_id=?", (paper_id,)).fetchall()
+            }
+            for question in questions:
+                normalized_question = " ".join(str(question["question"]).split())
+                if normalized_question in existing_questions:
+                    continue
+                question_id = f"prq-{uuid.uuid4().hex[:12]}"
+                values: dict[str, Any] = {
+                    "question_id": question_id,
+                    "paper_id": paper_id,
+                    "question": question["question"],
+                    "tentative_answer": question["tentative_answer"],
+                    "evidence_json": json.dumps(question.get("evidence", []), ensure_ascii=False),
+                    "uncertainty": question.get("uncertainty", ""),
+                    # Compatibility values for the prior 13-column schema.
+                    # Empty means the flow does not infer ontology/relevance
+                    # before the researcher reviews the reading question.
+                    "research_relevance": str(question.get("research_relevance", "")),
+                    "suggested_ontology": str(question.get("suggested_ontology", "")),
+                    "researcher_comment": "",
+                    "status": "proposed",
+                    "promotion_request_id": None,
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                }
+                columns = [name for name in values if name in table_columns]
+                placeholders = ", ".join("?" for _ in columns)
+                conn.execute(
+                    f"INSERT INTO paper_reading_questions ({', '.join(columns)}) VALUES ({placeholders})",
+                    [values[name] for name in columns],
+                )
+                question_ids.append(question_id)
+                existing_questions.add(normalized_question)
+            self._record_paper_event(conn, paper_id, "reading_questions_generated", {"count": len(question_ids)})
+        return question_ids
+
+    def paper_reading_questions(self, paper_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM paper_reading_questions WHERE paper_id=? ORDER BY created_at", (paper_id,)).fetchall()
+        return [{**dict(row), "evidence": json.loads(row["evidence_json"])} for row in rows]
+
+    def update_paper_reading_question(self, question_id: str, *, researcher_comment: str, status: str, promotion_request_id: str | None = None) -> bool:
+        if status not in {"proposed", "approved", "needs_revision", "irrelevant", "promoted", "registered"}:
+            raise ValueError("지원하지 않는 논문 읽기 질문 상태입니다.")
+        with self.connect() as conn:
+            result = conn.execute("UPDATE paper_reading_questions SET researcher_comment=?, status=?, promotion_request_id=COALESCE(?, promotion_request_id), updated_at=? WHERE question_id=?", (researcher_comment, status, promotion_request_id, now(), question_id))
+            paper = conn.execute("SELECT paper_id FROM paper_reading_questions WHERE question_id=?", (question_id,)).fetchone()
+            if paper:
+                self._record_paper_event(conn, str(paper["paper_id"]), "reading_question_reviewed", {"question_id": question_id, "status": status})
+        return result.rowcount == 1
+
+    def add_paper_ontology_candidate(self, paper_id: str, question_id: str | None, candidate_text: str, evidence: list[str]) -> str:
+        candidate_id, timestamp = f"poc-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            conn.execute("INSERT INTO paper_ontology_candidates VALUES (?, ?, ?, ?, ?, '', 'proposed', ?, ?)", (candidate_id, paper_id, question_id, candidate_text, json.dumps(evidence, ensure_ascii=False), timestamp, timestamp))
+            self._record_paper_event(conn, paper_id, "ontology_candidate_added", {"candidate_id": candidate_id})
+        return candidate_id
+
+    def paper_ontology_candidates(self, paper_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM paper_ontology_candidates WHERE paper_id=? ORDER BY created_at", (paper_id,)).fetchall()
+        return [{**dict(row), "evidence": json.loads(row["evidence_json"])} for row in rows]
+
+    def all_paper_ontology_candidates(self) -> list[dict[str, Any]]:
+        """Return the cross-paper work queue for researcher ontology curation."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT candidate.*, paper.title AS paper_title, paper.shelf_status, paper.reading_status
+                   FROM paper_ontology_candidates AS candidate
+                   JOIN paper_shelf AS paper ON paper.paper_id = candidate.paper_id
+                   ORDER BY candidate.updated_at DESC"""
+            ).fetchall()
+        return [{**dict(row), "evidence": json.loads(row["evidence_json"])} for row in rows]
+
+    def update_paper_ontology_candidate(self, candidate_id: str, *, researcher_comment: str, status: str, candidate_text: str | None = None) -> bool:
+        if status not in {"proposed", "pending_approval", "approved", "needs_revision", "rejected"}:
+            raise ValueError("지원하지 않는 온톨로지 후보 상태입니다.")
+        with self.connect() as conn:
+            result = conn.execute(
+                """UPDATE paper_ontology_candidates
+                   SET researcher_comment=?, status=?, candidate_text=COALESCE(?, candidate_text), updated_at=?
+                   WHERE candidate_id=?""",
+                (researcher_comment, status, candidate_text.strip() if candidate_text else None, now(), candidate_id),
+            )
+            row = conn.execute("SELECT paper_id FROM paper_ontology_candidates WHERE candidate_id=?", (candidate_id,)).fetchone()
+            if row:
+                self._record_paper_event(conn, str(row["paper_id"]), "ontology_candidate_reviewed", {"candidate_id": candidate_id, "status": status})
+        return result.rowcount == 1
+
+    def upsert_paper_reading_reviews(self, reviews: list[dict[str, Any]]) -> int:
+        """Keep the first-pass question and the second-pass evidence augmentation separately."""
+        timestamp, saved = now(), 0
+        with self.connect() as conn:
+            for review in reviews:
+                question_id = str(review.get("question_id", ""))
+                if not question_id:
+                    continue
+                existing = conn.execute("SELECT review_id FROM paper_reading_reviews WHERE question_id=?", (question_id,)).fetchone()
+                review_id = str(existing["review_id"]) if existing else f"prr-{uuid.uuid4().hex[:12]}"
+                conn.execute(
+                    """INSERT INTO paper_reading_reviews
+                       (review_id, question_id, refined_answer, additional_evidence_json, remaining_uncertainty, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(review_id) DO UPDATE SET refined_answer=excluded.refined_answer,
+                         additional_evidence_json=excluded.additional_evidence_json,
+                         remaining_uncertainty=excluded.remaining_uncertainty, updated_at=excluded.updated_at""",
+                    (review_id, question_id, review["refined_answer"], json.dumps(review.get("additional_evidence", []), ensure_ascii=False),
+                     review.get("remaining_uncertainty", ""), timestamp, timestamp),
+                )
+                row = conn.execute("SELECT paper_id FROM paper_reading_questions WHERE question_id=?", (question_id,)).fetchone()
+                if row:
+                    self._record_paper_event(conn, str(row["paper_id"]), "second_pass_reading_completed", {"question_id": question_id})
+                saved += 1
+        return saved
+
+    def paper_reading_reviews(self, paper_id: str) -> dict[str, dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT review.* FROM paper_reading_reviews review
+                   JOIN paper_reading_questions question ON question.question_id=review.question_id
+                   WHERE question.paper_id=?""", (paper_id,),
+            ).fetchall()
+        return {str(row["question_id"]): {**dict(row), "additional_evidence": json.loads(row["additional_evidence_json"])} for row in rows}
 
 
 def _is_english_search_term(value: str) -> bool:

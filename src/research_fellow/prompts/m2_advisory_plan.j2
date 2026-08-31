@@ -1,0 +1,24 @@
+You are an M2 Advisor. Plan an evidence-grounded answer before drafting it.
+
+Request type: {{ request_type }}
+Recipient: {{ recipient }}
+Original request: {{ question }}
+Context: {{ context }}
+
+Recalled episodic precedents (not current evidence):
+{{ recalled_context or 'No recalled precedent.' }}
+
+Do not answer the request. Interpret it as a decision problem and decompose it
+into at most three dependent or complementary subquestions. Keep the original
+research context rather than broadening the topic.
+When a precedent is recalled, reuse only an appropriate question structure and
+explicitly account for its unresolved issues. Do not copy its conclusion.
+
+Return exactly:
+## Decision question
+one sentence
+
+## Subquestions
+- question 1
+- question 2
+- question 3

@@ -9,23 +9,29 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 
 LLM_PROFILES: dict[str, dict[str, object]] = {
     "default": {"temperature": 0.2, "think": "medium", "num_ctx": 4096, "num_predict": 1600, "timeout_seconds": 200, "min_response_chars": 240, "max_short_retries": 1},
     "abstract_triage": {"temperature": 0.1, "think": "low", "num_ctx": 4096, "num_predict": 900, "timeout_seconds": 150, "min_response_chars": 80, "max_short_retries": 1},
     "full_text_similarity": {"temperature": 0.15, "think": "low", "num_ctx": 6144, "num_predict": 800, "timeout_seconds": 220, "min_response_chars": 100, "max_short_retries": 1},
     "p1_card_draft": {"temperature": 0.2, "think": "medium", "num_ctx": 6144, "num_predict": 1400, "timeout_seconds": 260, "min_response_chars": 180, "max_short_retries": 1},
+    # gpt-oss:20b on a 16GB Mac can swap heavily above an 8K context. The
+    # paper-reading prompt is capped below that, so match Ollama Chat's 8K
+    # setting explicitly for this one long-context workload.
+    "paper_reading": {"temperature": 0.15, "think": "low", "num_ctx": 8192, "num_predict": 1400, "timeout_seconds": 300, "min_response_chars": 180, "max_short_retries": 1},
     "m2_report": {"temperature": 0.25, "think": "medium", "num_ctx": 6144, "num_predict": 1800, "timeout_seconds": 260, "min_response_chars": 300, "max_short_retries": 1},
 }
 _AUDIT_LOGGER: Any | None = None
 _AUDIT_LOG_PATH: Path | None = None
+_OLLAMA_MODEL_DEFAULTS: dict[str, dict[str, object]] = {}
 
 
 def set_llm_audit_logger(logger: Any | None) -> None:
@@ -84,6 +90,49 @@ def _think_level() -> str:
     return value if value in {"low", "medium", "high"} else "medium"
 
 
+def _parse_ollama_parameters(parameters: str) -> dict[str, object]:
+    """Parse the Modelfile-style `parameters` text returned by `/api/show`."""
+    parsed: dict[str, object] = {}
+    for line in parameters.splitlines():
+        key, separator, value = line.strip().partition(" ")
+        if not key or not separator or not value.strip():
+            continue
+        value = value.strip()
+        try:
+            parsed[key] = int(value)
+        except ValueError:
+            try:
+                parsed[key] = float(value)
+            except ValueError:
+                parsed[key] = value
+    return parsed
+
+
+def ollama_model_defaults(model: str) -> dict[str, object]:
+    """Read and cache the model's Ollama/Modelfile defaults without failing a draft."""
+    if model in _OLLAMA_MODEL_DEFAULTS:
+        return _OLLAMA_MODEL_DEFAULTS[model]
+    try:
+        response = requests.post(f"{ollama_base_url()}/api/show", json={"model": model}, timeout=5)
+        payload = response.json() if response.ok else {}
+        raw_parameters = str(payload.get("parameters") or "")
+        defaults: dict[str, object] = {
+            "parameters": _parse_ollama_parameters(raw_parameters),
+            "raw_parameters": raw_parameters,
+        }
+    except (requests.RequestException, ValueError):
+        # Older Ollama versions or a temporary connection error must not block
+        # a model request; Ollama will still apply its own server defaults.
+        defaults = {"parameters": {}, "raw_parameters": ""}
+    _OLLAMA_MODEL_DEFAULTS[model] = defaults
+    return defaults
+
+
+def use_ollama_model_defaults() -> bool:
+    """Use the model's own settings unless an operator explicitly opts out."""
+    return os.getenv("OLLAMA_USE_MODEL_DEFAULTS", "1").strip().lower() not in {"0", "false", "no"}
+
+
 def text_size_metrics(text: str, prefix: str) -> dict[str, int]:
     """Cheap, model-agnostic prompt-size diagnostics.
 
@@ -100,8 +149,15 @@ def text_size_metrics(text: str, prefix: str) -> dict[str, int]:
     }
 
 
-def ollama_draft_result(prompt: str, model: str, enabled: bool, profile: str | None = None, overrides: dict[str, object] | None = None) -> OllamaDraftResult:
-    """Wait for a complete Ollama response and retry incomplete drafts safely."""
+def ollama_draft_result(
+    prompt: str,
+    model: str,
+    enabled: bool,
+    profile: str | None = None,
+    overrides: dict[str, object] | None = None,
+    on_chunk: Callable[[str], None] | None = None,
+) -> OllamaDraftResult:
+    """Generate an Ollama draft, optionally streaming visible text to a caller."""
     if not enabled:
         return OllamaDraftResult(None, "Ollama 초안 사용 옵션이 꺼져 있습니다.")
 
@@ -110,6 +166,8 @@ def ollama_draft_result(prompt: str, model: str, enabled: bool, profile: str | N
     timeout_seconds = int(settings["timeout_seconds"])
     min_response_chars = int(settings["min_response_chars"])
     max_retries = int(settings["max_short_retries"])
+    model_defaults = ollama_model_defaults(model)
+    use_model_defaults = use_ollama_model_defaults()
     request_prompt = prompt
     longest_short_text = ""
     for attempt in range(max_retries + 1):
@@ -119,17 +177,36 @@ def ollama_draft_result(prompt: str, model: str, enabled: bool, profile: str | N
             **text_size_metrics(request_prompt, "request_prompt"),
         }
         try:
+            request_payload: dict[str, object] = {
+                "model": model,
+                "prompt": request_prompt,
+                "stream": bool(on_chunk),
+                "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "10m"),
+            }
+            # Chat normally leaves Modelfile defaults in control. Profiles still
+            # set retry/timeout policy, but do not override the model by default.
+            effective_options: dict[str, object] = {}
+            # `/api/show` cannot read the Ollama Chat application's per-chat
+            # 8K setting. Keep model defaults for ordinary calls, but make the
+            # long paper-reading call explicitly match that safe context size.
+            if profile_name == "paper_reading":
+                effective_options["num_ctx"] = settings["num_ctx"]
+            if not use_model_defaults:
+                request_payload.update({
+                    "think": str(settings["think"]),
+                })
+                effective_options.update({
+                    "temperature": settings["temperature"],
+                    "num_ctx": settings["num_ctx"],
+                    "num_predict": settings["num_predict"],
+                })
+            if effective_options:
+                request_payload["options"] = effective_options
             response = requests.post(
                 endpoint,
-                json={
-                    "model": model, "prompt": request_prompt, "stream": False,
-                    "think": str(settings["think"]),
-                    "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "10m"),
-                    "options": {
-                        "temperature": settings["temperature"], "num_ctx": settings["num_ctx"], "num_predict": settings["num_predict"],
-                    },
-                },
+                json=request_payload,
                 timeout=timeout_seconds,
+                stream=bool(on_chunk),
             )
         except requests.Timeout:
             LOGGER.warning("Ollama draft timed out after %s seconds: model=%s endpoint=%s", timeout_seconds, model, endpoint)
@@ -147,24 +224,52 @@ def ollama_draft_result(prompt: str, model: str, enabled: bool, profile: str | N
             if response.status_code == 404:
                 detail = f"모델 `{model}`을 찾지 못했습니다. `ollama list`로 설치 모델을 확인하세요. {detail}".strip()
             return _audit(OllamaDraftResult(None, detail, response.status_code), profile_name, model, request_prompt, settings, {**request_sizes, "attempt": attempt + 1, "elapsed_seconds": round(time.monotonic() - started, 2)})
-        try:
-            payload: dict[str, Any] = response.json()
-        except ValueError:
-            LOGGER.warning("Ollama returned a non-JSON response: model=%s", model)
-            return _audit(OllamaDraftResult(None, "Ollama 응답이 JSON 형식이 아닙니다. Streamlit 실행 로그를 확인하세요."), profile_name, model, request_prompt, settings, {**request_sizes, "attempt": attempt + 1, "elapsed_seconds": round(time.monotonic() - started, 2)})
+        if on_chunk:
+            payload: dict[str, Any] = {}
+            chunks: list[str] = []
+            try:
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    payload = json.loads(raw_line)
+                    if payload.get("error"):
+                        break
+                    fragment = str(payload.get("response") or "")
+                    if fragment:
+                        chunks.append(fragment)
+                        try:
+                            on_chunk(fragment)
+                        except Exception:  # UI feedback must never cancel the stored result
+                            LOGGER.debug("Ollama stream callback failed", exc_info=True)
+                text = "".join(chunks).strip()
+            except (ValueError, requests.RequestException) as error:
+                LOGGER.warning("Ollama stream was not valid JSON: model=%s error=%s", model, error)
+                return _audit(OllamaDraftResult(None, "Ollama 스트리밍 응답을 해석하지 못했습니다."), profile_name, model, request_prompt, settings, {**request_sizes, "attempt": attempt + 1, "elapsed_seconds": round(time.monotonic() - started, 2)})
+        else:
+            try:
+                payload = response.json()
+            except ValueError:
+                LOGGER.warning("Ollama returned a non-JSON response: model=%s", model)
+                return _audit(OllamaDraftResult(None, "Ollama 응답이 JSON 형식이 아닙니다. Streamlit 실행 로그를 확인하세요."), profile_name, model, request_prompt, settings, {**request_sizes, "attempt": attempt + 1, "elapsed_seconds": round(time.monotonic() - started, 2)})
+            text = str(payload.get("response") or "").strip()
         if payload.get("error"):
             detail = str(payload["error"])
             LOGGER.warning("Ollama returned an API error: model=%s detail=%s", model, detail)
             return _audit(OllamaDraftResult(None, detail, response.status_code), profile_name, model, request_prompt, settings, {**request_sizes, "attempt": attempt + 1, "elapsed_seconds": round(time.monotonic() - started, 2)})
-        text = str(payload.get("response") or "").strip()
         diagnostics = {
             **request_sizes,
+            "use_model_defaults": use_model_defaults,
+            "model_default_parameters": model_defaults.get("parameters", {}),
+            "effective_request_options": effective_options,
             "attempt": attempt + 1,
             "done_reason": payload.get("done_reason"),
             **text_size_metrics(text, "response"),
             "thinking_chars": len(str(payload.get("thinking") or "")),
             "prompt_eval_count": payload.get("prompt_eval_count"),
             "eval_count": payload.get("eval_count"),
+            "load_seconds": round(float(payload.get("load_duration") or 0) / 1_000_000_000, 3),
+            "prompt_eval_seconds": round(float(payload.get("prompt_eval_duration") or 0) / 1_000_000_000, 3),
+            "eval_seconds": round(float(payload.get("eval_duration") or 0) / 1_000_000_000, 3),
             "elapsed_seconds": round(time.monotonic() - started, 2),
         }
         if text.upper() == "NO_CANDIDATE" or len(text) >= min_response_chars:
@@ -183,6 +288,42 @@ def ollama_draft_result(prompt: str, model: str, enabled: bool, profile: str | N
 def ollama_draft(prompt: str, model: str, enabled: bool, profile: str | None = None, overrides: dict[str, object] | None = None) -> str | None:
     """Compatibility wrapper for call sites that only need best-effort prose."""
     return ollama_draft_result(prompt, model, enabled, profile, overrides).text
+
+
+def gemini_api_available() -> bool:
+    """External API is opt-in at the UI; the key is never stored in the ledger."""
+    return bool(os.getenv("GEMINI_API_KEY", "").strip())
+
+
+def gemini_draft_result(prompt: str, profile: str | None = None, model: str | None = None) -> OllamaDraftResult:
+    """Use the Gemini Developer API only after the caller obtained explicit UI consent."""
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    selected_model = model or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    profile_name, settings = llm_profile(profile)
+    if not api_key:
+        return OllamaDraftResult(None, "GEMINI_API_KEY가 설정되지 않아 외부 모델을 사용할 수 없습니다.")
+    started = time.monotonic()
+    request_sizes = text_size_metrics(prompt, "request_prompt")
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:generateContent",
+            params={"key": api_key},
+            json={"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {
+                "temperature": settings["temperature"], "maxOutputTokens": settings["num_predict"],
+            }},
+            timeout=int(settings["timeout_seconds"]),
+        )
+        if not response.ok:
+            return _audit(OllamaDraftResult(None, _response_error_detail(response), response.status_code), profile_name, selected_model, prompt, settings, {**request_sizes, "provider": "gemini", "elapsed_seconds": round(time.monotonic() - started, 2)})
+        payload = response.json()
+        parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = "".join(str(part.get("text", "")) for part in parts).strip()
+        diagnostics = {**request_sizes, "provider": "gemini", "response_model": payload.get("modelVersion", selected_model), **text_size_metrics(text, "response"), "elapsed_seconds": round(time.monotonic() - started, 2)}
+        return _audit(OllamaDraftResult(text or None, None if text else "Gemini가 텍스트 응답을 반환하지 않았습니다.", diagnostics=diagnostics), profile_name, selected_model, prompt, settings, diagnostics)
+    except requests.Timeout:
+        return _audit(OllamaDraftResult(None, "Gemini API 응답 시간이 초과되었습니다."), profile_name, selected_model, prompt, settings, {**request_sizes, "provider": "gemini", "elapsed_seconds": round(time.monotonic() - started, 2)})
+    except (requests.RequestException, ValueError, KeyError, IndexError) as error:
+        return _audit(OllamaDraftResult(None, f"Gemini API 요청을 완료하지 못했습니다: {error}"), profile_name, selected_model, prompt, settings, {**request_sizes, "provider": "gemini", "elapsed_seconds": round(time.monotonic() - started, 2)})
 
 
 def _audit(result: OllamaDraftResult, profile_name: str, model: str, prompt: str, settings: dict[str, object], diagnostics: dict[str, object]) -> OllamaDraftResult:

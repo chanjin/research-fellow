@@ -1,4 +1,6 @@
 data/
 .agent/
-__pycache__/
 .venv/
+*.pyc
+*.jsonl
+.DS_Store

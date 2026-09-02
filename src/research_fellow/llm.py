@@ -16,7 +16,9 @@ import requests
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+# GEMINI_MODEL이 설정되어 있으면 그 값을 우선 사용한다. 기본값은 현재
+# 안정적으로 사용할 수 있는 Flash 계열 모델로 둔다.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 LLM_PROFILES: dict[str, dict[str, object]] = {
     "default": {"temperature": 0.2, "think": "medium", "num_ctx": 4096, "num_predict": 1600, "timeout_seconds": 200, "min_response_chars": 240, "max_short_retries": 1},
@@ -26,7 +28,9 @@ LLM_PROFILES: dict[str, dict[str, object]] = {
     # gpt-oss:20b on a 16GB Mac can swap heavily above an 8K context. The
     # paper-reading prompt is capped below that, so match Ollama Chat's 8K
     # setting explicitly for this one long-context workload.
-    "paper_reading": {"temperature": 0.15, "think": "low", "num_ctx": 8192, "num_predict": 1400, "timeout_seconds": 300, "min_response_chars": 180, "max_short_retries": 1},
+    # 논문 요약과 근거 기반 읽기 질문은 한 요청에 함께 생성한다. 질문 수는
+    # 최대 10개이나, 완결된 응답을 우선하기 위해 충분한 출력 여유를 둔다.
+    "paper_reading": {"temperature": 0.15, "think": "low", "num_ctx": 8192, "num_predict": 6000, "timeout_seconds": 360, "min_response_chars": 180, "max_short_retries": 1},
     "m2_report": {"temperature": 0.25, "think": "medium", "num_ctx": 6144, "num_predict": 1800, "timeout_seconds": 260, "min_response_chars": 300, "max_short_retries": 1},
 }
 _AUDIT_LOGGER: Any | None = None
@@ -77,7 +81,7 @@ class OllamaDraftResult:
 
     @property
     def ok(self) -> bool:
-        return bool(self.text)
+        return bool(self.text) and not self.error
 
 
 def ollama_base_url() -> str:
@@ -295,6 +299,16 @@ def gemini_api_available() -> bool:
     return bool(os.getenv("GEMINI_API_KEY", "").strip())
 
 
+def _gemini_thinking_config(model: str, think: object) -> dict[str, object]:
+    """Translate shared profiles into the provider's version-specific controls."""
+    level = str(think or "medium").lower()
+    if model.startswith("gemini-2.5-"):
+        budgets = {"low": 1024, "medium": 4096, "high": 8192}
+        return {"thinkingBudget": budgets.get(level, 4096)}
+    # Gemini 3 models use a reasoning level instead of the legacy budget.
+    return {"thinkingLevel": {"low": "low", "medium": "medium", "high": "high"}.get(level, "medium")}
+
+
 def gemini_draft_result(prompt: str, profile: str | None = None, model: str | None = None) -> OllamaDraftResult:
     """Use the Gemini Developer API only after the caller obtained explicit UI consent."""
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -304,22 +318,63 @@ def gemini_draft_result(prompt: str, profile: str | None = None, model: str | No
         return OllamaDraftResult(None, "GEMINI_API_KEY가 설정되지 않아 외부 모델을 사용할 수 없습니다.")
     started = time.monotonic()
     request_sizes = text_size_metrics(prompt, "request_prompt")
+    min_response_chars = int(settings["min_response_chars"])
+    max_retries = int(settings["max_short_retries"])
+    request_prompt = prompt
+    longest_short_text = ""
+    thinking_config = _gemini_thinking_config(selected_model, settings.get("think"))
     try:
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:generateContent",
-            params={"key": api_key},
-            json={"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {
-                "temperature": settings["temperature"], "maxOutputTokens": settings["num_predict"],
-            }},
-            timeout=int(settings["timeout_seconds"]),
-        )
-        if not response.ok:
-            return _audit(OllamaDraftResult(None, _response_error_detail(response), response.status_code), profile_name, selected_model, prompt, settings, {**request_sizes, "provider": "gemini", "elapsed_seconds": round(time.monotonic() - started, 2)})
-        payload = response.json()
-        parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        text = "".join(str(part.get("text", "")) for part in parts).strip()
-        diagnostics = {**request_sizes, "provider": "gemini", "response_model": payload.get("modelVersion", selected_model), **text_size_metrics(text, "response"), "elapsed_seconds": round(time.monotonic() - started, 2)}
-        return _audit(OllamaDraftResult(text or None, None if text else "Gemini가 텍스트 응답을 반환하지 않았습니다.", diagnostics=diagnostics), profile_name, selected_model, prompt, settings, diagnostics)
+        for attempt in range(max_retries + 1):
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:generateContent",
+                params={"key": api_key},
+                json={"contents": [{"role": "user", "parts": [{"text": request_prompt}]}], "generationConfig": {
+                    "temperature": settings["temperature"], "maxOutputTokens": settings["num_predict"],
+                    "thinkingConfig": thinking_config,
+                }},
+                timeout=int(settings["timeout_seconds"]),
+            )
+            if not response.ok:
+                return _audit(OllamaDraftResult(None, _response_error_detail(response), response.status_code), profile_name, selected_model, request_prompt, settings, {**request_sizes, "provider": "gemini", "attempt": attempt + 1, "elapsed_seconds": round(time.monotonic() - started, 2)})
+            payload = response.json()
+            candidate = payload.get("candidates", [{}])[0]
+            parts = candidate.get("content", {}).get("parts", [])
+            text = "".join(str(part.get("text", "")) for part in parts).strip()
+            finish_reason = str(candidate.get("finishReason") or "UNKNOWN")
+            diagnostics = {
+                **request_sizes,
+                "provider": "gemini",
+                "requested_model": selected_model,
+                "response_model": payload.get("modelVersion", selected_model),
+                "finish_reason": finish_reason,
+                "attempt": attempt + 1,
+                "max_output_tokens": settings["num_predict"],
+                "thinking_config": thinking_config,
+                "prompt_token_count": payload.get("usageMetadata", {}).get("promptTokenCount"),
+                "candidate_token_count": payload.get("usageMetadata", {}).get("candidatesTokenCount"),
+                "thoughts_token_count": payload.get("usageMetadata", {}).get("thoughtsTokenCount"),
+                "total_token_count": payload.get("usageMetadata", {}).get("totalTokenCount"),
+                **text_size_metrics(text, "response"),
+                "elapsed_seconds": round(time.monotonic() - started, 2),
+            }
+            if finish_reason == "MAX_TOKENS" and attempt < max_retries:
+                longest_short_text = max(longest_short_text, text, key=len)
+                request_prompt = (
+                    f"{prompt}\n\nThe previous response reached its output limit before it was complete. "
+                    "Return a compact but complete response: a 500–800 Korean-character summary and only one to three "
+                    "highest-value question blocks. Keep each field to one sentence, except Evidence which has exactly two concise p.N hints."
+                )
+                continue
+            if finish_reason not in {"STOP", "UNKNOWN"}:
+                return _audit(OllamaDraftResult(None, f"Gemini가 '{finish_reason}' 사유로 출력을 중단했습니다. 이 결과는 저장하지 않았습니다.", diagnostics=diagnostics), profile_name, selected_model, request_prompt, settings, diagnostics)
+            if text.upper() == "NO_CANDIDATE" or len(text) >= min_response_chars:
+                return _audit(OllamaDraftResult(text, diagnostics=diagnostics), profile_name, selected_model, request_prompt, settings, diagnostics)
+            longest_short_text = max(longest_short_text, text, key=len)
+            request_prompt = (
+                f"{prompt}\n\nYour previous response was only {len(text)} characters and incomplete. "
+                "Return a complete response in the exact requested format. Prefer fewer complete items over partial content."
+            )
+        return _audit(OllamaDraftResult(None, f"Gemini가 {max_retries + 1}회 연속 너무 짧은 응답을 반환했습니다 ({len(longest_short_text)}자). 이 결과는 저장하지 않았습니다.", diagnostics=diagnostics), profile_name, selected_model, request_prompt, settings, diagnostics)
     except requests.Timeout:
         return _audit(OllamaDraftResult(None, "Gemini API 응답 시간이 초과되었습니다."), profile_name, selected_model, prompt, settings, {**request_sizes, "provider": "gemini", "elapsed_seconds": round(time.monotonic() - started, 2)})
     except (requests.RequestException, ValueError, KeyError, IndexError) as error:

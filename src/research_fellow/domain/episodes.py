@@ -31,6 +31,8 @@ class EpisodicMemory(BaseModel):
     evidence_card_ids: list[str] = Field(default_factory=list)
     evidence_relation_ids: list[str] = Field(default_factory=list)
     outcome: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
     def retrieval_text(self) -> str:
         """Situation dominates retrieval; answer text is secondary case context."""

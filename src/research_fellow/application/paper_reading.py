@@ -14,15 +14,31 @@ from research_fellow.storage import Ledger
 def reading_prompt(document: ExtractedDocument, paper: dict[str, Any], context: str) -> str:
     source = "\n\n".join(f"[p.{page.page_number}] {page.text[:2200]}" for page in document.pages[:10])[:20000]
     return f"""You are an academic reading assistant. Read only the source text below.
-For at most four items, write Korean in this exact block format, separated by ---.
-First, write a substantial, evidence-grounded Korean research summary, then write the question blocks.
+Write Korean in this exact block format, separated by ---. Return one to five high-value question blocks by default; return more only when each item has distinct, sufficient evidence. Never return more than ten blocks.
+First, write a substantial, evidence-grounded Korean research summary, then an M1 interpretation for the supplied research context, suggested shelf labels, and the question blocks.
 Research summary:
 Write freely in several paragraphs (roughly 800–1,500 Korean characters when the source supports it). Explain the research problem, motivation, method and material, key observations/results, the authors' interpretation, research significance, and limits. Do not force a fixed list format. Keep clear distinctions between the paper's findings and your cautious interpretation.
 
-Question: a question that requires the researcher's judgment
-Tentative answer: an interpretation grounded only in this paper
-Evidence: page and short source hint; page and short source hint
-Uncertainty: scope or evidence limitation
+M1 research-context interpretation:
+- Explain how this paper can contribute to the stated research context.
+- State what the paper cannot establish for that context.
+- Include at least one counterpoint, application condition, or boundary of applicability.
+
+Suggested shelf labels:
+Labels: up to ten concise English labels, separated by commas. Cover topic, method, evidence type, or application context where supported. Do not use generic labels such as paper or AI.
+
+Use these exact Korean field labels in every question block. Do not omit a field; when the source is insufficient, write "원문에서 확인 필요" rather than leaving it blank.
+질문: 연구자의 판단이 필요한 질문
+잠정 답변: 이 논문에만 근거한 해석
+근거: 독립적으로 확인 가능한 p.N과 짧은 원문 단서 두 개. 한 곳만 가능하면 그 사실을 한계·유보에 명시
+한계·유보: 적용 범위 또는 근거의 한계
+연구 관련성: 이 질문이 알리는 현재 가설·설계 선택·평가 쟁점·탐색 방향
+온톨로지 후보: 일반화해 검토할 개념·관계·조건. 근거가 없으면 비워둠
+레이블: 간결한 영문 레이블, 쉼표 구분
+카드 제목: Claim을 반복하지 않는 짧은 한국어 명사구
+핵심 개념: 이후 관계 작업에 쓸 도메인 개념, 쉼표 구분
+적용 대상: Claim이 다루는 객체·상황·과업, 쉼표 구분
+적용 조건: 원문에 근거한 전제·관찰 범위·설계 제약
 
 Paper: {paper['title']}
 Research context: {context or 'not supplied'}
@@ -31,32 +47,85 @@ Source text:
 
 Output check before responding:
 - Use Korean only.
-- First write the free-form Research summary, then the question blocks. Do not write content outside those two sections.
-- Return at most four blocks separated by ---.
-- Every block must contain Question, Tentative answer, Evidence, and Uncertainty.
+- First write Research summary, M1 research-context interpretation, Suggested shelf labels, then the question blocks. Do not write content outside these sections.
+- Return one to five complete question blocks by default, and never more than ten, separated by ---.
+- Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 온톨로지 후보, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건.
 - Every Evidence value must include p.N and a short source hint.
+- Prefer fewer complete blocks to an incomplete response. Keep every non-evidence field concise (one or two sentences); give exactly two evidence locations unless one is genuinely unavailable.
 """
+
+
+_READING_FIELD_ALIASES = {
+        "question": "question", "질문": "question",
+        "연구자 판단이 필요한 질문": "question", "연구자 판단 질문": "question", "판단이 필요한 질문": "question",
+        "tentative answer": "tentative_answer", "잠정 답변": "tentative_answer", "잠정적 답변": "tentative_answer", "claim": "tentative_answer", "주장": "tentative_answer",
+        "evidence": "evidence", "근거": "evidence", "증거": "evidence",
+        "uncertainty": "uncertainty", "불확실성": "uncertainty", "유보": "uncertainty", "한계": "uncertainty", "한계·유보": "uncertainty", "한계 및 유보": "uncertainty",
+        "research relevance": "research_relevance", "연구 관련성": "research_relevance", "연구적 관련성": "research_relevance",
+        "ontology suggestion": "suggested_ontology", "온톨로지 힌트": "suggested_ontology", "온톨로지 제안": "suggested_ontology", "온톨로지 후보": "suggested_ontology", "개념 제안": "suggested_ontology",
+        "suggested labels": "suggested_labels", "추천 레이블": "suggested_labels", "제안 레이블": "suggested_labels", "제안 라벨": "suggested_labels", "labels": "suggested_labels", "레이블": "suggested_labels",
+        "suggested title": "suggested_title", "추천 카드 제목": "suggested_title", "제안 타이틀": "suggested_title", "제안 제목": "suggested_title", "card title": "suggested_title", "카드 제목": "suggested_title",
+        "suggested concepts": "suggested_concepts", "추천 핵심 개념": "suggested_concepts", "제안 개념": "suggested_concepts", "concepts": "suggested_concepts", "핵심 개념": "suggested_concepts",
+        "suggested applies to": "suggested_applies_to", "추천 적용 대상": "suggested_applies_to", "제안 적용 대상": "suggested_applies_to", "applies to": "suggested_applies_to", "적용 대상": "suggested_applies_to",
+        "suggested conditions": "suggested_conditions", "추천 적용 조건": "suggested_conditions", "제안 조건": "suggested_conditions", "conditions": "suggested_conditions", "적용 조건": "suggested_conditions",
+        "suggested limits": "suggested_limits", "추천 한계": "suggested_limits", "제한": "suggested_limits", "limits": "suggested_limits",
+}
+
+
+def _reading_field_name(raw_key: str) -> str:
+    """Accept both `Question: text` and Markdown heading forms.
+
+    Local models often emit `**질문 1**` followed by a question on the next
+    line. Keep the normalizer shared with the unmatched-section diagnostic.
+    """
+    normalized = re.sub(r"\s*\([^)]*\)", "", raw_key)
+    normalized = re.sub(r"\s*\d+\s*$", "", re.sub(r"^[\s#*\-•]+|[\s#*]+$", "", normalized)).lower()
+    return _READING_FIELD_ALIASES.get(normalized, "")
+
+
+def unconsumed_reading_sections(text: str) -> list[str]:
+    """Return explicit model sections whose field labels were not recognized.
+
+    This is a diagnostic only: it never changes the saved raw response or
+    knowledge-card data.  It makes local-model format drift visible without
+    flooding the UI with normally parsed prose.
+    """
+    sections: list[str] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        nonlocal pending
+        value = "\n".join(pending).strip()
+        if value:
+            sections.append(value)
+        pending = []
+
+    structural = re.compile(r"(?i)^(?:research|paper) summary|연구\s*(?:서머리|요약)|m1\s*research-context interpretation|m1\s*연구.*해석|suggested shelf labels|추천 서재 레이블|질문\s*블록\s*\d+$")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if pending:
+                pending.append(line)
+            continue
+        key = stripped.split(":", 1)[0] if ":" in stripped else stripped
+        is_known = bool(_reading_field_name(key) or _reading_field_name(stripped))
+        is_separator = bool(re.fullmatch(r"---+", stripped))
+        clean_heading = re.sub(r"^[\s#*\-•]+|[\s#*]+$", "", stripped)
+        is_structural = bool(structural.match(clean_heading))
+        is_heading = ":" in stripped and len(key.strip()) <= 60 or (stripped.startswith(("#", "**")) and stripped.endswith("**"))
+        if is_known or is_separator or is_structural:
+            flush()
+        elif is_heading:
+            flush()
+            pending = [line]
+        elif pending:
+            pending.append(line)
+    flush()
+    return sections
 
 
 def parse_reading_questions(text: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    aliases = {
-        "question": "question", "질문": "question",
-        "연구자 판단이 필요한 질문": "question", "연구자 판단 질문": "question", "판단이 필요한 질문": "question",
-        "tentative answer": "tentative_answer", "잠정 답변": "tentative_answer", "잠정적 답변": "tentative_answer",
-        "evidence": "evidence", "근거": "evidence", "증거": "evidence",
-        "uncertainty": "uncertainty", "불확실성": "uncertainty", "유보": "uncertainty",
-    }
-    def field_name(raw_key: str) -> str:
-        """Accept both `Question: text` and Markdown heading forms.
-
-        Local models often emit `**질문 1**` followed by a question on the
-        next line, even when asked for a colon-delimited block.  This is still
-        a well-grounded reading response, so parsing must be permissive while
-        validation below remains strict.
-        """
-        normalized = re.sub(r"\s*\d+\s*$", "", re.sub(r"^[\s#*\-•]+|[\s#*]+$", "", raw_key)).lower()
-        return aliases.get(normalized, "")
 
     values: dict[str, str] = {}
     current = ""
@@ -74,7 +143,20 @@ def parse_reading_questions(text: str) -> list[dict[str, Any]]:
             else:
                 evidence.append(cleaned)
         if len(values.get("question", "")) >= 6 and len(values.get("tentative_answer", "")) >= 12 and evidence:
-            results.append({"question": values["question"], "tentative_answer": values["tentative_answer"], "evidence": evidence[:4], "uncertainty": values.get("uncertainty", "원문 범위를 넘어선 일반화는 유보합니다.")})
+            results.append({
+                "question": values["question"],
+                "tentative_answer": values["tentative_answer"],
+                "evidence": evidence[:10],
+                "uncertainty": values.get("uncertainty", "원문 범위를 넘어선 일반화는 유보합니다."),
+                "research_relevance": values.get("research_relevance", ""),
+                "suggested_ontology": values.get("suggested_ontology", ""),
+                "suggested_labels": values.get("suggested_labels", ""),
+                "suggested_title": values.get("suggested_title", ""),
+                "suggested_concepts": values.get("suggested_concepts", ""),
+                "suggested_applies_to": values.get("suggested_applies_to", ""),
+                "suggested_conditions": values.get("suggested_conditions", ""),
+                "suggested_limits": values.get("suggested_limits", ""),
+            })
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -86,8 +168,8 @@ def parse_reading_questions(text: str) -> list[dict[str, Any]]:
         inline_value = ""
         if ":" in stripped:
             key, inline_value = stripped.split(":", 1)
-            labelled_field = field_name(key)
-        heading_field = field_name(stripped)
+            labelled_field = _reading_field_name(key)
+        heading_field = _reading_field_name(stripped)
         field = labelled_field or heading_field
         if field:
             # Some local models omit `---` between `질문 1`, `질문 2`, ... .
@@ -109,7 +191,7 @@ def parse_reading_questions(text: str) -> list[dict[str, Any]]:
             else:
                 values[current] = f"{values.get(current, '')} {content}".strip()
     append_current()
-    return results[:4]
+    return results[:10]
 
 
 def parse_reading_summary(text: str) -> str:

@@ -183,7 +183,9 @@ def _write_cache(path: Path, document: ExtractedDocument) -> None:
 
 def _extract_pdf_document(file_name: str, content: bytes, document_id: str, max_pages: int, chars_per_page: int) -> ExtractedDocument:
     try:
-        return _extract_pdftotext_document(file_name, content, document_id, max_pages, chars_per_page)
+        primary = _extract_pdftotext_document(file_name, content, document_id, max_pages, chars_per_page)
+        title, author = _pdf_embedded_title_author(content)
+        return replace(primary, title=title or primary.title, author=author or primary.author)
     except (FileNotFoundError, subprocess.SubprocessError, OSError, DocumentExtractionError):
         pass
 
@@ -213,6 +215,19 @@ def _extract_pdf_document(file_name: str, content: bytes, document_id: str, max_
     else:
         detail += "pypdf fallback을 사용했습니다."
     return replace(fallback, extraction_note=f"{fallback.extraction_note} {detail}")
+
+
+def _pdf_embedded_title_author(content: bytes) -> tuple[str, str]:
+    """Read only explicit PDF bibliographic metadata; never infer authors from prose."""
+    try:
+        from pypdf import PdfReader
+
+        metadata = PdfReader(BytesIO(content)).metadata or {}
+        title = str(metadata.get("/Title") or "").strip()
+        author = str(metadata.get("/Author") or "").strip()
+        return ("" if title.casefold() in {"untitled", "none"} else title, author)
+    except Exception:
+        return "", ""
 
 
 def _extract_pdftotext_document(file_name: str, content: bytes, document_id: str, max_pages: int, chars_per_page: int) -> ExtractedDocument:

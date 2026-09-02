@@ -14,7 +14,7 @@ from research_fellow.infrastructure.prompt_templates import (
     PROMPT_CATALOG, read_prompt_template, render_prompt_source, save_prompt_template,
 )
 from research_fellow.infrastructure.retrieval import RetrievalResult
-from research_fellow.llm import LLM_PROFILES, llm_profile, ollama_draft_result
+from research_fellow.llm import LLM_PROFILES, gemini_draft_result, llm_profile, ollama_draft_result
 from research_fellow.storage import Ledger
 
 
@@ -177,7 +177,7 @@ def _build_context(template_name: str, cards: list[dict[str, Any]], prefix: str,
 
 def render_developer_screen(
     cards: list[dict[str, Any]], model: str, use_ollama: bool, extraction_cache_dir: Path | None = None, ledger: Ledger | None = None,
-    llm_audit_path: Path | None = None,
+    llm_audit_path: Path | None = None, provider: str = "ollama",
 ) -> None:
     st.header("개발 · Jinja 프롬프트 작업실")
     st.caption("여기서 저장한 템플릿은 즉시 운영 화면에도 적용됩니다. 실행 결과는 초안이며, 지식·관계·승인 상태를 변경하지 않습니다.")
@@ -205,13 +205,17 @@ def render_developer_screen(
         st.caption("왼쪽의 현재 편집본(저장 전 변경 포함)으로 렌더링합니다. 실행은 지식·관계·승인 상태를 변경하지 않습니다.")
         profile_name = st.selectbox("LLM 호출 프로파일", list(LLM_PROFILES), index=list(LLM_PROFILES).index("m2_report" if template.name.startswith("m2_") else "p1_card_draft"))
         _, base = llm_profile(profile_name)
-        with st.expander("이번 실행의 Ollama 설정", expanded=True):
-            temperature = st.slider("temperature", 0.0, 1.0, float(base["temperature"]), 0.05)
-            think = st.selectbox("think", ["low", "medium", "high"], index=["low", "medium", "high"].index(str(base["think"])))
-            num_ctx = st.select_slider("num_ctx", options=[2048, 4096, 6144, 8192], value=int(base["num_ctx"]))
-            num_predict = st.select_slider("num_predict", options=[400, 700, 900, 1400, 1600, 1800, 2400], value=int(base["num_predict"]))
-            timeout_seconds = st.number_input("timeout_seconds", min_value=30, max_value=900, value=int(base["timeout_seconds"]), step=10)
-            overrides = {"temperature": temperature, "think": think, "num_ctx": num_ctx, "num_predict": num_predict, "timeout_seconds": timeout_seconds}
+        overrides: dict[str, object] | None = None
+        if provider == "ollama":
+            with st.expander("이번 실행의 Ollama 설정", expanded=True):
+                temperature = st.slider("temperature", 0.0, 1.0, float(base["temperature"]), 0.05)
+                think = st.selectbox("think", ["low", "medium", "high"], index=["low", "medium", "high"].index(str(base["think"])))
+                num_ctx = st.select_slider("num_ctx", options=[2048, 4096, 6144, 8192], value=int(base["num_ctx"]))
+                num_predict = st.select_slider("num_predict", options=[400, 700, 900, 1400, 1600, 1800, 2400], value=int(base["num_predict"]))
+                timeout_seconds = st.number_input("timeout_seconds", min_value=30, max_value=900, value=int(base["timeout_seconds"]), step=10)
+                overrides = {"temperature": temperature, "think": think, "num_ctx": num_ctx, "num_predict": num_predict, "timeout_seconds": timeout_seconds}
+        else:
+            st.caption("Gemini 외부 API를 사용합니다. Ollama 전용 실행 설정은 적용되지 않습니다.")
         try:
             context = _build_context(template.name, cards, f"developer-{template.name}", extraction_cache_dir)
             prompt = render_prompt_source(st.session_state[editor_key], **context)
@@ -219,13 +223,14 @@ def render_developer_screen(
                 prompt_size = len(prompt.encode("utf-8"))
                 st.caption(f"입력 크기: {len(prompt):,}자 · {prompt_size:,} UTF-8 bytes · 추정 {((prompt_size + 3) // 4):,} tokens (정확한 토큰 수는 Ollama 응답의 prompt_eval_count 참조)")
                 st.code(prompt, language="markdown")
-            if st.button("Ollama로 초안 실행", type="primary", key=f"run-{template.name}"):
-                result = ollama_draft_result(prompt, model, use_ollama, profile=profile_name, overrides=overrides)
+            run_label = "Gemini로 초안 실행" if provider == "gemini" else "Ollama로 초안 실행"
+            if st.button(run_label, type="primary", key=f"run-{template.name}"):
+                result = gemini_draft_result(prompt, profile=profile_name) if provider == "gemini" else ollama_draft_result(prompt, model, use_ollama, profile=profile_name, overrides=overrides)
                 if result.ok:
                     st.text_area("LLM 초안 결과", value=result.text, height=360, key=f"output-{template.name}")
                     st.caption(f"종료: {result.diagnostics}")
                 else:
-                    st.error(result.error or "Ollama 초안을 만들지 못했습니다.")
+                    st.error(result.error or "LLM 초안을 만들지 못했습니다.")
         except (ValueError, json.JSONDecodeError) as error:
             st.info(f"실행 문맥을 준비하세요: {error}")
         except Exception as error:

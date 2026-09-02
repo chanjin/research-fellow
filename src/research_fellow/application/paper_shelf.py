@@ -54,7 +54,7 @@ def paper_analysis_prompt(document: ExtractedDocument, paper: dict[str, Any], re
     )
 
 
-def suggested_paper_labels(summary: str) -> list[str]:
+def suggested_paper_labels(summary: str, max_labels: int = 10) -> list[str]:
     """Accept the explicit label line only; malformed model output changes nothing."""
     match = re.search(r"(?im)^\s*(?:labels?|레이블)\s*:\s*(.+)$", summary)
     if not match:
@@ -64,6 +64,6 @@ def suggested_paper_labels(summary: str) -> list[str]:
         label = " ".join(raw.strip(" -•#\t").split())
         if 1 < len(label) <= 48 and label.casefold() not in {item.casefold() for item in labels}:
             labels.append(label)
-        if len(labels) == 5:
+        if len(labels) == max_labels:
             break
     return labels

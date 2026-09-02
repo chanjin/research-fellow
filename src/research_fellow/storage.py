@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -170,6 +171,10 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS paper_reading_questions (
                     question_id TEXT PRIMARY KEY, paper_id TEXT NOT NULL, question TEXT NOT NULL,
                     tentative_answer TEXT NOT NULL, evidence_json TEXT NOT NULL, uncertainty TEXT NOT NULL,
+                    research_relevance TEXT NOT NULL DEFAULT '', suggested_ontology TEXT NOT NULL DEFAULT '',
+                    suggested_labels TEXT NOT NULL DEFAULT '', suggested_title TEXT NOT NULL DEFAULT '', suggested_concepts TEXT NOT NULL DEFAULT '',
+                    suggested_applies_to TEXT NOT NULL DEFAULT '', suggested_conditions TEXT NOT NULL DEFAULT '',
+                    suggested_limits TEXT NOT NULL DEFAULT '',
                     researcher_comment TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'proposed',
                     promotion_request_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
@@ -234,6 +239,16 @@ class Ledger:
             analysis_columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_analyses)").fetchall()}
             if "reading_raw_output" not in analysis_columns:
                 conn.execute("ALTER TABLE paper_analyses ADD COLUMN reading_raw_output TEXT NOT NULL DEFAULT ''")
+            reading_question_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(paper_reading_questions)").fetchall()
+            }
+            if "research_relevance" not in reading_question_columns:
+                conn.execute("ALTER TABLE paper_reading_questions ADD COLUMN research_relevance TEXT NOT NULL DEFAULT ''")
+            if "suggested_ontology" not in reading_question_columns:
+                conn.execute("ALTER TABLE paper_reading_questions ADD COLUMN suggested_ontology TEXT NOT NULL DEFAULT ''")
+            for column in ("suggested_labels", "suggested_title", "suggested_concepts", "suggested_applies_to", "suggested_conditions", "suggested_limits"):
+                if column not in reading_question_columns:
+                    conn.execute(f"ALTER TABLE paper_reading_questions ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "6"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
@@ -647,16 +662,27 @@ class Ledger:
         item["labels"] = json.loads(item.pop("labels_json"))
         return item
 
-    def update_shelf_paper(self, paper_id: str, *, shelf_status: str, reading_status: str, labels: list[str] | None = None) -> None:
+    def update_shelf_paper(
+        self, paper_id: str, *, shelf_status: str, reading_status: str, labels: list[str] | None = None,
+        authors: list[str] | None = None, publication_year: str | None = None,
+    ) -> None:
         if shelf_status not in {"core", "reference", "held", "excluded"}:
             raise ValueError("지원하지 않는 서재 상태입니다.")
         if reading_status not in {"unread", "reading", "read"}:
             raise ValueError("지원하지 않는 읽기 상태입니다.")
         with self.connect() as conn:
-            if labels is None:
-                conn.execute("UPDATE paper_shelf SET shelf_status=?, reading_status=?, updated_at=? WHERE paper_id=?", (shelf_status, reading_status, now(), paper_id))
-            else:
-                conn.execute("UPDATE paper_shelf SET shelf_status=?, reading_status=?, labels_json=?, updated_at=? WHERE paper_id=?", (shelf_status, reading_status, json.dumps(_clean_paper_labels(labels), ensure_ascii=False), now(), paper_id))
+            sets, values = ["shelf_status=?", "reading_status=?"], [shelf_status, reading_status]
+            if labels is not None:
+                sets.append("labels_json=?")
+                values.append(json.dumps(_clean_paper_labels(labels), ensure_ascii=False))
+            if authors is not None:
+                sets.append("authors_json=?")
+                values.append(json.dumps([author for author in authors if author], ensure_ascii=False))
+            if publication_year is not None:
+                sets.append("publication_year=?")
+                values.append(publication_year if re.fullmatch(r"(?:19|20)\d{2}", publication_year) else "")
+            values.extend([now(), paper_id])
+            conn.execute(f"UPDATE paper_shelf SET {', '.join(sets)}, updated_at=? WHERE paper_id=?", values)
             self._record_paper_event(conn, paper_id, "state_updated", {"importance": shelf_status, "reading_status": reading_status})
 
     def paper_analysis(self, paper_id: str) -> dict[str, Any] | None:
@@ -733,6 +759,12 @@ class Ledger:
                     # before the researcher reviews the reading question.
                     "research_relevance": str(question.get("research_relevance", "")),
                     "suggested_ontology": str(question.get("suggested_ontology", "")),
+                    "suggested_labels": str(question.get("suggested_labels", "")),
+                    "suggested_title": str(question.get("suggested_title", "")),
+                    "suggested_concepts": str(question.get("suggested_concepts", "")),
+                    "suggested_applies_to": str(question.get("suggested_applies_to", "")),
+                    "suggested_conditions": str(question.get("suggested_conditions", "")),
+                    "suggested_limits": str(question.get("suggested_limits", "")),
                     "researcher_comment": "",
                     "status": "proposed",
                     "promotion_request_id": None,
@@ -756,7 +788,7 @@ class Ledger:
         return [{**dict(row), "evidence": json.loads(row["evidence_json"])} for row in rows]
 
     def update_paper_reading_question(self, question_id: str, *, researcher_comment: str, status: str, promotion_request_id: str | None = None) -> bool:
-        if status not in {"proposed", "approved", "needs_revision", "irrelevant", "promoted", "registered"}:
+        if status not in {"proposed", "approved", "needs_revision", "deferred", "irrelevant", "promoted", "registered"}:
             raise ValueError("지원하지 않는 논문 읽기 질문 상태입니다.")
         with self.connect() as conn:
             result = conn.execute("UPDATE paper_reading_questions SET researcher_comment=?, status=?, promotion_request_id=COALESCE(?, promotion_request_id), updated_at=? WHERE question_id=?", (researcher_comment, status, promotion_request_id, now(), question_id))

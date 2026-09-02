@@ -52,6 +52,9 @@ class KnowledgeCard(BaseModel):
     evidence_excerpt: str = Field(default="", max_length=1600)
     evidence_pages: list[int] = Field(default_factory=list)
     citation_markers: list[str] = Field(default_factory=list)
+    # Additional source-specific evidence accumulated when a later paper supports
+    # an existing Claim.  The first source remains in provenance/evidence_excerpt.
+    supporting_evidence: list[dict[str, object]] = Field(default_factory=list)
     conditions: str = ""
     limits: str = ""
     provenance: dict[str, str]

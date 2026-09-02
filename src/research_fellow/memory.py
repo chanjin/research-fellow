@@ -49,11 +49,30 @@ class KnowledgeMemory:
             for line in stream:
                 if line.strip():
                     cards.append(json.loads(line))
-        cards = list(reversed(cards))
+        # A later evidence-enrichment record reuses the same card ID.  Project
+        # only the latest record so append-only history never renders duplicates.
+        latest_by_id: dict[str, dict[str, Any]] = {}
+        for card in cards:
+            latest_by_id[str(card["card_id"])] = card
+        cards = list(reversed(list(latest_by_id.values())))
         if include_deleted:
             return cards
         deleted = self._deleted_ids()
         return [card for card in cards if card["card_id"] not in deleted]
+
+    def add_supporting_evidence(self, card_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        """Append evidence to an existing Claim without creating another knowledge card."""
+        existing = next((card for card in self.all() if card["card_id"] == card_id), None)
+        if not existing:
+            raise ValueError("근거를 보강할 기존 지식카드를 찾을 수 없습니다.")
+        prior = list(existing.get("supporting_evidence", []))
+        source_key = (str(evidence.get("source_name", "")), str(evidence.get("evidence_excerpt", "")))
+        if not any((str(item.get("source_name", "")), str(item.get("evidence_excerpt", ""))) == source_key for item in prior):
+            prior.append(evidence)
+        updated = {**existing, "supporting_evidence": prior, "updated_at": datetime.now(UTC).isoformat(timespec="seconds")}
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(updated, ensure_ascii=False) + "\n")
+        return updated
 
     def search(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
         words = {word.lower() for word in query.split() if len(word) > 1}

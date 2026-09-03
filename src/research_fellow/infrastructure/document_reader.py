@@ -83,6 +83,56 @@ def extracted_document_text(document: ExtractedDocument) -> str:
     return "\n".join(header) + "".join(body) + "\n"
 
 
+def infer_bibliographic_metadata(document: ExtractedDocument) -> dict[str, Any]:
+    """Conservatively infer citation fields from the document's opening text.
+
+    PDF metadata is often blank, copied from an editor, or describes the file
+    rather than the paper.  We therefore inspect the title page first and use
+    embedded metadata only as a fallback.  Values remain researcher-editable.
+    """
+    opening = "\n".join(page.text for page in document.pages[:2])[:8_000]
+    before_abstract = re.split(r"(?im)^\s*(?:abstract|요약)\b", opening, maxsplit=1)[0]
+    lines = [" ".join(line.split()) for line in before_abstract.splitlines()]
+    lines = [line for line in lines if line and not re.match(r"^(?:arxiv|doi:|https?://|copyright|©)", line, flags=re.I)]
+
+    title = ""
+    title_index = -1
+    for index, line in enumerate(lines[:12]):
+        if 12 <= len(line) <= 240 and "@" not in line and not re.search(r"\b(?:university|department|institute|school)\b", line, flags=re.I):
+            title = line
+            title_index = index
+            # A split title commonly has a second title-cased line before names.
+            if index + 1 < len(lines) and 8 <= len(lines[index + 1]) <= 140 and "," not in lines[index + 1] and not re.search(r"[@\d]", lines[index + 1]):
+                title = f"{title} {lines[index + 1]}"
+                title_index += 1
+            break
+    if not title:
+        title = document.title or Path(document.file_name).stem
+
+    authors: list[str] = []
+    if title_index >= 0:
+        for author_line in lines[title_index + 1 : title_index + 3]:
+            if re.search(r"\b(?:university|department|institute|school|published|received|accepted)\b|@", author_line, flags=re.I):
+                break
+            author_blob = re.sub(r"\b(?:and|&|및)\b", ",", author_line, flags=re.I)
+            found_on_line = 0
+            for raw in re.split(r"\s*,\s*|\s{2,}", author_blob):
+                candidate = re.sub(r"[\d*†‡§]+", "", raw).strip(" ,;")
+                if re.fullmatch(r"[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}", candidate):
+                    authors.append(candidate)
+                    found_on_line += 1
+            if not found_on_line:
+                break
+    if not authors and document.author and document.author.casefold() not in {"researcher", "unknown"}:
+        authors = [part.strip() for part in re.split(r"[,;]", document.author) if part.strip()]
+
+    dated_context = "\n".join(lines[:20])
+    contextual_years = re.findall(r"(?i)(?:published|accepted|received|copyright|©)\D{0,18}((?:19|20)\d{2})", dated_context)
+    all_years = re.findall(r"\b((?:19|20)\d{2})\b", dated_context)
+    year = (contextual_years[0] if contextual_years else all_years[0] if all_years else "")
+    return {"title": title, "authors": authors, "publication_year": year}
+
+
 def extract_pages(
     uploaded_file: Any,
     max_pages: int = DEFAULT_MAX_PAGES,

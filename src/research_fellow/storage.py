@@ -664,14 +664,19 @@ class Ledger:
 
     def update_shelf_paper(
         self, paper_id: str, *, shelf_status: str, reading_status: str, labels: list[str] | None = None,
-        authors: list[str] | None = None, publication_year: str | None = None,
+        title: str | None = None, authors: list[str] | None = None, publication_year: str | None = None,
     ) -> None:
         if shelf_status not in {"core", "reference", "held", "excluded"}:
             raise ValueError("지원하지 않는 서재 상태입니다.")
         if reading_status not in {"unread", "reading", "read"}:
             raise ValueError("지원하지 않는 읽기 상태입니다.")
+        if title is not None and not title.strip():
+            raise ValueError("논문 제목은 비어 있을 수 없습니다.")
         with self.connect() as conn:
             sets, values = ["shelf_status=?", "reading_status=?"], [shelf_status, reading_status]
+            if title is not None:
+                sets.append("title=?")
+                values.append(title.strip())
             if labels is not None:
                 sets.append("labels_json=?")
                 values.append(json.dumps(_clean_paper_labels(labels), ensure_ascii=False))
@@ -684,6 +689,51 @@ class Ledger:
             values.extend([now(), paper_id])
             conn.execute(f"UPDATE paper_shelf SET {', '.join(sets)}, updated_at=? WHERE paper_id=?", values)
             self._record_paper_event(conn, paper_id, "state_updated", {"importance": shelf_status, "reading_status": reading_status})
+
+    def delete_shelf_paper(self, paper_id: str) -> dict[str, int]:
+        """Remove one shelf asset and its paper-specific working records.
+
+        Knowledge cards are deliberately retained: they can be supported by more
+        than one paper and are independently approved research knowledge.
+        """
+        with self.connect() as conn:
+            question_rows = conn.execute(
+                "SELECT question_id FROM paper_reading_questions WHERE paper_id=?", (paper_id,)
+            ).fetchall()
+            question_ids = [str(row["question_id"]) for row in question_rows]
+            deleted = {
+                "reviews": 0,
+                "questions": 0,
+                "ontology_candidates": 0,
+                "analysis": 0,
+                "card_links": 0,
+                "events": 0,
+                "paper": 0,
+            }
+            if question_ids:
+                placeholders = ", ".join("?" for _ in question_ids)
+                deleted["reviews"] = conn.execute(
+                    f"DELETE FROM paper_reading_reviews WHERE question_id IN ({placeholders})", question_ids
+                ).rowcount
+            deleted["ontology_candidates"] = conn.execute(
+                "DELETE FROM paper_ontology_candidates WHERE paper_id=?", (paper_id,)
+            ).rowcount
+            deleted["questions"] = conn.execute(
+                "DELETE FROM paper_reading_questions WHERE paper_id=?", (paper_id,)
+            ).rowcount
+            deleted["analysis"] = conn.execute(
+                "DELETE FROM paper_analyses WHERE paper_id=?", (paper_id,)
+            ).rowcount
+            deleted["card_links"] = conn.execute(
+                "DELETE FROM paper_card_links WHERE paper_id=?", (paper_id,)
+            ).rowcount
+            deleted["events"] = conn.execute(
+                "DELETE FROM paper_asset_events WHERE paper_id=?", (paper_id,)
+            ).rowcount
+            deleted["paper"] = conn.execute(
+                "DELETE FROM paper_shelf WHERE paper_id=?", (paper_id,)
+            ).rowcount
+        return deleted
 
     def paper_analysis(self, paper_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:

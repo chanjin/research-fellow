@@ -17,6 +17,11 @@ def reading_prompt(document: ExtractedDocument, paper: dict[str, Any], context: 
 Write Korean in this exact block format, separated by ---. Return one to five high-value question blocks by default; return more only when each item has distinct, sufficient evidence. Never return more than ten blocks.
 First, write a substantial, evidence-grounded Korean research summary, then an M1 interpretation for the supplied research context, suggested shelf labels, and the question blocks.
 Research summary:
+Start with this separate three-part overview so a researcher can understand the paper at a glance:
+- 대상 문제: what concrete problem, gap, or decision the paper addresses, and for whom or in which setting it matters
+- 해결 접근: how the paper addresses it; name the method, system, data/material, comparison, or reasoning approach actually used
+- 핵심 결과: the main observed result, effect, capability, or negative finding; distinguish reported evidence from author interpretation
+
 Write freely in several paragraphs (roughly 800–1,500 Korean characters when the source supports it). Explain the research problem, motivation, method and material, key observations/results, the authors' interpretation, research significance, and limits. Do not force a fixed list format. Keep clear distinctions between the paper's findings and your cautious interpretation.
 
 M1 research-context interpretation:
@@ -47,7 +52,7 @@ Source text:
 
 Output check before responding:
 - Use Korean only.
-- First write Research summary, M1 research-context interpretation, Suggested shelf labels, then the question blocks. Do not write content outside these sections.
+- First write Research summary beginning with 대상 문제, 해결 접근, 핵심 결과; then M1 research-context interpretation, Suggested shelf labels, then the question blocks. Do not write content outside these sections.
 - Return one to five complete question blocks by default, and never more than ten, separated by ---.
 - Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 온톨로지 후보, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건.
 - Every Evidence value must include p.N and a short source hint.

@@ -66,3 +66,37 @@ def knowledge_update_report_prompt(cards: list[dict[str, Any]], research_questio
     return render_prompt(
         "m2_knowledge_update_report.j2", research_question=research_question, evidence=evidence_views(cards)
     )
+
+
+def research_question_suggestions_prompt(
+    updates: list[dict[str, Any]], existing_questions: list[str], cards: list[dict[str, Any]], *, max_suggestions: int = 10,
+) -> str:
+    """Give M2 the actual updated card content, not only ledger event titles."""
+    cards_by_id = {str(card.get("card_id", "")): card for card in cards}
+    update_views: list[dict[str, Any]] = []
+    for index, update in enumerate(updates, start=1):
+        payload = update.get("payload", {}) if isinstance(update.get("payload"), dict) else {}
+        card = cards_by_id.get(str(payload.get("card_id", "")))
+        if card:
+            card_view = _card_view(card, f"K{index}")
+            update_views.append({
+                **card_view,
+                "concepts": list(card.get("concepts", [])),
+                "applies_to": list(card.get("applies_to", [])),
+                "evidence_level": str(card.get("evidence_level", "")),
+            })
+        else:
+            # Legacy or non-card M1 updates remain visible, but do not pretend
+            # that title-only events are full evidence-bearing knowledge cards.
+            update_views.append({
+                "reference": f"U{index}", "card_id": "", "title": str(payload.get("title", "M1 새 정보")),
+                "claim": str(payload.get("finding", "")), "evidence_excerpt": "", "labels": [],
+                "concepts": [], "applies_to": [], "conditions": "", "limits": "",
+                "evidence_level": "", "source_name": "",
+            })
+    return render_prompt(
+        "m2_research_question_suggestions.j2",
+        updates=update_views,
+        existing_questions=existing_questions,
+        max_suggestions=max(1, min(max_suggestions, 10)),
+    )

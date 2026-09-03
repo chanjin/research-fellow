@@ -12,7 +12,7 @@ from research_fellow.application.claim_curation import (
     build_simple_claim_cards, discovery_prompt, parse_candidate_claims, submit_claim_cards,
 )
 from research_fellow.application.advising import (
-    direction_prompt, draft_research_direction, latest_research_state, recent_knowledge_updates, recent_research_questions,
+    direction_prompt, draft_research_direction, latest_research_state, parse_research_question_suggestions, recent_knowledge_updates, recent_research_questions,
     parse_research_context_mapping, record_research_direction, record_update_report, research_context_mapping_prompt,
 )
 from research_fellow.application.advisory_workflow import (
@@ -21,7 +21,7 @@ from research_fellow.application.advisory_workflow import (
     subquestion_judgment_prompt,
 )
 from research_fellow.application.episodic_memory import recall_act_spec, recall_context, store_advisory_episode, store_researcher_curation_episode
-from research_fellow.application.prompt_tasks import knowledge_update_report_prompt
+from research_fellow.application.prompt_tasks import knowledge_update_report_prompt, research_question_suggestions_prompt
 from research_fellow.application.meaning_summary import (
     attach_reports, build_fact_groups, delta_inputs, delta_meaning_summary_prompt, deterministic_delta_summary,
     latest_summary, meaning_summary_prompt, record_delta_summary,
@@ -30,12 +30,13 @@ from research_fellow.application.search_profiles import (
     abstract_relevance_prompt, attach_relevance, is_english_search_term, keyword_prompt, parse_keyword_plan, run_profile, shortlist_candidates,
 )
 from research_fellow.application.paper_batch import process_top_papers
-from research_fellow.application.paper_shelf import document_from_shelf_path, store_paper_upload, suggested_paper_labels
+from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, store_paper_upload, suggested_paper_labels
 from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, promote_ontology_candidate, reading_prompt, unconsumed_reading_sections
 from research_fellow.application.duplicate_review import similar_approved_cards
 from research_fellow.application.management import delete_knowledge_card, delete_knowledge_relation
 from research_fellow.application.relations import lineage_dot, lineage_overview_prompt, propose_relation_candidates, relation_text_prompt
-from research_fellow.infrastructure.document_reader import extract_document
+from research_fellow.infrastructure.document_reader import extract_document, infer_bibliographic_metadata
+from research_fellow.infrastructure.web_reader import WebPageExtractionError, fetch_web_page
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever, RetrievalResult
 from research_fellow.infrastructure.knowledge_graph import build_graph, evidence_paths
 from research_fellow.infrastructure.episodic_retrieval import EpisodicRetriever
@@ -94,16 +95,19 @@ def search_knowledge(query: str, semantic: bool, embedding_model: str, limit: in
     return retriever.search(memory.all(), query, limit=limit, semantic=semantic, embedding_model=embedding_model)
 
 
-def selected_llm_provider() -> str:
-    return str(st.session_state.get("llm-provider", "ollama"))
+def selected_llm_provider(workload: str = "internal") -> str:
+    """Keep source-paper handling separate from internal knowledge work."""
+    key = "llm-provider-paper" if workload == "paper" else "llm-provider-internal"
+    return str(st.session_state.get(key, "ollama"))
 
 
 def llm_draft_result(
     prompt: str, model: str, use_ollama: bool, profile: str | None = None,
     overrides: dict[str, object] | None = None, on_chunk: Callable[[str], None] | None = None,
 ) -> OllamaDraftResult:
-    """Route every operational draft through the globally selected provider."""
-    if selected_llm_provider() == "gemini":
+    """Route paper source work and internal knowledge work independently."""
+    workload = "paper" if profile in {"paper_reading", "full_text_similarity"} else "internal"
+    if selected_llm_provider(workload) == "gemini":
         return gemini_draft_result(prompt, profile=profile)
     return ollama_draft_result(prompt, model, use_ollama, profile=profile, overrides=overrides, on_chunk=on_chunk)
 
@@ -116,6 +120,15 @@ def paper_draft_result(
     prompt: str, model: str, use_ollama: bool, profile: str, on_chunk: Callable[[str], None] | None = None,
 ) -> OllamaDraftResult:
     return llm_draft_result(prompt, model, use_ollama, profile=profile, on_chunk=on_chunk)
+
+
+def persist_paper_reading_output(ledger: Ledger, paper: dict[str, Any], analysis: dict[str, Any], question: str, output: str, source_label: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Persist API and researcher-pasted chat outputs through the same parser."""
+    summary = parse_reading_summary(output)
+    raw_output = output if source_label == "LLM API" else f"[생성 경로: {source_label}]\n\n{output}"
+    ledger.save_paper_analysis(paper["paper_id"], research_question=question, summary=summary, reading_raw_output=raw_output, researcher_note=analysis.get("researcher_note", ""), generated=True)
+    ledger.update_shelf_paper(paper["paper_id"], shelf_status=paper["shelf_status"], reading_status="read")
+    return parse_reading_questions(output), unconsumed_reading_sections(output)
 
 
 def show_retrieval_results(results: list[RetrievalResult], detailed: bool = False) -> None:
@@ -793,6 +806,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
             controls, actions = st.columns([3, 2])
             with controls:
                 with st.form(f"paper-shelf-state-{paper['paper_id']}"):
+                    title = st.text_input("논문 제목", value=paper["title"])
                     authors_text = st.text_input("저자 (쉼표 구분)", value=", ".join(paper.get("authors", [])))
                     publication_year = st.text_input("발행 연도", value=paper.get("publication_year", ""), max_chars=4)
                     shelf_status = st.selectbox("중요도", list(status_labels), index=list(status_labels).index(paper["shelf_status"]), format_func=lambda value: status_labels[value])
@@ -801,6 +815,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                 if state_saved:
                     ledger.update_shelf_paper(
                         paper["paper_id"], shelf_status=shelf_status, reading_status=reading_status,
+                        title=title,
                         authors=[author.strip() for author in authors_text.split(",") if author.strip()],
                         publication_year=publication_year.strip(),
                     )
@@ -814,8 +829,22 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                     st.download_button("보관 원문 내려받기", data=path.read_bytes(), file_name=path.name, key=f"shelf-download-{paper['paper_id']}")
                 else:
                     st.caption("보관 원문 없음")
-            if selected_llm_provider() == "gemini":
-                st.caption("현재 전역 실행 환경: Gemini 외부 API · 이 논문의 원문과 프롬프트가 외부 API로 전송됩니다.")
+                with st.expander("서재함에서 삭제"):
+                    st.caption("읽기 요약·질문·일반화 메모·이력·카드 연결이 함께 삭제됩니다. 이미 승인된 지식카드는 유지됩니다.")
+                    with st.form(f"paper-shelf-delete-{paper['paper_id']}"):
+                        confirmed = st.checkbox("위 내용을 확인했고 이 서재 항목을 삭제합니다.")
+                        deleted = st.form_submit_button("이 논문을 서재함에서 삭제", type="secondary")
+                    if deleted:
+                        if not confirmed:
+                            st.warning("삭제 내용을 확인한 뒤 체크해 주세요.")
+                        else:
+                            result = ledger.delete_shelf_paper(paper["paper_id"])
+                            if result["paper"]:
+                                st.success("서재 항목을 삭제했습니다. 승인 지식카드는 유지했습니다.")
+                                st.rerun()
+                            st.warning("이미 삭제되었거나 찾을 수 없는 서재 항목입니다.")
+            if selected_llm_provider("paper") == "gemini":
+                st.caption("본문 읽기 실행 환경: Gemini 외부 API · 이 논문의 원문과 프롬프트가 외부 API로 전송됩니다.")
             question = st.text_area("이 논문을 읽는 연구 질문·활용 맥락", value=analysis.get("research_question", ""), key=f"shelf-question-{paper['paper_id']}")
             st.markdown("**M1 논문 읽기 · 요약–해석–질문–첨삭**")
             st.caption("논문 요약, 현재 연구 맥락 해석, 추천 서재 레이블, 원문 근거 기반 읽기 질문을 한 번에 만듭니다.")
@@ -834,22 +863,10 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                     with st.spinner("논문을 읽고 있습니다. 생성되는 내용은 아래에 바로 표시됩니다."):
                         result = paper_draft_result(
                             reading_prompt(document, paper, question), model, use_ollama,
-                            profile="paper_reading", on_chunk=None if selected_llm_provider() == "gemini" else show_stream,
+                            profile="paper_reading", on_chunk=None if selected_llm_provider("paper") == "gemini" else show_stream,
                         )
                     live_output.empty()
-                    if result.ok:
-                        summary = parse_reading_summary(result.text or "")
-                        # Keep the original model response even when its question blocks cannot be parsed.
-                        # It is a research reading record, not disposable transport output.
-                        ledger.save_paper_analysis(paper["paper_id"], research_question=question, summary=summary, reading_raw_output=result.text or "", researcher_note=analysis.get("researcher_note", ""), generated=True)
-                        # M1's up-to-ten suggestions remain distinct from the researcher's
-                        # own five shelf labels and are derived from the saved reading record.
-                        ledger.update_shelf_paper(
-                            paper["paper_id"], shelf_status=paper["shelf_status"],
-                            reading_status="read",
-                        )
-                    questions = parse_reading_questions(result.text or "") if result.ok else []
-                    unconsumed_sections = unconsumed_reading_sections(result.text or "") if result.ok else []
+                    questions, unconsumed_sections = persist_paper_reading_output(ledger, paper, analysis, question, result.text or "", "LLM API") if result.ok else ([], [])
                     if unconsumed_sections:
                         with st.expander(f"파싱에 반영되지 않은 응답 섹션 {len(unconsumed_sections)}개", expanded=False):
                             st.caption("카드·요약에 쓰이지 않은 필드명 또는 섹션입니다. 이 내용을 복사해 파서 보완에 활용할 수 있습니다. 원본 응답은 별도로 보존됩니다.")
@@ -868,6 +885,25 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                         show_ollama_failure(result, model)
                 except Exception as error:
                     st.error(f"논문 읽기 질문 생성에 실패했습니다: {error}")
+            with st.expander("외부 채팅으로 수동 처리", expanded=False):
+                st.caption("API 한도·장애 시에 사용합니다. 생성한 프롬프트와 논문 발췌문을 Gemini 웹 또는 ChatGPT에 직접 전달한 뒤, 응답 전체를 붙여 넣으세요. 비공개 원문은 전송 전에 연구자가 판단해야 합니다.")
+                prompt_key = f"manual-reading-prompt-{paper['paper_id']}"
+                if st.button("외부 채팅용 M1 프롬프트 만들기", key=f"make-{prompt_key}", disabled=not (path and path.exists())):
+                    document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
+                    st.session_state[prompt_key] = reading_prompt(document, paper, question)
+                manual_prompt = st.session_state.get(prompt_key, "")
+                if manual_prompt:
+                    st.code(manual_prompt, language="markdown")
+                    manual_output = st.text_area("외부 채팅 응답 전체 붙여넣기", key=f"manual-reading-output-{paper['paper_id']}", height=260)
+                    if st.button("붙여넣은 응답을 M1 결과로 적용", key=f"apply-manual-reading-{paper['paper_id']}", disabled=not manual_output.strip()):
+                        questions, unconsumed_sections = persist_paper_reading_output(ledger, paper, analysis, question, manual_output.strip(), "외부 채팅 수동 입력")
+                        if questions:
+                            saved_question_ids = ledger.add_paper_reading_questions(paper["paper_id"], questions)
+                            st.success(f"외부 채팅 응답에서 읽기 질문 {len(saved_question_ids)}건을 추가했습니다.")
+                            st.rerun()
+                        st.warning("요약은 저장했지만, 원문 근거 형식의 읽기 질문을 해석하지 못했습니다. 아래 원문과 미매칭 섹션을 확인하세요.")
+                        if unconsumed_sections:
+                            st.code("\n\n---\n\n".join(unconsumed_sections), language="markdown")
             reading_questions = ledger.paper_reading_questions(paper["paper_id"])
             reading_decision_labels = {
                 "proposed": "결정 전", "registered": "지식카드 등록", "deferred": "보류", "irrelevant": "무관",
@@ -971,7 +1007,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                         action_case_id = ledger.create_case("research", f"Researcher paper curation: {paper['title'][:72]}")
                         if decision == "register":
                             card = memory.add({
-                                "title": card_title.strip(), "source_kind": "external_paper" if paper.get("asset_type") == "paper" else "researcher_idea_note",
+                                "title": card_title.strip(), "source_kind": "external_paper" if paper.get("asset_type") in {"paper", "web_page"} else "researcher_idea_note",
                                 "claim": card_claim.strip(), "explanation": "\n".join(part for part in [f"읽기 질문: {item['question']}", f"연구자 해석·첨삭: {comment.strip()}" if comment.strip() else ""] if part),
                                 "labels": [value.strip() for value in card_labels.split(",") if value.strip()],
                                 "concepts": [value.strip() for value in card_concepts.split(",") if value.strip()],
@@ -1067,15 +1103,16 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
     st.caption("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.")
     upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs(["서재함", "개념 일반화", "관계·계보 정리", "승인 지식 조회", "문헌 탐색 작업", "승인 지식 목록"])
     with upload_tab:
-        st.caption("논문·연구 노트를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 업로드 자체는 지식카드 생성이 아닙니다.")
+        st.caption("논문·연구 노트·웹페이지를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 등록 자체는 지식카드 생성이 아닙니다.")
         uploaded = st.file_uploader("논문 PDF·연구 노트", type=["pdf", "txt", "md"])
         source_kind = st.selectbox("자료 성격", ["외부 논문", "연구자의 확정 문서", "연구자의 아이디어 노트"])
         core_paper = st.checkbox("핵심 문헌으로 표시", key="asset-intake-core")
         if uploaded and st.button("서재함에 추가", key="claim-first-add-shelf"):
             try:
                 document = extract_document(uploaded, cache_dir=EXTRACTION_CACHE)
+                bibliography = infer_bibliographic_metadata(document)
                 paper = ledger.upsert_shelf_paper({
-                    "title": document.title, "authors": [document.author] if document.author else [],
+                    "title": bibliography["title"], "authors": bibliography["authors"], "publication_year": bibliography["publication_year"],
                     "source_id": document.document_id, "pdf_path": store_paper_upload(uploaded, DATA / "paper_shelf"),
                     "shelf_status": "core" if core_paper else "reference", "reading_status": "unread",
                     "asset_type": "paper" if source_kind == "외부 논문" else "research_note", "intake_source": "upload",
@@ -1083,6 +1120,34 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 st.success(f"서재함에 추가했습니다: {paper['title']}")
             except Exception as error:
                 st.error(f"원문을 서재함에 보관하지 못했습니다: {error}")
+        st.divider()
+        st.markdown("**웹페이지 링크 등록**")
+        st.caption("공개 HTML 페이지에서 본문형 텍스트를 추출해 Markdown으로 보관합니다. 메뉴·광고·스크립트·푸터 등 탐색 요소는 제거하며, 원본 URL은 함께 기록합니다.")
+        with st.form("web-page-intake"):
+            web_url = st.text_input("웹페이지 URL", placeholder="https://example.org/article")
+            web_kind = st.selectbox("자료 성격", ["외부 논문·기술문서", "연구자의 확정 문서", "연구자의 아이디어 노트"], key="web-asset-kind")
+            web_core = st.checkbox("핵심 문헌으로 표시", key="web-asset-core")
+            add_web_page = st.form_submit_button("웹페이지를 서재함에 추가")
+        if add_web_page:
+            try:
+                page = fetch_web_page(web_url)
+                stored = StoredPaperUpload(name="web-page.md", content=page.markdown.encode("utf-8"))
+                document = extract_document(stored, cache_dir=EXTRACTION_CACHE)
+                paper = ledger.upsert_shelf_paper({
+                    "title": page.title, "authors": [page.author] if page.author else [], "publication_year": page.publication_year,
+                    "source_url": page.url, "source_id": document.document_id,
+                    "pdf_path": store_paper_upload(stored, DATA / "paper_shelf"),
+                    "shelf_status": "core" if web_core else "reference", "reading_status": "unread",
+                    "asset_type": "web_page", "intake_source": "web",
+                })
+                st.success(f"정제한 웹페이지를 서재함에 추가했습니다: {paper['title']}")
+                for warning in page.warnings:
+                    st.warning(warning)
+                st.rerun()
+            except WebPageExtractionError as error:
+                st.error(str(error))
+            except Exception as error:
+                st.error(f"웹페이지를 서재함에 보관하지 못했습니다: {error}")
         render_paper_shelf(model, use_ollama, semantic, embedding_model)
         st.info("직접 주장 추출은 이 흐름에서 사용하지 않습니다. 논문을 선택해 읽기 질문·근거·첨삭을 거친 항목만 그 자리에서 지식카드로 등록합니다.")
         if False and st.button("지식 카드 초안 만들기 (최대 10개)", disabled=uploaded is None, type="primary", key="claim-first-discover"):
@@ -1336,8 +1401,13 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
     with queue_tab:
         st.subheader("연구 Intent 탐색 작업 큐")
         st.caption("승인된 연구 Intent가 탐색 프로필로 대기합니다. 실행 결과는 논문 후보 서재함으로 보내며, 이 단계에서는 지식카드를 만들지 않습니다.")
-        if selected_llm_provider() == "gemini":
-            st.caption("현재 전역 실행 환경: Gemini 외부 API · 탐색 초안과 공개 arXiv 본문 비교가 외부 API로 전송됩니다.")
+        if selected_llm_provider("internal") == "gemini" or selected_llm_provider("paper") == "gemini":
+            destinations = []
+            if selected_llm_provider("internal") == "gemini":
+                destinations.append("탐색 초안")
+            if selected_llm_provider("paper") == "gemini":
+                destinations.append("공개 arXiv 본문 비교")
+            st.caption("Gemini 외부 API로 전송: " + " · ".join(destinations))
         ready_intents = ledger.phenomena(recipient="m1", type_="curation_intent", status="ready")
         profiles = ledger.search_profiles()
         all_profiles = ledger.search_profiles(include_deleted=True)
@@ -1623,10 +1693,34 @@ def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 st.info("아직 저장된 연구질문이 없습니다. 직접 새 질문을 입력하세요.")
         elif question_mode == "M1 새 정보 기반 추천":
             updates = recent_knowledge_updates(ledger)
+            suggestion_prompt = research_question_suggestions_prompt(
+                updates, recent_research_questions(ledger), memory.all(), max_suggestions=10,
+            ) if updates else ""
             if st.button("M1 새 정보에서 연구질문 추천 받기", disabled=not updates, key="p4-question-suggest"):
-                prompt = render_prompt("m2_research_question_suggestions.j2", updates=updates, existing_questions=recent_research_questions(ledger))
-                suggested = llm_draft(prompt, model, use_ollama)
-                st.session_state["p4-question-suggestions"] = [line.strip() for line in (suggested or "").splitlines() if line.strip()][:3]
+                suggested = llm_draft(suggestion_prompt, model, use_ollama)
+                st.session_state["p4-question-suggestions"] = parse_research_question_suggestions(suggested or "", limit=10)
+            if updates:
+                with st.expander("외부 채팅으로 수동 추천 만들기"):
+                    st.caption("아래 프롬프트에는 기존 연구질문과 승인 지식카드의 내용이 포함됩니다. 공개해도 되는 정보인지 확인한 뒤 Gemini 또는 ChatGPT에 붙여넣으세요.")
+                    st.code(suggestion_prompt, language="text")
+                    manual_suggestions = st.text_area(
+                        "외부 채팅의 응답 전체 붙여넣기",
+                        key="p4-question-suggestions-manual-output",
+                        height=180,
+                        placeholder="1. …?\n2. …?",
+                    )
+                    if st.button(
+                        "붙여넣은 응답을 추천 연구질문으로 적용",
+                        key="p4-question-suggestions-apply-manual",
+                        disabled=not manual_suggestions.strip(),
+                    ):
+                        parsed_suggestions = parse_research_question_suggestions(manual_suggestions, limit=10)
+                        if not parsed_suggestions:
+                            st.error("번호가 붙은 질문을 1개 이상 붙여넣으세요. 예: 1. 질문인가?")
+                        else:
+                            st.session_state["p4-question-suggestions"] = parsed_suggestions
+                            st.success(f"외부 채팅의 추천 연구질문 {len(parsed_suggestions)}개를 적용했습니다.")
+                            st.rerun()
             suggestions = st.session_state.get("p4-question-suggestions", [])
             if suggestions:
                 selected_suggestion = st.radio("추천 연구질문", suggestions, key="p4-question-suggestion-choice")
@@ -1824,27 +1918,34 @@ def main() -> None:
     .rf-running { position: fixed; top: 0.55rem; right: 5.9rem; z-index: 999999; max-width: 30rem; padding: 0.42rem 0.75rem; border: 1px solid #b54708; border-radius: 0.45rem; background: #f79009; color: #1f1300; font-weight: 700; box-shadow: 0 2px 7px rgba(0,0,0,.22); }
     </style>""", unsafe_allow_html=True)
     st.sidebar.title("도메인 전문 연구위원")
-    provider = st.sidebar.radio(
-        "LLM 실행 환경", ["ollama", "gemini"], horizontal=True,
+    paper_provider = st.sidebar.radio(
+        "본문 읽기·비교", ["gemini", "ollama"], horizontal=True,
         format_func={"ollama": "Ollama 로컬", "gemini": "Gemini 외부 API"}.get,
-        key="llm-provider-choice",
+        key="llm-provider-paper-choice",
     )
-    if provider == "gemini" and not gemini_api_available():
+    internal_provider = st.sidebar.radio(
+        "내부 지식·M2 해석", ["ollama", "gemini"], horizontal=True,
+        format_func={"ollama": "Ollama 로컬", "gemini": "Gemini 외부 API"}.get,
+        key="llm-provider-internal-choice",
+    )
+    if "gemini" in {paper_provider, internal_provider} and not gemini_api_available():
         st.sidebar.warning("GEMINI_API_KEY가 없어 Gemini 외부 API를 선택할 수 없습니다.")
-        provider = "ollama"
-    st.session_state["llm-provider"] = provider
-    model = st.sidebar.text_input("Ollama 모델", value="gpt-oss:20b", disabled=provider != "ollama")
-    use_ollama = provider == "ollama"
+        paper_provider = "ollama" if paper_provider == "gemini" else paper_provider
+        internal_provider = "ollama" if internal_provider == "gemini" else internal_provider
+    st.session_state["llm-provider-paper"] = paper_provider
+    st.session_state["llm-provider-internal"] = internal_provider
+    model = st.sidebar.text_input("Ollama 모델", value="gpt-oss:20b", disabled="ollama" not in {paper_provider, internal_provider})
+    use_ollama = "ollama" in {paper_provider, internal_provider}
     semantic = st.sidebar.checkbox("시드카드 임베딩 검색", value=True, help="질문과 표현이 다른 카드도 시드 후보로 찾습니다. 사용할 수 없으면 lexical 검색으로 자동 전환됩니다.")
     embedding_model = st.sidebar.text_input("임베딩 모델", value="nomic-embed-text", disabled=not semantic)
-    if provider == "ollama":
+    if use_ollama:
         connected, status = ollama_status(model)
         st.sidebar.caption(f"Ollama · {status}")
         st.sidebar.caption("첫 모델 호출 시 Ollama 모델 기본 설정을 읽습니다. 논문 읽기는 Mac 메모리 사용을 위해 8K 컨텍스트를 명시합니다.")
         if not connected:
             st.sidebar.warning("초안 없이도 P1·P2 흐름은 동작합니다.")
-    else:
-        st.sidebar.caption("Gemini 외부 API · 현재 화면의 모든 LLM 초안에 적용")
+    if paper_provider == "gemini":
+        st.sidebar.caption("본문 원문은 Gemini 외부 API로 전송됩니다.")
     screen = st.sidebar.radio("작업공간", ["연구위원 데스크", "M1 · 문헌조사·지식화", "M2 · 지식 기반 자문", "지식 베이스·운영", "개발·프롬프트"])
     if screen == "연구위원 데스크":
         home(model, use_ollama, semantic, embedding_model)
@@ -1869,7 +1970,7 @@ def main() -> None:
         with manage_tab:
             management_screen()
     elif screen == "개발·프롬프트":
-        render_developer_screen(memory.all(), model, use_ollama, EXTRACTION_CACHE, ledger, DATA / "logs" / "llm_calls.jsonl", provider=provider)
+        render_developer_screen(memory.all(), model, use_ollama, EXTRACTION_CACHE, ledger, DATA / "logs" / "llm_calls.jsonl", provider=internal_provider)
 
 
 if __name__ == "__main__":

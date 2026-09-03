@@ -48,6 +48,21 @@ def recent_knowledge_updates(ledger: Ledger, limit: int = 8) -> list[dict[str, A
     return ledger.phenomena(recipient="m2", type_="knowledge_update")[:limit]
 
 
+def parse_research_question_suggestions(text: str, limit: int = 10) -> list[str]:
+    """Keep only complete numbered question candidates for the researcher UI."""
+    suggestions: list[str] = []
+    for line in text.splitlines():
+        matched = re.match(r"^\s*\d{1,2}[.)]\s+(.+?)\s*$", line)
+        if not matched:
+            continue
+        question = matched.group(1).strip()
+        if question and question not in suggestions:
+            suggestions.append(question)
+        if len(suggestions) >= limit:
+            break
+    return suggestions
+
+
 def direction_prompt(state: ResearchState, evidence: list[RetrievalResult], updates: list[dict[str, Any]]) -> str:
     from research_fellow.infrastructure.prompt_renderer import render_prompt
 

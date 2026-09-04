@@ -88,6 +88,22 @@ def _build_context(template_name: str, cards: list[dict[str, Any]], prefix: str,
         target_name = st.selectbox("도착 카드", target_options, key=f"{prefix}-target")
         return {"source": card_map[source_name], "target": card_map[target_name]}
 
+    if template_name == "m1_relation_batch_proposal.j2":
+        if len(cards) < 2:
+            raise ValueError("다중 관계 프롬프트에는 승인 지식 카드가 두 장 이상 필요합니다.")
+        card_map = {f"{card['title']} [{card['card_id']}]": card for card in cards}
+        source_name = st.selectbox("소스 카드", list(card_map), key=f"{prefix}-batch-source")
+        target_options = [name for name in card_map if name != source_name]
+        selected_target_names = st.multiselect(
+            "타겟 카드 (최대 5개)",
+            target_options,
+            default=target_options[: min(5, len(target_options))],
+            key=f"{prefix}-batch-targets",
+        )
+        if not selected_target_names:
+            raise ValueError("타겟 카드를 한 장 이상 선택하세요.")
+        return {"source": card_map[source_name], "targets": [card_map[name] for name in selected_target_names[:5]]}
+
     chosen = _selected_cards(cards, f"{prefix}-cards")
     question = st.text_area("연구 질문·주장·검토 주제", key=f"{prefix}-question", placeholder="예: 명세 우선 설계는 구현 품질을 높이는가?")
 
@@ -117,6 +133,19 @@ def _build_context(template_name: str, cards: list[dict[str, Any]], prefix: str,
         return {"title": document.title, "authors": document.author, "research_question": question, "source_text": source_text}
     if template_name == "m1_lineage_review.j2":
         return {"topic": question, "knowledge": evidence_views(chosen, prefix="K", limit=10)}
+    if template_name == "m1_lineage_overview.j2":
+        if not chosen:
+            raise ValueError("계보 종합 의견 프롬프트에는 승인 지식 카드를 한 장 이상 선택하세요.")
+        lineage_cards = [
+            {
+                "card_id": card["card_id"], "title": card["title"], "claim": card["claim"],
+                "explanation": card.get("explanation", ""), "labels": card.get("labels", []),
+                "concepts": card.get("concepts", []), "applies_to": card.get("applies_to", []),
+                "conditions": card.get("conditions", ""), "limits": card.get("limits", ""),
+            }
+            for card in chosen[:20]
+        ]
+        return {"cards": lineage_cards, "relations": []}
     if template_name == "m1_revalidation_review.j2":
         return {"reason": question, "evidence": evidence_views(chosen)}
     if template_name == "m2_research_review.j2":

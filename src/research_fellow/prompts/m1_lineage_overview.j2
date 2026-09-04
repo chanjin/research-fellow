@@ -4,7 +4,7 @@ Rules:
 - Use only the supplied cards and relations. Do not invent a card, relation, fact, or citation.
 - Distinguish what the approved graph shows from a cautious interpretation.
 - State an open gap when the graph does not support a conclusion.
-- This is a read-only researcher's briefing, not a new relation proposal or a memory update.
+- Candidate relations are only review suggestions. They are not approved relations, must not be stated as facts, and must not create a memory update.
 - Write the researcher-facing briefing in Korean.
 
 Approved cards:
@@ -13,6 +13,10 @@ Approved cards:
   Claim: {{ card.claim }}
   Explanation: {{ card.explanation }}
   Labels: {{ card.labels | join(', ') }}
+  Concepts: {{ card.concepts | join(', ') }}
+  Applies to: {{ card.applies_to | join(', ') }}
+  Conditions: {{ card.conditions }}
+  Limits: {{ card.limits }}
 {% endfor %}
 
 Approved relations:
@@ -21,11 +25,19 @@ Approved relations:
   Evidence: {{ relation.evidence }}
 {% endfor %}
 
-Return three Korean sections corresponding to the following English labels:
-Lineage overview: two to four sentences on the main connected theme and direction.
+Return exactly four Korean sections:
 
-Connection structure
-- Explain the most meaningful one to three relation paths using card titles.
+## 계보 해석
+Explain the main connected theme and direction in two to four sentences. Separate the approved graph facts from cautious interpretation.
 
-Gaps and next review
+## 승인 관계 설명
+- Explain every supplied approved relation in natural Korean: what the source claim contributes to the target claim, why the relation type fits, and the relevant condition or limit.
+- Use card titles and relation types, but do not merely repeat the graph labels.
+
+## 추가 검토 후보 관계
+- Suggest at most three potential directed relations among the supplied cards only when their claims and conditions make them defensible.
+- For each, write: source title → target title | possible relation type | why it merits review | condition or reservation.
+- If no defensible candidate exists, write "후보 관계 없음" and explain why. Never describe a candidate as approved.
+
+## 공백과 다음 검토
 - State what is not yet connected, contrasted, or supported strongly enough.

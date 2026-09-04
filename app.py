@@ -34,11 +34,13 @@ from research_fellow.application.paper_shelf import StoredPaperUpload, document_
 from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, promote_ontology_candidate, reading_prompt, unconsumed_reading_sections
 from research_fellow.application.duplicate_review import similar_approved_cards
 from research_fellow.application.management import delete_knowledge_card, delete_knowledge_relation
-from research_fellow.application.relations import lineage_dot, lineage_overview_prompt, propose_relation_candidates, relation_text_prompt
+from research_fellow.application.relations import (
+    RELATION_TYPES, create_relation_candidate, lineage_dot, lineage_overview_prompt,
+    parse_relation_batch_drafts, relation_batch_prompt,
+)
 from research_fellow.infrastructure.document_reader import extract_document, infer_bibliographic_metadata
 from research_fellow.infrastructure.web_reader import WebPageExtractionError, fetch_web_page
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever, RetrievalResult
-from research_fellow.infrastructure.knowledge_graph import build_graph, evidence_paths
 from research_fellow.infrastructure.episodic_retrieval import EpisodicRetriever
 from research_fellow.infrastructure.prompt_renderer import render_prompt
 from research_fellow.domain.episodes import EpisodicMemory
@@ -565,11 +567,11 @@ def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> 
         show_retrieval_results(results)
         if results:
             options = {f"{item.card['title']} · {item.card['provenance'].get('source_name', '')}": item.card["card_id"] for item in results}
-            chosen = st.multiselect("P2 계보 후보에 담을 카드 (최대 10개)", list(options), key="home-lineage-cards")
+            chosen = st.multiselect("P2 계보 후보에 담을 카드 (최대 20개)", list(options), key="home-lineage-cards")
             if st.button("선택 카드를 P2 계보 목록으로 전달", disabled=not chosen, key="home-send-lineage"):
                 current = st.session_state.setdefault("p2-lineage-selected-ids", [])
                 for card_id in (options[label] for label in chosen):
-                    if card_id not in current and len(current) < 10:
+                    if card_id not in current and len(current) < 20:
                         current.append(card_id)
                 st.session_state["p2-lineage-selected-ids"] = current
                 st.success(f"P2 계보 선택 목록에 카드 {len(current)}개를 저장했습니다. P2 화면에서 확인하세요.")
@@ -1286,28 +1288,47 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
         render_ontology_workspace(semantic, embedding_model)
     with relation_tab:
         cards = memory.all()
+        cards_by_id = {card["card_id"]: card for card in cards}
+        all_approved_relations = ledger.active_knowledge_relations()
         selection_mode = st.radio(
             "계보에 표시할 카드 선정", ["최근 승인 카드", "검색 후 선택"], horizontal=True, key="p2-selection-mode",
         )
-        selected_cards = cards[:10]
+        selected_cards = cards[:20]
         if selection_mode == "검색 후 선택":
             selected_ids = st.session_state.setdefault("p2-lineage-selected-ids", [])
-            by_id = {card["card_id"]: card for card in cards}
-            lineage_query = st.text_input("계보 카드 검색", key="p2-lineage-query", placeholder="예: agent specification evaluation")
-            search_hits = search_knowledge(lineage_query, semantic, embedding_model, limit=10) if lineage_query.strip() else []
+            by_id = cards_by_id
+            lineage_query = st.text_input("소스 지식카드 키워드 검색", key="p2-lineage-query", placeholder="예: agent specification evaluation")
+            if st.button("임베딩으로 지식카드 검색", key="p2-lineage-search", disabled=not lineage_query.strip()):
+                hits = search_knowledge(lineage_query, semantic, embedding_model, limit=10)
+                st.session_state["p2-lineage-search-results"] = [
+                    {"card_id": hit.card["card_id"], "reason": hit.reason, "score": round(hit.score, 3)} for hit in hits
+                ]
+                st.session_state["p2-lineage-search-query-applied"] = lineage_query
+            search_hits = [
+                {**result, "card": by_id.get(result["card_id"])}
+                for result in st.session_state.get("p2-lineage-search-results", [])
+                if result["card_id"] in by_id
+            ]
             if search_hits:
-                st.caption("검색 결과에서 카드를 추가하세요. 선택 목록은 다음 검색에도 유지됩니다.")
+                st.markdown(f"#### 소스 지식카드 검색 결과 · {len(search_hits)}건")
+                st.caption(f"검색어: {st.session_state.get('p2-lineage-search-query-applied', lineage_query)} · 결과에서 관계 탐색의 소스 카드를 선택하세요.")
                 for hit in search_hits:
-                    card = hit.card
-                    if card["card_id"] in selected_ids:
-                        st.caption(f"선택됨 · {card['title']}")
-                    elif st.button(f"계보에 추가 · {card['title']}", key=f"p2-add-{card['card_id']}", disabled=len(selected_ids) >= 10):
-                        st.session_state["p2-lineage-selected-ids"] = [*selected_ids, card["card_id"]]
-                        st.rerun()
-            elif lineage_query.strip():
+                    card = hit["card"]
+                    info, action = st.columns([5, 2])
+                    with info:
+                        st.write(f"**{card['title']}**")
+                        st.caption(f"유사도 {hit['score']:.3f} · 선정 이유: {hit['reason']}")
+                        st.caption(card.get("claim", "")[:220])
+                    with action:
+                        if card["card_id"] in selected_ids:
+                            st.caption("소스 선택됨")
+                        elif st.button("관계 탐색 소스로 선택", key=f"p2-add-{card['card_id']}", disabled=len(selected_ids) >= 20):
+                            st.session_state["p2-lineage-selected-ids"] = [*selected_ids, card["card_id"]]
+                            st.rerun()
+            elif st.session_state.get("p2-lineage-search-query-applied"):
                 st.info("검색된 승인 카드가 없습니다.")
-            selected_cards = [by_id[card_id] for card_id in selected_ids if card_id in by_id][:10]
-            st.subheader(f"계보 선택 카드 목록 ({len(selected_cards)}/10)")
+            selected_cards = [by_id[card_id] for card_id in selected_ids if card_id in by_id][:20]
+            st.subheader(f"계보 선택 카드 목록 ({len(selected_cards)}/20)")
             if selected_cards:
                 for card in selected_cards:
                     left, right = st.columns([6, 1])
@@ -1319,7 +1340,14 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     st.session_state["p2-lineage-selected-ids"] = []
                     st.rerun()
             else:
-                st.caption("검색 결과에서 계보에 포함할 카드를 추가하세요.")
+                st.caption("먼저 키워드로 소스 지식카드를 검색·선택하세요.")
+        related_target_ids = st.session_state.get("p2-lineage-relation-target-ids", [])
+        selected_card_ids = {card["card_id"] for card in selected_cards}
+        for card_id in related_target_ids:
+            card = by_id.get(card_id) if selection_mode == "검색 후 선택" else next((item for item in cards if item["card_id"] == card_id), None)
+            if card and card["card_id"] not in selected_card_ids and len(selected_cards) < 20:
+                selected_cards.append(card)
+                selected_card_ids.add(card["card_id"])
         selection_fingerprint = tuple(card["card_id"] for card in selected_cards)
         if st.session_state.get("p2-lineage-fingerprint") != selection_fingerprint:
             st.session_state["p2-lineage-fingerprint"] = selection_fingerprint
@@ -1328,59 +1356,227 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             f"현재 계보 대상: 승인 카드 {len(selected_cards)}개 · "
             + ("최근 등록 순서" if selection_mode == "최근 승인 카드" else "연구자 검색·선택 결과")
         )
-        if len(selected_cards) < 2:
-            st.info("P2 관계 후보를 만들려면 승인된 지식 카드가 두 개 이상 필요합니다.")
+        if not selected_cards:
+            st.info("관계 탐색을 시작하려면 승인된 소스 지식카드 한 장을 선택하세요.")
         else:
-            st.caption("M1이 현재 계보 대상 카드에서 관계 후보를 최대 3건 제안합니다. 연구자는 홈의 승인함에서 근거를 보고 승인·보완 요청·반려만 하면 됩니다.")
-            if st.button("Gemma로 관계 후보 제안 만들기", type="primary"):
-                def draft_for(source: dict[str, object], target: dict[str, object]) -> str | None:
-                    return llm_draft(relation_text_prompt(source, target), model, use_ollama)
-                request_ids, warnings = propose_relation_candidates(
-                    ledger, selected_cards, ledger.active_knowledge_relations({card["card_id"] for card in selected_cards}), draft_for,
-                )
-                st.success(f"관계 후보 {len(request_ids)}건을 연구자 승인함에 보냈습니다.")
-                for warning in warnings:
-                    st.warning(warning)
-        st.subheader("승인된 개념·방법 계보 (최대 10개 카드)")
-        if selected_cards:
-            active_relations = ledger.active_knowledge_relations({card["card_id"] for card in selected_cards})
-            st.graphviz_chart(lineage_dot(selected_cards, active_relations), use_container_width=True)
+            st.caption("2) 소스 카드 선택 → 3) 임베딩으로 타겟 카드 탐색 → 4) LLM 관계·근거 추천 → 5) 화면에서 직접 승인 순서로 진행합니다. 검색·추천은 버튼을 누를 때만 실행됩니다.")
+            source_options = {f"{card['title']} [{card['card_id']}]": card for card in selected_cards}
+            source_label = st.selectbox("관계를 탐색할 소스 카드", list(source_options), key="p2-relation-source")
+            source_card = source_options[source_label]
+            source_query = " ".join([
+                str(source_card.get("title", "")), str(source_card.get("claim", "")),
+                " ".join(source_card.get("concepts", [])), str(source_card.get("conditions", "")),
+            ]).strip()
+            all_active_relations = all_approved_relations
+            existing_by_target: dict[str, list[dict[str, object]]] = {}
+            for relation in all_active_relations:
+                if str(relation["source_card_id"]) == str(source_card["card_id"]):
+                    existing_by_target.setdefault(str(relation["target_card_id"]), []).append(relation)
+            if st.button("임베딩으로 타겟 지식카드 탐색", key="p2-relation-target-search", disabled=not source_query):
+                hits = search_knowledge(source_query, semantic, embedding_model, limit=15)
+                st.session_state["p2-relation-target-results"] = [
+                    {"card_id": hit.card["card_id"], "reason": hit.reason, "score": round(hit.score, 3)}
+                    for hit in hits if hit.card["card_id"] != source_card["card_id"]
+                ]
+                st.session_state["p2-relation-target-source-id"] = source_card["card_id"]
+            target_results = [
+                item if isinstance(item, dict) else {"card_id": item, "reason": "이전 탐색 결과", "score": 0.0}
+                for item in st.session_state.get("p2-relation-target-results", [])
+            ]
+            target_hits = [
+                {**result, "card": next((card for card in cards if card["card_id"] == result["card_id"]), None)}
+                for result in target_results
+            ] if st.session_state.get("p2-relation-target-source-id") == source_card["card_id"] else []
+            target_cards = [
+                hit["card"] for hit in target_hits
+                if hit["card"] is not None
+            ] if st.session_state.get("p2-relation-target-source-id") == source_card["card_id"] else []
+            target_cards = [card for card in target_cards if card is not None]
+            if target_hits:
+                st.markdown(f"#### 타겟 지식카드 탐색 결과 · {len(target_cards)}건")
+                st.caption("소스 카드의 제목·주장·개념·조건을 기준으로 찾은 결과입니다. 이미 승인된 관계는 아래에서 따로 표시합니다.")
+                with st.expander("타겟 검색 결과 자세히 보기", expanded=False):
+                    for hit in target_hits:
+                        card = hit["card"]
+                        if card is None:
+                            continue
+                        st.write(f"**{card['title']}**")
+                        st.caption(f"유사도 {hit['score']:.3f} · 선정 이유: {hit['reason']}")
+                        st.caption(card.get("claim", "")[:260])
+            existing_target_cards = [card for card in target_cards if card["card_id"] in existing_by_target]
+            new_target_cards = [card for card in target_cards if card["card_id"] not in existing_by_target][:5]
+            if existing_target_cards:
+                st.markdown("#### 이미 승인된 관계")
+                st.caption("이미 연결된 타겟은 LLM에 다시 보내지 않습니다. 필요하면 아래에서 기존 관계를 대체해 수정하세요.")
+                for target_card in existing_target_cards:
+                    for existing_relation in existing_by_target[target_card["card_id"]]:
+                        with st.expander(f"{source_card['title']} → {target_card['title']} · 기존 {existing_relation['relation_type']}"):
+                            with st.form(f"p2-existing-relation-edit-{existing_relation['relation_id']}"):
+                                relation_type = st.selectbox("관계 유형", RELATION_TYPES, index=RELATION_TYPES.index(existing_relation["relation_type"]), key=f"p2-existing-type-{existing_relation['relation_id']}")
+                                evidence = st.text_area("관계 근거", value=existing_relation["evidence"], key=f"p2-existing-evidence-{existing_relation['relation_id']}")
+                                conditions = st.text_area("관계 적용 조건", value=existing_relation["conditions"], key=f"p2-existing-conditions-{existing_relation['relation_id']}")
+                                confidence = st.selectbox("신뢰도", ["low", "medium", "high"], index=["low", "medium", "high"].index(existing_relation["confidence"]), key=f"p2-existing-confidence-{existing_relation['relation_id']}")
+                                replace_relation = st.form_submit_button("기존 관계를 이 값으로 대체")
+                            if replace_relation:
+                                try:
+                                    if not delete_knowledge_relation(ledger, relations, str(existing_relation["relation_id"]), "연구자가 관계·계보 화면에서 수정"):
+                                        raise ValueError("기존 관계를 찾지 못했거나 이미 삭제되었습니다.")
+                                    request_id, _ = create_relation_candidate(
+                                        ledger, str(source_card["card_id"]), str(target_card["card_id"]), relation_type,
+                                        "", evidence, conditions, confidence, source_card, target_card,
+                                    )
+                                    decide_request(ledger, memory, request_id, "approved", relation_memory=relations)
+                                    replacement = ledger.phenomenon(request_id) or {}
+                                    st.session_state["p2-lineage-focus-relation-id"] = replacement.get("payload", {}).get("relation", {}).get("relation_id", "")
+                                    st.success("기존 관계를 수정한 관계로 대체했습니다.")
+                                    st.rerun()
+                                except ValueError as error:
+                                    st.error(f"관계를 수정하지 못했습니다: {error}")
+            if new_target_cards:
+                st.caption("LLM 비교 타겟(최대 5개): " + " · ".join(card["title"] for card in new_target_cards))
+                if st.button("LLM으로 관계 내용·근거 추천하기", type="primary", key="p2-relation-batch-draft"):
+                    draft_text = llm_draft(relation_batch_prompt(source_card, new_target_cards), model, use_ollama)
+                    drafts = parse_relation_batch_drafts(draft_text or "", str(source_card["card_id"]), new_target_cards)
+                    st.session_state["p2-relation-drafts"] = drafts
+                    st.session_state["p2-relation-draft-context"] = {
+                        "source_card_id": source_card["card_id"],
+                        "target_card_ids": [card["card_id"] for card in new_target_cards],
+                    }
+                    if drafts:
+                        st.success(f"직접 검토할 관계 초안 {len(drafts)}건을 만들었습니다.")
+                    else:
+                        st.info("후보 타겟들 사이에서 방어 가능한 관계를 찾지 못했습니다. 이는 관계가 없다는 보수적 판단일 수 있습니다.")
+            elif target_cards:
+                st.info("탐색된 타겟은 모두 이미 승인 관계가 있습니다. 위의 기존 관계를 확인하거나 수정하세요.")
+            elif st.session_state.get("p2-relation-target-source-id") == source_card["card_id"]:
+                st.info("관련 타겟 카드를 찾지 못했습니다. 다른 소스 카드를 선택하거나 승인 지식을 더 추가하세요.")
+
+            draft_context = st.session_state.get("p2-relation-draft-context", {})
+            relation_drafts = st.session_state.get("p2-relation-drafts", [])
+            if relation_drafts and draft_context.get("source_card_id") == source_card["card_id"]:
+                cards_by_id = {card["card_id"]: card for card in cards}
+                st.markdown("### 관계 초안 검토·승인")
+                st.caption("승인은 즉시 관계·계보에 반영합니다. ‘승인함으로 보내기’는 판단을 나중으로 미룹니다.")
+                for index, draft in enumerate(relation_drafts):
+                    target_card = cards_by_id.get(draft["target_card_id"])
+                    if not target_card:
+                        continue
+                    with st.expander(f"{source_card['title']} → {target_card['title']} · {draft['relation_type']}", expanded=True):
+                        st.caption("소스 카드")
+                        render_knowledge_card(source_card, key_prefix=f"relation-source-{index}")
+                        st.caption("타겟 카드")
+                        render_knowledge_card(target_card, key_prefix=f"relation-target-{index}")
+                        with st.form(f"p2-relation-review-{source_card['card_id']}-{target_card['card_id']}"):
+                            relation_type = st.selectbox("관계 유형", RELATION_TYPES, index=RELATION_TYPES.index(draft["relation_type"]), key=f"p2-draft-type-{target_card['card_id']}")
+                            evidence = st.text_area("관계 근거", value=draft["evidence"], key=f"p2-draft-evidence-{target_card['card_id']}")
+                            conditions = st.text_area("관계 적용 조건", value=draft["conditions"], key=f"p2-draft-conditions-{target_card['card_id']}")
+                            confidence = st.selectbox("신뢰도", ["low", "medium", "high"], index=["low", "medium", "high"].index(draft["confidence"]), key=f"p2-draft-confidence-{target_card['card_id']}")
+                            approve_now = st.form_submit_button("승인하고 계보에 반영", type="primary")
+                            queue_for_later = st.form_submit_button("승인함으로 보내기")
+                            discard = st.form_submit_button("이 후보 제외")
+                        if approve_now or queue_for_later:
+                            try:
+                                request_id, warnings = create_relation_candidate(
+                                    ledger, str(source_card["card_id"]), str(target_card["card_id"]), relation_type,
+                                    "", evidence, conditions, confidence, source_card, target_card,
+                                )
+                                if approve_now:
+                                    decide_request(ledger, memory, request_id, "approved", relation_memory=relations)
+                                    approved_request = ledger.phenomenon(request_id) or {}
+                                    st.session_state["p2-lineage-focus-relation-id"] = approved_request.get("payload", {}).get("relation", {}).get("relation_id", "")
+                                    st.session_state["p2-lineage-relation-target-ids"] = list(dict.fromkeys([
+                                        *st.session_state.get("p2-lineage-relation-target-ids", []), target_card["card_id"],
+                                    ]))
+                                    st.success("관계를 승인하고 계보에 반영했습니다.")
+                                else:
+                                    st.success("관계 후보를 연구자 승인함에 보냈습니다.")
+                                for warning in warnings:
+                                    st.warning(warning)
+                                st.session_state["p2-relation-drafts"] = [
+                                    item for item in relation_drafts
+                                    if item["target_card_id"] != target_card["card_id"]
+                                ]
+                                st.rerun()
+                            except ValueError as error:
+                                st.error(f"관계 후보를 저장하지 못했습니다: {error}")
+                        if discard:
+                            st.session_state["p2-relation-drafts"] = [
+                                item for item in relation_drafts
+                                if item["target_card_id"] != target_card["card_id"]
+                            ]
+                            st.rerun()
+        st.subheader(f"관계 승인 이력 · {len(all_approved_relations)}건")
+        if all_approved_relations:
+            with st.expander("승인된 관계 이력 보기", expanded=False):
+                for relation in all_approved_relations[:30]:
+                    source_title = cards_by_id.get(relation["source_card_id"], {}).get("title", relation["source_card_id"])
+                    target_title = cards_by_id.get(relation["target_card_id"], {}).get("title", relation["target_card_id"])
+                    st.write(f"**{source_title}** → **{target_title}** · `{relation['relation_type']}` · {relation['confidence']}")
+                    st.caption(f"승인: {relation['approved_at'][:16].replace('T', ' ')} · 근거: {relation['evidence']}")
+        else:
+            st.caption("아직 승인된 관계가 없습니다.")
+
+        focus_relation_id = str(st.session_state.get("p2-lineage-focus-relation-id", ""))
+        focus_relation = next((item for item in all_approved_relations if item["relation_id"] == focus_relation_id), None)
+        graph_cards, active_relations = selected_cards, ledger.active_knowledge_relations({card["card_id"] for card in selected_cards})
+        graph_caption = "연구자가 선택한 카드 기준"
+        if focus_relation:
+            focus_nodes = {focus_relation["source_card_id"], focus_relation["target_card_id"]}
+            surrounding_relations = [
+                relation for relation in all_approved_relations
+                if relation["source_card_id"] in focus_nodes or relation["target_card_id"] in focus_nodes
+            ]
+            surrounding_node_ids = list(dict.fromkeys([
+                focus_relation["source_card_id"], focus_relation["target_card_id"],
+                *[relation["source_card_id"] for relation in surrounding_relations],
+                *[relation["target_card_id"] for relation in surrounding_relations],
+            ]))[:20]
+            graph_cards = [cards_by_id[card_id] for card_id in surrounding_node_ids if card_id in cards_by_id]
+            graph_ids = {card["card_id"] for card in graph_cards}
+            active_relations = [
+                relation for relation in surrounding_relations
+                if relation["source_card_id"] in graph_ids and relation["target_card_id"] in graph_ids
+            ]
+            graph_caption = "방금 승인한 관계의 양 끝 카드와 1-Hop 이웃 관계 기준"
+            if st.button("선택 카드 기준 그래프로 돌아가기", key="p2-clear-lineage-focus"):
+                st.session_state.pop("p2-lineage-focus-relation-id", None)
+                st.rerun()
+        graph_fingerprint = (tuple(card["card_id"] for card in graph_cards), tuple(relation["relation_id"] for relation in active_relations))
+        if st.session_state.get("p2-lineage-graph-fingerprint") != graph_fingerprint:
+            st.session_state["p2-lineage-graph-fingerprint"] = graph_fingerprint
+            st.session_state.pop("lineage-overview-result", None)
+        st.subheader(f"승인된 개념·방법 계보 (최대 20개 카드 · {graph_caption})")
+        if graph_cards:
+            st.graphviz_chart(lineage_dot(graph_cards, active_relations), use_container_width=True)
             if active_relations:
                 for relation in active_relations:
                     st.caption(f"{relation['relation_type']} · {relation['confidence']} · {relation['evidence']}")
             else:
                 st.caption("아직 승인된 관계가 없습니다. 그래프는 SQLite 승인 관계 테이블의 실행 시 투영입니다.")
-            if len(selected_cards) >= 2 and active_relations:
-                graph = build_graph(selected_cards, active_relations)
-                by_title = {f"{card['title']} [{card['card_id']}]": card["card_id"] for card in selected_cards}
-                source_label = st.selectbox("경로 출발 카드", list(by_title), key="p2-path-source")
-                target_options = [label for label in by_title if by_title[label] != by_title[source_label]]
-                target_label = st.selectbox("경로 도착 카드", target_options, key="p2-path-target")
-                max_hops = st.select_slider("최대 관계 단계", options=[1, 2, 3], value=3, key="p2-path-hops")
-                if st.button("승인 근거 경로 찾기", key="p2-evidence-path"):
-                    st.session_state["p2-evidence-paths"] = evidence_paths(
-                        graph, by_title[source_label], by_title[target_label], max_hops=max_hops,
+            if active_relations:
+                overview_prompt = lineage_overview_prompt(graph_cards, active_relations)
+                if st.button("계보 종합 의견 만들기", key="lineage-overview-generate"):
+                    overview = llm_draft(overview_prompt, model, use_ollama)
+                    if overview:
+                        st.session_state["lineage-overview-result"] = overview
+                    else:
+                        st.warning("계보 종합 의견 초안을 만들지 못했습니다.")
+                with st.expander("외부 채팅으로 계보 종합 의견 만들기"):
+                    st.caption("아래 프롬프트에는 현재 그래프의 승인 지식카드와 관계 근거가 포함됩니다. 공개해도 되는 정보인지 확인한 뒤 Gemini 또는 ChatGPT에 붙여넣으세요.")
+                    st.code(overview_prompt, language="text")
+                    manual_overview = st.text_area(
+                        "외부 채팅의 계보 종합 의견 전체 붙여넣기",
+                        key="lineage-overview-manual-output",
+                        height=300,
                     )
-                paths = st.session_state.get("p2-evidence-paths", [])
-                if paths:
-                    st.markdown("**승인 관계 기반 경로**")
-                    titles = {card["card_id"]: card["title"] for card in selected_cards}
-                    relation_index = {relation["relation_id"]: relation for relation in active_relations}
-                    for path in paths:
-                        steps = []
-                        for index, relation_id in enumerate(path.relation_ids):
-                            relation = relation_index[relation_id]
-                            steps.append(f"{titles[path.card_ids[index]]} — **{relation['relation_type']}** → {titles[path.card_ids[index + 1]]}")
-                            steps.append(f"근거 [{relation_id}]: {relation['evidence']}")
-                        st.markdown("  \\n".join(steps))
-                elif st.session_state.get("p2-evidence-paths") == []:
-                    st.caption("선택한 방향과 단계 안에서 연결된 승인 관계가 없습니다.")
-            if active_relations and st.button("계보 종합 의견 만들기", key="lineage-overview-generate"):
-                overview = llm_draft(lineage_overview_prompt(selected_cards, active_relations), model, use_ollama)
-                if overview:
-                    st.session_state["lineage-overview-result"] = overview
-                else:
-                    st.warning("계보 종합 의견 초안을 만들지 못했습니다.")
+                    if st.button(
+                        "붙여넣은 의견을 계보 종합 의견으로 적용",
+                        key="lineage-overview-apply-manual",
+                        disabled=not manual_overview.strip(),
+                    ):
+                        st.session_state["lineage-overview-result"] = manual_overview.strip()
+                        st.success("외부 채팅의 계보 종합 의견을 적용했습니다.")
+                        st.rerun()
             if overview := st.session_state.get("lineage-overview-result"):
                 st.subheader("계보 종합 의견")
                 st.markdown(overview)

@@ -26,6 +26,7 @@ PROMPT_CATALOG = (
     PromptTemplate("m1_page_curation.j2", "M1 · 점진적 구간 카드", "작은 문맥의 텍스트 구간별 후보 카드 초안"),
     PromptTemplate("m1_candidate_consolidation.j2", "M1 · 후보 통합 판단", "독립·중복·포함 관계의 LLM 판단"),
     PromptTemplate("m1_relation_proposal.j2", "M1 · 관계 후보", "승인 카드 두 장의 관계 초안"),
+    PromptTemplate("m1_relation_batch_proposal.j2", "M1 · 다중 관계 후보", "소스 카드와 의미상 가까운 최대 5개 타겟의 관계 초안"),
     PromptTemplate("m1_claim_verification.j2", "M1 · 주장 검증", "승인 지식으로 특정 주장을 검토"),
     PromptTemplate("m1_gap_search_plan.j2", "M1 · 공백 탐색 계획", "지식 공백을 위한 검색 쿼리 초안"),
     PromptTemplate("m1_source_triage.j2", "M1 · 문헌 후보 선별", "도구가 찾은 문헌 메타데이터 검토"),

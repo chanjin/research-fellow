@@ -17,15 +17,52 @@ def relation_text_prompt(source: dict[str, object], target: dict[str, object]) -
     return render_prompt("m1_relation_proposal.j2", source=source, target=target)
 
 
+def relation_batch_prompt(source: dict[str, object], targets: list[dict[str, object]]) -> str:
+    """Ask once about the few semantically closest targets for one source card."""
+    return render_prompt(
+        "m1_relation_batch_proposal.j2",
+        source=_relation_card_view(source),
+        targets=[_relation_card_view(target) for target in targets[:5]],
+    )
+
+
+def _relation_card_view(card: dict[str, object]) -> dict[str, object]:
+    """Preserve only relation-relevant fields and tolerate legacy card records."""
+    return {
+        "card_id": str(card.get("card_id", "")),
+        "title": str(card.get("title", "")),
+        "claim": str(card.get("claim", "")),
+        "concepts": list(card.get("concepts", [])),
+        "applies_to": list(card.get("applies_to", [])),
+        "conditions": str(card.get("conditions", "")),
+        "limits": str(card.get("limits", "")),
+    }
+
+
 def lineage_overview_prompt(cards: list[dict[str, object]], relations: list[dict[str, object]]) -> str:
     """Prompt only; the graph and approved relations remain the source of truth."""
-    visible = cards[:10]
+    visible = [_lineage_card_view(card) for card in cards[:20]]
     card_index = {str(card["card_id"]): card for card in visible}
     edges = [
         {**relation, "source_title": card_index[str(relation["source_card_id"])]["title"], "target_title": card_index[str(relation["target_card_id"])]["title"]}
         for relation in relations if str(relation["source_card_id"]) in card_index and str(relation["target_card_id"]) in card_index
     ]
     return render_prompt("m1_lineage_overview.j2", cards=visible, relations=edges)
+
+
+def _lineage_card_view(card: dict[str, object]) -> dict[str, object]:
+    """Keep the graph explanation grounded while supporting older card records."""
+    return {
+        "card_id": str(card.get("card_id", "")),
+        "title": str(card.get("title", "")),
+        "claim": str(card.get("claim", "")),
+        "explanation": str(card.get("explanation", "")),
+        "labels": list(card.get("labels", [])),
+        "concepts": list(card.get("concepts", [])),
+        "applies_to": list(card.get("applies_to", [])),
+        "conditions": str(card.get("conditions", "")),
+        "limits": str(card.get("limits", "")),
+    }
 
 
 def _parse_relation_text(text: str) -> dict[str, str]:
@@ -38,6 +75,44 @@ def _parse_relation_text(text: str) -> dict[str, str]:
             if normalized := aliases.get(key.strip().lower()):
                 result[normalized] = value.strip()
     return result
+
+
+def parse_relation_batch_drafts(
+    text: str, source_card_id: str, targets: list[dict[str, object]],
+) -> list[dict[str, str]]:
+    """Parse only target-addressed, reviewable drafts from the batch response."""
+    target_ids = {str(target["card_id"]) for target in targets}
+    blocks = re.split(r"(?im)(?=^\s*target(?:\s+id)?\s*:\s*)", text.strip())
+    drafts: list[dict[str, str]] = []
+    seen_targets: set[str] = set()
+    for block in blocks:
+        fields = _parse_relation_text(block)
+        target_match = re.search(r"(?im)^\s*target(?:\s+id)?\s*:\s*(\S+)", block)
+        target_card_id = target_match.group(1).strip() if target_match else ""
+        relation_type = fields.get("relation_type", "").strip().lower()
+        if (
+            not target_card_id or target_card_id not in target_ids or target_card_id in seen_targets
+            or relation_type in {"", "none", "no_relation", "no relation"}
+        ):
+            continue
+        if relation_type not in RELATION_TYPES:
+            continue
+        evidence = fields.get("evidence", "").strip()
+        if not evidence:
+            continue
+        confidence = fields.get("confidence", "medium").strip().lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "medium"
+        drafts.append({
+            "source_card_id": source_card_id,
+            "target_card_id": target_card_id,
+            "relation_type": relation_type,
+            "evidence": evidence,
+            "conditions": fields.get("conditions", "").strip() or "두 카드의 원문 적용 조건을 함께 검토해야 합니다.",
+            "confidence": confidence,
+        })
+        seen_targets.add(target_card_id)
+    return drafts
 
 
 def normalize_relation_draft(
@@ -138,7 +213,7 @@ def propose_relation_candidates(
 
 def lineage_dot(cards: list[dict[str, object]], relations: list[dict[str, object]]) -> str:
     """A compact projection, not a graph database or source of truth."""
-    visible = cards[:10]
+    visible = cards[:20]
     ids = {str(card["card_id"]) for card in visible}
     def quote(value: object) -> str:
         return '"' + str(value).replace('"', "'").replace("\n", " ") + '"'

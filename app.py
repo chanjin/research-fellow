@@ -31,7 +31,8 @@ from research_fellow.application.search_profiles import (
 )
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, store_paper_upload, suggested_paper_labels
-from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, promote_ontology_candidate, reading_prompt, unconsumed_reading_sections
+from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, reading_prompt, unconsumed_reading_sections
+from research_fellow.application.ontology import ontology_context_dot, ontology_dot, search_cards_for_ontology
 from research_fellow.application.duplicate_review import similar_approved_cards
 from research_fellow.application.management import delete_knowledge_card, delete_knowledge_relation
 from research_fellow.application.relations import (
@@ -660,106 +661,168 @@ def render_knowledge_card(card: dict[str, object], *, key_prefix: str = "card") 
                 st.write(f"- {item.get('source_name', '출처 미상')} · {item.get('evidence_excerpt', '')}")
 
 
-def render_ontology_context(paper: dict[str, object], candidate: dict[str, object], *, semantic: bool, embedding_model: str, key_prefix: str = "shelf") -> None:
-    """Show local paper claims beside existing, related semantic-memory cards."""
-    all_cards = memory.all()
-    by_id = {card["card_id"]: card for card in all_cards}
-    local_ids = ledger.paper_card_ids(str(paper["paper_id"]))
-    local_cards = [by_id[card_id] for card_id in local_ids if card_id in by_id]
-    st.markdown("**온톨로지 작업 컨텍스트**")
-    render_curation_precedents(
-        f"온톨로지 작업\n논문: {paper['title']}\n후보: {candidate.get('candidate_text', '')}",
-        episode_types={"ontology_curation"}, semantic=semantic, embedding_model=embedding_model,
-    )
-    if local_cards:
-        st.caption("이 논문에서 직접 등록한 지식카드")
-        for card in local_cards:
-            st.write(f"- **{card['title']}** — {card['claim']}")
-            if card.get("concepts") or card.get("conditions"):
-                st.caption(f"개념: {', '.join(card.get('concepts', [])) or '미입력'} · 조건: {card.get('conditions') or '미입력'}")
-    else:
-        st.info("이 논문에서 등록한 지식카드가 아직 없습니다. 먼저 읽기 질문에서 지식카드를 등록하세요.")
-
-    local_id_set = set(local_ids)
-    connected = [
-        relation for relation in relations.all()
-        if relation["source_card_id"] in local_id_set or relation["target_card_id"] in local_id_set
-    ]
-    connected_ids = {
-        card_id for relation in connected for card_id in (relation["source_card_id"], relation["target_card_id"])
-    } - local_id_set
-    if connected_ids:
-        st.caption("승인 관계로 직접 연결된 기존 지식카드")
-        for card_id in sorted(connected_ids):
-            card = by_id.get(card_id)
-            if card:
-                st.write(f"- **{card['title']}** — {card['claim']}")
-        for relation in connected:
-            st.caption(f"관계: {relation['relation_type']} · {relation['evidence'][:180]}")
-
-    query = "\n".join([
-        str(candidate.get("candidate_text", "")),
-        *[" ".join([card["title"], card["claim"], *card.get("concepts", []), card.get("conditions", "")]) for card in local_cards],
-    ]).strip()
-    key = f"{key_prefix}-ontology-related-{candidate['candidate_id']}"
-    if query and st.button("관련 기존 지식카드 탐색", key=f"{key}-search"):
-        found = retriever.search(all_cards, query, limit=8, semantic=semantic, embedding_model=embedding_model)
-        st.session_state[key] = [
-            {"card_id": result.card["card_id"], "reason": result.reason, "score": round(result.score, 3)}
-            for result in found if result.card["card_id"] not in local_id_set and result.card["card_id"] not in connected_ids
-        ]
-    related_results = st.session_state.get(key, [])
-    if related_results:
-        st.caption("의미·키워드 유사도로 찾은 기존 지식카드")
-    for result in related_results:
-        card = by_id.get(result["card_id"])
-        if card:
-            st.write(f"- **{card['title']}** — {card['claim']}")
-            st.caption(f"선정 이유: {result['reason']} · 점수 {result['score']}")
-
-
 def render_ontology_workspace(semantic: bool, embedding_model: str) -> None:
-    """Cross-paper workspace for reviewing conceptual generalization memos."""
-    st.subheader("개념·관계 일반화 메모")
-    st.caption("이 화면은 아직 독립 온톨로지 노드를 만들지 않습니다. 논문별 후보를 기존 지식카드와 대조해 개념·관계·조건을 연구자가 일반화하고, 승인 뒤 카드 간 관계·계보 작업의 입력으로 사용합니다.")
-    candidates = ledger.all_paper_ontology_candidates()
-    if not candidates:
-        st.info("아직 일반화 메모가 없습니다. 서재함의 읽기 질문에서 지식카드를 등록한 뒤, ‘온톨로지 일반화 메모로 보내기’를 선택하세요.")
-        return
-    status_labels = {
-        "proposed": "정리 전", "pending_approval": "연구위원 데스크 검토 대기",
-        "approved": "승인됨", "needs_revision": "수정 필요", "rejected": "제외",
-    }
-    status_filter = st.selectbox("후보 현황", ["all", *status_labels], format_func=lambda value: "전체" if value == "all" else status_labels[value], key="ontology-workspace-status")
-    visible = [item for item in candidates if status_filter == "all" or item["status"] == status_filter]
-    if not visible:
-        st.info("선택한 현황의 후보가 없습니다.")
-        return
-    options = {f"{item['paper_title']} · {status_labels.get(item['status'], item['status'])} · {item['candidate_text'][:64]}": item for item in visible}
-    selection = st.selectbox("작업할 온톨로지 후보", list(options), key="ontology-workspace-candidate")
-    candidate = options[selection]
-    paper = ledger.shelf_paper(candidate["paper_id"])
-    if not paper:
-        st.error("후보의 원 논문을 찾을 수 없습니다.")
-        return
-    st.markdown("### 후보와 원문 근거")
-    st.write(candidate["candidate_text"])
-    st.caption("원문 근거: " + " · ".join(candidate["evidence"]))
-    render_ontology_context(paper, candidate, semantic=semantic, embedding_model=embedding_model, key_prefix="workspace")
-    st.markdown("### 연구자 일반화 메모")
-    with st.form(f"ontology-workspace-edit-{candidate['candidate_id']}"):
-        candidate_text = st.text_area("일반화한 개념·관계·조건", value=candidate["candidate_text"], help="개별 논문의 사실을 그대로 반복하기보다, 어느 대상·조건에서 어떤 개념들이 어떤 관계를 갖는지 작성합니다.")
-        researcher_comment = st.text_area("연구자 메모", value=candidate["researcher_comment"], help="왜 이 일반화가 유지되는지, 보류할 근거는 무엇인지 기록합니다.")
-        next_status = st.selectbox("다음 상태", list(status_labels), index=list(status_labels).index(candidate["status"]), format_func=status_labels.get)
-        saved = st.form_submit_button("온톨로지 후보 저장")
-    if saved:
-        if len(candidate_text.strip()) < 8:
-            st.error("일반화한 표현을 8자 이상 입력하세요.")
-        else:
-            ledger.update_paper_ontology_candidate(candidate["candidate_id"], researcher_comment=researcher_comment, status=next_status, candidate_text=candidate_text)
-            st.success("일반화 메모를 저장했습니다. 승인된 카드 간 실제 관계는 ‘관계·계보 정리’에서 연결하세요.")
-            st.rerun()
+    """Facet-aware, multi-type ontology builder with contextual graph feedback."""
+    st.subheader("온톨로지")
+    st.caption("승인 지식카드에 여러 타입을 부여하고, Facet으로 타입을 묶습니다. 타입 간 관계는 Type↔Type 사이에 정의합니다.")
+    cards = memory.all()
+    cards_by_id = {card["card_id"]: card for card in cards}
+    approved_relations = ledger.active_knowledge_relations()
+    builder_tab, map_tab = st.tabs(["Ontology Builder", "Ontology Map"])
 
+    def _sync_card_types(card_id: str, widget_key: str) -> None:
+        ledger.set_card_ontology_types(card_id, list(st.session_state.get(widget_key, [])))
+        st.session_state["ontology-focus-card-id"] = card_id
+        st.session_state["ontology-flash"] = "타입 지정을 반영했습니다."
+
+    with builder_tab:
+        if flash := st.session_state.pop("ontology-flash", None):
+            st.success(flash)
+        search_col, graph_col = st.columns([1.45, 1], gap="large")
+        with search_col:
+            st.markdown("### 지식카드 탐색 · 타입 부여")
+            query = st.text_input("카드 검색", placeholder="개념, 방법, 문제, 관계 맥락", key="ontology-card-query")
+            f1, f2, f3 = st.columns(3)
+            use_embedding = f1.checkbox("임베딩", value=semantic, key="ontology-use-embedding")
+            use_keyword = f2.checkbox("키워드", value=True, key="ontology-use-keyword")
+            use_relations = f3.checkbox("관계 확장", value=True, key="ontology-use-relations")
+            sort_mode = st.radio("결과 정렬", ["관련도순", "미분류 카드 우선"], horizontal=True, key="ontology-sort-mode")
+            if st.button("카드 찾기", key="ontology-search", disabled=not query.strip(), type="primary"):
+                hits = search_cards_for_ontology(retriever, cards, approved_relations, query,
+                    use_keyword=use_keyword, use_embedding=use_embedding, use_relations=use_relations,
+                    embedding_model=embedding_model, limit=24)
+                st.session_state["ontology-search-results"] = [{"card_id": h.result.card["card_id"], "score": round(h.result.score, 3), "reason": h.result.reason, "distance": h.relation_distance} for h in hits]
+
+            facets = ledger.ontology_facets(); facet_by_id = {x["facet_id"]: x for x in facets}
+            types = ledger.ontology_types(); type_by_id = {x["type_id"]: x for x in types}; type_ids = [x["type_id"] for x in types]
+            current_types_by_card = {card["card_id"]: ledger.ontology_types_for_card(card["card_id"]) for card in cards}
+            results = list(st.session_state.get("ontology-search-results", []))
+            if sort_mode == "미분류 카드 우선":
+                results.sort(key=lambda item: (bool(current_types_by_card.get(item["card_id"])), -float(item.get("score", 0))))
+            if not results:
+                st.info("검색어를 입력해 승인 지식카드를 찾으세요.")
+
+            def _type_label(type_id: str) -> str:
+                item = type_by_id.get(type_id, {})
+                return f"{item.get('facet_name') or 'Facet 미지정'} · {item.get('name', type_id)}"
+
+            for index, result in enumerate(results, 1):
+                card = cards_by_id.get(result["card_id"])
+                if not card: continue
+                current_types = current_types_by_card.get(card["card_id"], [])
+                current_ids = [x["type_id"] for x in current_types]
+                with st.container(border=True):
+                    st.markdown(f"**{index}. {card['title']}**"); st.write(card["claim"][:420])
+                    relation_hint = f" · 관계 {result['distance']}-hop" if result["distance"] else ""
+                    st.caption(f"검색 {result['score']:.3f} · {result['reason']}{relation_hint}")
+                    if current_types:
+                        st.markdown("현재 타입: " + " · ".join(f"`{x.get('facet_name') or '미분류'} / {x['name']}`" for x in current_types))
+                    else: st.caption("현재 타입: 미지정")
+                    key = f"ontology-inline-types-{card['card_id']}"
+                    if key not in st.session_state: st.session_state[key] = current_ids
+                    else: st.session_state[key] = [v for v in st.session_state[key] if v in set(type_ids)]
+                    st.multiselect("타입", type_ids, key=key, format_func=_type_label,
+                        on_change=_sync_card_types, args=(card["card_id"], key), placeholder="해당하는 타입을 모두 선택")
+                    c1, c2 = st.columns([2.2, 1])
+                    with c1:
+                        with st.expander("+ 새 타입을 만들어 이 카드에 추가", expanded=False):
+                            facet_options = [None, *[x["facet_id"] for x in facets]]
+                            facet_id = st.selectbox("Facet", facet_options,
+                                format_func=lambda v, names=facet_by_id: "Facet 미지정" if v is None else names[v]["name"],
+                                key=f"ontology-inline-new-facet-{card['card_id']}")
+                            new_name = st.text_input("새 타입 이름", placeholder="예: Non-functional Requirement", key=f"ontology-inline-new-name-{card['card_id']}")
+                            new_desc = st.text_area("설명", height=90, key=f"ontology-inline-new-desc-{card['card_id']}")
+                            if st.button("생성하고 추가", key=f"ontology-inline-create-{card['card_id']}", disabled=not new_name.strip()):
+                                try:
+                                    new_type = ledger.create_ontology_type(new_name, new_desc, facet_id)
+                                    ledger.set_card_ontology_types(card["card_id"], [*current_ids, new_type["type_id"]])
+                                    st.session_state["ontology-focus-card-id"] = card["card_id"]
+                                    st.session_state["ontology-flash"] = f"{new_type['name']} 타입을 만들고 카드에 추가했습니다."
+                                    st.rerun()
+                                except ValueError as error: st.error(str(error))
+                    with c2:
+                        if st.button("그래프에서 보기", key=f"ontology-focus-{card['card_id']}"):
+                            st.session_state["ontology-focus-card-id"] = card["card_id"]
+                            st.rerun()
+
+        with graph_col:
+            st.markdown("### 현재 카드의 타입 구조")
+            focus_card_id = st.session_state.get("ontology-focus-card-id")
+            facets = ledger.ontology_facets(); types = ledger.ontology_types(); relations = ledger.ontology_type_relations()
+            type_by_id = {x["type_id"]: x for x in types}
+            focus_types = ledger.ontology_types_for_card(focus_card_id) if focus_card_id else []
+            focus_ids = [x["type_id"] for x in focus_types]
+            if focus_card_id and focus_card_id in cards_by_id: st.caption(f"포커스 카드 · {cards_by_id[focus_card_id]['title']}")
+            if focus_types:
+                for item in focus_types: st.markdown(f"- **{item.get('facet_name') or 'Facet 미지정'}** → {item['name']}")
+                st.graphviz_chart(ontology_context_dot(types, relations, focus_ids, facets), use_container_width=True)
+                local_relations = [r for r in relations if r["source_type_id"] in set(focus_ids) or r["target_type_id"] in set(focus_ids)]
+                if local_relations:
+                    st.markdown("**현재 카드 타입과 연결된 관계**")
+                    for r in local_relations:
+                        st.caption(f"{type_by_id.get(r['source_type_id'], {}).get('name', r['source_type_id'])} → {r['relation_name']} → {type_by_id.get(r['target_type_id'], {}).get('name', r['target_type_id'])}")
+                else: st.info("이 카드에 부여된 타입들은 아직 다른 타입과 연결되지 않았습니다.")
+                if len(types) >= 2:
+                    with st.expander("+ 타입 관계 추가", expanded=not bool(local_relations)):
+                        source_id = st.selectbox("출발 타입", [x["type_id"] for x in types], format_func=lambda v: f"{type_by_id[v].get('facet_name') or '미분류'} · {type_by_id[v]['name']}", key="ontology-context-rel-source")
+                        targets = [x["type_id"] for x in types if x["type_id"] != source_id]
+                        target_id = st.selectbox("도착 타입", targets, format_func=lambda v: f"{type_by_id[v].get('facet_name') or '미분류'} · {type_by_id[v]['name']}", key="ontology-context-rel-target") if targets else None
+                        rel_name = st.text_input("관계 이름", placeholder="예: operates_on, constrains, requires", key="ontology-context-rel-name")
+                        desc = st.text_area("관계 설명", height=90, key="ontology-context-rel-desc")
+                        if st.button("관계 추가", type="primary", key="ontology-context-rel-save", disabled=not rel_name.strip() or not target_id):
+                            try:
+                                ledger.create_ontology_type_relation(source_id, target_id, rel_name, desc); st.session_state["ontology-flash"] = "타입 관계를 추가했습니다."; st.rerun()
+                            except ValueError as error: st.error(str(error))
+            elif types:
+                st.graphviz_chart(ontology_dot(types, relations, facets), use_container_width=True)
+                st.caption("카드에 하나 이상의 타입을 지정하면 해당 타입들과 1-hop 주변 구조가 표시됩니다.")
+            else: st.info("아직 타입이 없습니다. 왼쪽 검색 결과 카드에서 새 타입을 만들어 시작하세요.")
+
+    with map_tab:
+        facets = ledger.ontology_facets(); facet_by_id = {x["facet_id"]: x for x in facets}
+        types = ledger.ontology_types(); relations = ledger.ontology_type_relations(); type_by_id = {x["type_id"]: x for x in types}
+        st.markdown("### 전체 Ontology Map")
+        if types: st.graphviz_chart(ontology_dot(types, relations, facets), use_container_width=True)
+        else: st.info("타입을 먼저 정의하면 전체 타입 그래프가 표시됩니다.")
+        st.markdown("### Facet 관리")
+        st.caption("Facet은 Type의 메타분류입니다. 그래프의 관계 노드가 아니라 타입을 묶는 의미 축입니다.")
+        with st.expander("+ Facet 추가", expanded=not bool(facets)):
+            fname = st.text_input("Facet 이름", placeholder="예: Requirement, Agent Case, Target Domain", key="ontology-facet-name")
+            fdesc = st.text_area("Facet 설명", height=80, key="ontology-facet-description")
+            if st.button("Facet 저장", type="primary", disabled=not fname.strip(), key="ontology-facet-save"):
+                try: ledger.create_ontology_facet(fname, fdesc); st.rerun()
+                except ValueError as error: st.error(str(error))
+        for facet in facets: st.caption(f"**{facet['name']}** · Type {facet['type_count']}개 · {facet.get('description') or '설명 없음'}")
+        if types:
+            st.markdown("### 타입 관리")
+            for item in types:
+                with st.expander(f"[{item.get('facet_name') or 'Facet 미지정'}] {item['name']} · 카드 {item['card_count']}건"):
+                    st.write(item.get("description") or "설명 없음")
+                    facet_options = [None, *[x["facet_id"] for x in facets]]
+                    selected = st.selectbox("Facet 변경", facet_options,
+                        index=facet_options.index(item.get("facet_id")) if item.get("facet_id") in facet_options else 0,
+                        format_func=lambda v, names=facet_by_id: "Facet 미지정" if v is None else names[v]["name"], key=f"ontology-type-facet-{item['type_id']}")
+                    if st.button("Facet 반영", key=f"ontology-type-facet-save-{item['type_id']}"):
+                        try: ledger.update_ontology_type(item["type_id"], name=item["name"], description=item.get("description") or "", facet_id=selected); st.rerun()
+                        except ValueError as error: st.error(str(error))
+                    for card_id in ledger.ontology_card_ids(item["type_id"]): st.write(f"- {cards_by_id.get(card_id, {}).get('title', card_id)}")
+        if len(types) >= 2:
+            st.markdown("### 타입 간 관계 정의")
+            ids = [x["type_id"] for x in types]
+            source_id = st.selectbox("출발 타입", ids, format_func=lambda v: f"{type_by_id[v].get('facet_name') or '미분류'} · {type_by_id[v]['name']}", key="ontology-map-rel-source")
+            targets = [v for v in ids if v != source_id]
+            target_id = st.selectbox("도착 타입", targets, format_func=lambda v: f"{type_by_id[v].get('facet_name') or '미분류'} · {type_by_id[v]['name']}", key="ontology-map-rel-target")
+            rel_name = st.text_input("관계 이름", placeholder="예: operates_on, constrains, requires", key="ontology-map-rel-name")
+            rel_desc = st.text_area("관계 설명", key="ontology-map-rel-description")
+            if st.button("타입 관계 저장", type="primary", disabled=not rel_name.strip(), key="ontology-map-rel-save"):
+                try: ledger.create_ontology_type_relation(source_id, target_id, rel_name, rel_desc); st.rerun()
+                except ValueError as error: st.error(str(error))
+        if relations:
+            st.markdown("### 정의된 관계")
+            for r in relations:
+                cols = st.columns([5,1]); cols[0].write(f"**{type_by_id.get(r['source_type_id'],{}).get('name',r['source_type_id'])}** → `{r['relation_name']}` → **{type_by_id.get(r['target_type_id'],{}).get('name',r['target_type_id'])}**")
+                if r.get("description"): cols[0].caption(r["description"])
+                if cols[1].button("삭제", key=f"delete-ontology-rel-{r['relation_id']}"): ledger.delete_ontology_type_relation(r["relation_id"]); st.rerun()
 
 def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     """Paper assets are read and reviewed here, not converted to claims on intake."""
@@ -964,14 +1027,6 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                             "provisional": "잠정 — 연구자의 해석이거나 추가 검증 필요",
                         }
                         card_evidence_level = st.selectbox("근거 수준", list(evidence_levels), index=0, format_func=evidence_levels.get, help="논문이 Claim을 직접 얼마나 강하게 뒷받침하는지 고릅니다. 단일 실험 결과면 실증, 저자의 논증이면 이론, 리뷰 논문이면 문헌 종합, 본문을 넘어선 연구자 해석이면 잠정이 적합합니다.")
-                        ontology = st.checkbox("온톨로지 일반화 메모로 보내기", help="이는 독립 온톨로지 노드를 만들지 않습니다. 원문 근거를 바탕으로 개념·관계·조건을 일반화한 뒤, 별도 온톨로지 작업대에서 검토합니다.")
-                        ontology_text = st.text_input(
-                            "온톨로지 후보 표현 (개념·관계·조건을 일반화해 작성)",
-                            value=item.get("suggested_ontology", ""),
-                            placeholder="예: 설계 문제는 품질속성·제약조건·설계개념의 트레이드오프로 구성된다.",
-                            disabled=not ontology,
-                            key=f"ontology-text-{item['question_id']}",
-                        )
                         duplicate_mode = "separate"
                         duplicate_target_id = ""
                         if candidate_matches:
@@ -1048,40 +1103,8 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                                 action_steps=["원문 근거 확인", "Claim·조건 보완 필요성 판단", "보류 처리"],
                                 evidence_card_ids=[], unresolved_items=[item["question"]],
                             )
-                        if ontology and decision == "register":
-                            if ontology_text.strip():
-                                candidate_id = ledger.add_paper_ontology_candidate(paper["paper_id"], item["question_id"], ontology_text.strip(), item["evidence"])
-                                store_researcher_curation_episode(
-                                    ledger, case_id=action_case_id, episode_type="ontology_curation", paper_title=paper["title"],
-                                    situation=f"읽기 질문: {item['question']}\n원문 근거: {'; '.join(final_evidence)}",
-                                    decision="원문 해석을 도메인 온톨로지 후보로 일반화한다.", action_summary=f"온톨로지 후보 [{candidate_id}]: {ontology_text.strip()}",
-                                    action_steps=["관련 지식카드 대조", "공통 개념·관계·조건 일반화", "온톨로지 후보 기록"],
-                                    evidence_card_ids=ledger.paper_card_ids(paper["paper_id"]), unresolved_items=[],
-                                )
-                            else:
-                                st.warning("온톨로지 후보를 제안하려면 일반화한 개념·관계·조건 표현을 입력하세요.")
                         st.success("연구자 판단을 저장했습니다.")
                         st.rerun()
-            ontology_candidates = ledger.paper_ontology_candidates(paper["paper_id"])
-            if ontology_candidates:
-                st.markdown("**온톨로지 후보 · 연구자 일반화 대기**")
-                for candidate in ontology_candidates:
-                    with st.expander(f"{candidate['status']} · {candidate['candidate_text']}"):
-                        st.caption("근거: " + " · ".join(candidate["evidence"]))
-                        render_ontology_context(paper, candidate, semantic=semantic, embedding_model=embedding_model, key_prefix="shelf")
-                        with st.form(f"ontology-review-{candidate['candidate_id']}"):
-                            ontology_comment = st.text_area("연구자 메모", value=candidate["researcher_comment"])
-                            submit_ontology = st.checkbox("연구위원 데스크의 온톨로지 승인 안건으로 보내기", disabled=candidate["status"] != "proposed")
-                            ontology_saved = st.form_submit_button("온톨로지 후보 저장")
-                        if ontology_saved:
-                            if submit_ontology:
-                                promote_ontology_candidate(ledger, paper, candidate, ontology_comment)
-                                ledger.update_paper_ontology_candidate(candidate["candidate_id"], researcher_comment=ontology_comment, status="pending_approval")
-                                st.success("연구위원 데스크에 온톨로지 승인 안건을 보냈습니다.")
-                            else:
-                                ledger.update_paper_ontology_candidate(candidate["candidate_id"], researcher_comment=ontology_comment, status=candidate["status"])
-                                st.success("온톨로지 후보 메모를 저장했습니다.")
-                            st.rerun()
             events = ledger.paper_asset_events(paper["paper_id"])
             if events:
                 with st.expander(f"이 논문의 이력 · {len(events)}건"):
@@ -1103,7 +1126,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
 def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     st.header("M1 · 문헌조사·지식화 작업실")
     st.caption("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.")
-    upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs(["서재함", "개념 일반화", "관계·계보 정리", "승인 지식 조회", "문헌 탐색 작업", "승인 지식 목록"])
+    upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs(["서재함", "온톨로지", "관계·계보 정리", "승인 지식 조회", "문헌 탐색 작업", "승인 지식 목록"])
     with upload_tab:
         st.caption("논문·연구 노트·웹페이지를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 등록 자체는 지식카드 생성이 아닙니다.")
         uploaded = st.file_uploader("논문 PDF·연구 노트", type=["pdf", "txt", "md"])

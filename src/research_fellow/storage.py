@@ -186,6 +186,52 @@ class Ledger:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
                 );
+                CREATE TABLE IF NOT EXISTS ontology_facets (
+                    facet_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_facets_name
+                    ON ontology_facets(lower(name)) WHERE deleted_at IS NULL;
+                CREATE TABLE IF NOT EXISTS ontology_types (
+                    type_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    facet_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT,
+                    FOREIGN KEY(facet_id) REFERENCES ontology_facets(facet_id)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_types_name
+                    ON ontology_types(lower(name)) WHERE deleted_at IS NULL;
+                CREATE TABLE IF NOT EXISTS ontology_card_assignments (
+                    type_id TEXT NOT NULL,
+                    card_id TEXT NOT NULL,
+                    assigned_at TEXT NOT NULL,
+                    PRIMARY KEY(type_id, card_id),
+                    FOREIGN KEY(type_id) REFERENCES ontology_types(type_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ontology_card_assignments_card
+                    ON ontology_card_assignments(card_id);
+                CREATE TABLE IF NOT EXISTS ontology_type_relations (
+                    relation_id TEXT PRIMARY KEY,
+                    source_type_id TEXT NOT NULL,
+                    target_type_id TEXT NOT NULL,
+                    relation_name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT,
+                    FOREIGN KEY(source_type_id) REFERENCES ontology_types(type_id),
+                    FOREIGN KEY(target_type_id) REFERENCES ontology_types(type_id)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_type_relation_unique
+                    ON ontology_type_relations(source_type_id, target_type_id, lower(relation_name))
+                    WHERE deleted_at IS NULL;
                 CREATE TABLE IF NOT EXISTS paper_reading_reviews (
                     review_id TEXT PRIMARY KEY, question_id TEXT NOT NULL, refined_answer TEXT NOT NULL,
                     additional_evidence_json TEXT NOT NULL, remaining_uncertainty TEXT NOT NULL,
@@ -249,7 +295,10 @@ class Ledger:
             for column in ("suggested_labels", "suggested_title", "suggested_concepts", "suggested_applies_to", "suggested_conditions", "suggested_limits"):
                 if column not in reading_question_columns:
                     conn.execute(f"ALTER TABLE paper_reading_questions ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "6"))
+            ontology_type_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_types)").fetchall()}
+            if "facet_id" not in ontology_type_columns:
+                conn.execute("ALTER TABLE ontology_types ADD COLUMN facet_id TEXT")
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "8"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()
@@ -605,6 +654,175 @@ class Ledger:
         query += " ORDER BY approved_at DESC"
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(query, values).fetchall()]
+
+    # --- Ontology schema -------------------------------------------------
+
+    def create_ontology_facet(self, name: str, description: str = "") -> dict[str, Any]:
+        name = name.strip()
+        if not name:
+            raise ValueError("Facet 이름은 비어 있을 수 없습니다.")
+        facet_id, timestamp = f"of-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            try:
+                conn.execute("INSERT INTO ontology_facets VALUES (?, ?, ?, ?, ?, NULL)", (facet_id, name, description.strip(), timestamp, timestamp))
+            except sqlite3.IntegrityError as error:
+                raise ValueError("같은 이름의 활성 Facet이 이미 있습니다.") from error
+            row = conn.execute("SELECT * FROM ontology_facets WHERE facet_id=?", (facet_id,)).fetchone()
+        return dict(row)
+
+    def ontology_facets(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT f.*, COUNT(t.type_id) AS type_count
+                FROM ontology_facets f
+                LEFT JOIN ontology_types t ON t.facet_id=f.facet_id AND t.deleted_at IS NULL
+                WHERE f.deleted_at IS NULL
+                GROUP BY f.facet_id ORDER BY lower(f.name)""").fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_ontology_facet(self, facet_id: str) -> bool:
+        timestamp = now()
+        with self.connect() as conn:
+            result = conn.execute("UPDATE ontology_facets SET deleted_at=?, updated_at=? WHERE facet_id=? AND deleted_at IS NULL", (timestamp, timestamp, facet_id))
+            if result.rowcount:
+                conn.execute("UPDATE ontology_types SET facet_id=NULL, updated_at=? WHERE facet_id=? AND deleted_at IS NULL", (timestamp, facet_id))
+        return result.rowcount == 1
+
+    def create_ontology_type(self, name: str, description: str = "", facet_id: str | None = None) -> dict[str, Any]:
+        name = name.strip()
+        if not name:
+            raise ValueError("온톨로지 타입 이름은 비어 있을 수 없습니다.")
+        type_id, timestamp = f"ot-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            if facet_id and not conn.execute("SELECT 1 FROM ontology_facets WHERE facet_id=? AND deleted_at IS NULL", (facet_id,)).fetchone():
+                raise ValueError("활성 Facet을 찾을 수 없습니다.")
+            try:
+                conn.execute("INSERT INTO ontology_types(type_id,name,description,facet_id,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,NULL)", (type_id, name, description.strip(), facet_id, timestamp, timestamp))
+            except sqlite3.IntegrityError as error:
+                raise ValueError("같은 이름의 활성 온톨로지 타입이 이미 있습니다.") from error
+            row = conn.execute("SELECT * FROM ontology_types WHERE type_id=?", (type_id,)).fetchone()
+        return dict(row)
+
+    def update_ontology_type(self, type_id: str, *, name: str, description: str = "", facet_id: str | None = None) -> bool:
+        name = name.strip()
+        if not name:
+            raise ValueError("온톨로지 타입 이름은 비어 있을 수 없습니다.")
+        with self.connect() as conn:
+            if facet_id and not conn.execute("SELECT 1 FROM ontology_facets WHERE facet_id=? AND deleted_at IS NULL", (facet_id,)).fetchone():
+                raise ValueError("활성 Facet을 찾을 수 없습니다.")
+            try:
+                result = conn.execute("UPDATE ontology_types SET name=?, description=?, facet_id=?, updated_at=? WHERE type_id=? AND deleted_at IS NULL", (name, description.strip(), facet_id, now(), type_id))
+            except sqlite3.IntegrityError as error:
+                raise ValueError("같은 이름의 활성 온톨로지 타입이 이미 있습니다.") from error
+        return result.rowcount == 1
+
+    def ontology_types(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT t.*, f.name AS facet_name, COUNT(a.card_id) AS card_count
+                FROM ontology_types t
+                LEFT JOIN ontology_facets f ON f.facet_id=t.facet_id AND f.deleted_at IS NULL
+                LEFT JOIN ontology_card_assignments a ON a.type_id=t.type_id
+                WHERE t.deleted_at IS NULL
+                GROUP BY t.type_id
+                ORDER BY COALESCE(lower(f.name), 'zzzz'), lower(t.name)""").fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_ontology_type(self, type_id: str) -> bool:
+        timestamp = now()
+        with self.connect() as conn:
+            result = conn.execute("UPDATE ontology_types SET deleted_at=?, updated_at=? WHERE type_id=? AND deleted_at IS NULL", (timestamp, timestamp, type_id))
+            if result.rowcount:
+                conn.execute("DELETE FROM ontology_card_assignments WHERE type_id=?", (type_id,))
+                conn.execute("UPDATE ontology_type_relations SET deleted_at=?, updated_at=? WHERE deleted_at IS NULL AND (source_type_id=? OR target_type_id=?)", (timestamp, timestamp, type_id, type_id))
+        return result.rowcount == 1
+
+    def assign_cards_to_ontology_type(self, type_id: str, card_ids: list[str]) -> int:
+        cleaned = sorted({str(card_id).strip() for card_id in card_ids if str(card_id).strip()})
+        timestamp = now()
+        with self.connect() as conn:
+            if not conn.execute("SELECT 1 FROM ontology_types WHERE type_id=? AND deleted_at IS NULL", (type_id,)).fetchone():
+                raise ValueError("활성 온톨로지 타입을 찾을 수 없습니다.")
+            before = conn.total_changes
+            conn.executemany("INSERT OR IGNORE INTO ontology_card_assignments(type_id,card_id,assigned_at) VALUES (?,?,?)", [(type_id, card_id, timestamp) for card_id in cleaned])
+            return conn.total_changes - before
+
+    def unassign_card_from_ontology_type(self, card_id: str, type_id: str) -> bool:
+        with self.connect() as conn:
+            result = conn.execute("DELETE FROM ontology_card_assignments WHERE card_id=? AND type_id=?", (str(card_id).strip(), str(type_id).strip()))
+        return result.rowcount == 1
+
+    def set_card_ontology_types(self, card_id: str, type_ids: list[str]) -> None:
+        card_id = str(card_id).strip()
+        if not card_id:
+            raise ValueError("지식카드 ID는 비어 있을 수 없습니다.")
+        cleaned = sorted({str(type_id).strip() for type_id in type_ids if str(type_id).strip()})
+        timestamp = now()
+        with self.connect() as conn:
+            if cleaned:
+                marks = ",".join("?" for _ in cleaned)
+                active = {str(row["type_id"]) for row in conn.execute(f"SELECT type_id FROM ontology_types WHERE deleted_at IS NULL AND type_id IN ({marks})", cleaned).fetchall()}
+                if active != set(cleaned):
+                    raise ValueError("활성 온톨로지 타입을 찾을 수 없습니다.")
+            conn.execute("DELETE FROM ontology_card_assignments WHERE card_id=?", (card_id,))
+            conn.executemany("INSERT INTO ontology_card_assignments(type_id,card_id,assigned_at) VALUES (?,?,?)", [(type_id, card_id, timestamp) for type_id in cleaned])
+
+    def set_card_ontology_type(self, card_id: str, type_id: str | None) -> None:
+        self.set_card_ontology_types(card_id, [type_id] if type_id else [])
+
+    def replace_ontology_type_cards(self, type_id: str, card_ids: list[str]) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM ontology_card_assignments WHERE type_id=?", (type_id,))
+        self.assign_cards_to_ontology_type(type_id, card_ids)
+
+    def ontology_card_ids(self, type_id: str) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT card_id FROM ontology_card_assignments WHERE type_id=? ORDER BY assigned_at, card_id", (type_id,)).fetchall()
+        return [str(row["card_id"]) for row in rows]
+
+    def ontology_types_for_card(self, card_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT t.*, f.name AS facet_name
+                FROM ontology_types t JOIN ontology_card_assignments a ON a.type_id=t.type_id
+                LEFT JOIN ontology_facets f ON f.facet_id=t.facet_id AND f.deleted_at IS NULL
+                WHERE a.card_id=? AND t.deleted_at IS NULL
+                ORDER BY COALESCE(lower(f.name), 'zzzz'), lower(t.name)""", (card_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_ontology_type_relation(
+        self, source_type_id: str, target_type_id: str, relation_name: str, description: str = ""
+    ) -> dict[str, Any]:
+        if source_type_id == target_type_id:
+            raise ValueError("타입 관계의 출발·도착 타입은 달라야 합니다.")
+        relation_name = relation_name.strip()
+        if not relation_name:
+            raise ValueError("타입 관계 이름은 비어 있을 수 없습니다.")
+        relation_id, timestamp = f"otr-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ontology_type_relations VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                    (relation_id, source_type_id, target_type_id, relation_name, description.strip(), timestamp, timestamp),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("같은 타입 사이에 같은 이름의 활성 관계가 이미 있습니다.") from error
+            row = conn.execute(
+                "SELECT * FROM ontology_type_relations WHERE relation_id=?", (relation_id,)
+            ).fetchone()
+        return dict(row)
+
+    def ontology_type_relations(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ontology_type_relations WHERE deleted_at IS NULL ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_ontology_type_relation(self, relation_id: str) -> bool:
+        with self.connect() as conn:
+            result = conn.execute(
+                "UPDATE ontology_type_relations SET deleted_at=?, updated_at=? WHERE relation_id=? AND deleted_at IS NULL",
+                (now(), now(), relation_id),
+            )
+        return result.rowcount == 1
 
     def delete_knowledge_relation(self, relation_id: str, note: str = "") -> bool:
         with self.connect() as conn:

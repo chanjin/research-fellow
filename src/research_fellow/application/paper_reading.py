@@ -38,7 +38,6 @@ Use these exact Korean field labels in every question block. Do not omit a field
 근거: 독립적으로 확인 가능한 p.N과 짧은 원문 단서 두 개. 한 곳만 가능하면 그 사실을 한계·유보에 명시
 한계·유보: 적용 범위 또는 근거의 한계
 연구 관련성: 이 질문이 알리는 현재 가설·설계 선택·평가 쟁점·탐색 방향
-온톨로지 후보: 일반화해 검토할 개념·관계·조건. 근거가 없으면 비워둠
 레이블: 간결한 영문 레이블, 쉼표 구분
 카드 제목: Claim을 반복하지 않는 짧은 한국어 명사구
 핵심 개념: 이후 관계 작업에 쓸 도메인 개념, 쉼표 구분
@@ -54,7 +53,7 @@ Output check before responding:
 - Use Korean only.
 - First write Research summary beginning with 대상 문제, 해결 접근, 핵심 결과; then M1 research-context interpretation, Suggested shelf labels, then the question blocks. Do not write content outside these sections.
 - Return one to five complete question blocks by default, and never more than ten, separated by ---.
-- Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 온톨로지 후보, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건.
+- Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건.
 - Every Evidence value must include p.N and a short source hint.
 - Prefer fewer complete blocks to an incomplete response. Keep every non-evidence field concise (one or two sentences); give exactly two evidence locations unless one is genuinely unavailable.
 """
@@ -67,7 +66,6 @@ _READING_FIELD_ALIASES = {
         "evidence": "evidence", "근거": "evidence", "증거": "evidence",
         "uncertainty": "uncertainty", "불확실성": "uncertainty", "유보": "uncertainty", "한계": "uncertainty", "한계·유보": "uncertainty", "한계 및 유보": "uncertainty",
         "research relevance": "research_relevance", "연구 관련성": "research_relevance", "연구적 관련성": "research_relevance",
-        "ontology suggestion": "suggested_ontology", "온톨로지 힌트": "suggested_ontology", "온톨로지 제안": "suggested_ontology", "온톨로지 후보": "suggested_ontology", "개념 제안": "suggested_ontology",
         "suggested labels": "suggested_labels", "추천 레이블": "suggested_labels", "제안 레이블": "suggested_labels", "제안 라벨": "suggested_labels", "labels": "suggested_labels", "레이블": "suggested_labels",
         "suggested title": "suggested_title", "추천 카드 제목": "suggested_title", "제안 타이틀": "suggested_title", "제안 제목": "suggested_title", "card title": "suggested_title", "카드 제목": "suggested_title",
         "suggested concepts": "suggested_concepts", "추천 핵심 개념": "suggested_concepts", "제안 개념": "suggested_concepts", "concepts": "suggested_concepts", "핵심 개념": "suggested_concepts",
@@ -154,7 +152,6 @@ def parse_reading_questions(text: str) -> list[dict[str, Any]]:
                 "evidence": evidence[:10],
                 "uncertainty": values.get("uncertainty", "원문 범위를 넘어선 일반화는 유보합니다."),
                 "research_relevance": values.get("research_relevance", ""),
-                "suggested_ontology": values.get("suggested_ontology", ""),
                 "suggested_labels": values.get("suggested_labels", ""),
                 "suggested_title": values.get("suggested_title", ""),
                 "suggested_concepts": values.get("suggested_concepts", ""),

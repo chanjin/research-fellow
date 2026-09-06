@@ -116,6 +116,16 @@ class Ledger:
                     error TEXT NOT NULL,
                     diagnostics_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS knowledge_cards (
+                    card_id TEXT PRIMARY KEY,
+                    card_json TEXT NOT NULL,
+                    approved_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT,
+                    deleted_note TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_cards_active
+                    ON knowledge_cards(deleted_at, updated_at DESC);
                 CREATE TABLE IF NOT EXISTS knowledge_relations (
                     relation_id TEXT PRIMARY KEY,
                     source_card_id TEXT NOT NULL,
@@ -298,7 +308,7 @@ class Ledger:
             ontology_type_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_types)").fetchall()}
             if "facet_id" not in ontology_type_columns:
                 conn.execute("ALTER TABLE ontology_types ADD COLUMN facet_id TEXT")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "8"))
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "9"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()

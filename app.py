@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,21 +54,27 @@ from research_fellow.services import (
     request_curation_intent,
 )
 from research_fellow.storage import Ledger
+from research_fellow.workspace_sync import WorkspaceSync
 from research_fellow.ui.developer import render_developer_screen
 from research_fellow.domain.research import ResearchState
 
 
 ROOT = Path(__file__).parent
-DATA = ROOT / "data"
-EXTRACTION_CACHE = DATA / "extracted_documents"
-ledger = Ledger(DATA / "research_fellow.db")
+DATA = Path(os.environ.get("RESEARCH_FELLOW_DATA_DIR", ROOT / "data")).expanduser()
+CACHE = Path(os.environ.get("RESEARCH_FELLOW_CACHE_DIR", ROOT / ".cache" / "research-fellow")).expanduser()
+DATA.mkdir(parents=True, exist_ok=True)
+CACHE.mkdir(parents=True, exist_ok=True)
+EXTRACTION_CACHE = CACHE / "extracted_documents"
+LOCAL_DB = DATA / "research_fellow.db"
+ledger = Ledger(LOCAL_DB)
 set_llm_audit_logger(ledger.record_llm_call)
-set_llm_audit_log_path(DATA / "logs" / "llm_calls.jsonl")
-memory = KnowledgeMemory(DATA / "knowledge_cards.jsonl")
-relations = RelationMemory(DATA / "knowledge_relations.jsonl")
-ledger.sync_knowledge_relations(relations.all())
-retriever = KnowledgeRetriever(DATA / "retrieval_index.json")
-episodic_retriever = EpisodicRetriever(DATA / "episodic_retrieval_index.json")
+set_llm_audit_log_path(CACHE / "logs" / "llm_calls.jsonl")
+# SQLite is now the canonical durable store. Existing JSONL files are imported
+# once when the corresponding SQLite table is empty, then left untouched as legacy backup.
+memory = KnowledgeMemory(LOCAL_DB, legacy_path=DATA / "knowledge_cards.jsonl")
+relations = RelationMemory(LOCAL_DB, legacy_path=DATA / "knowledge_relations.jsonl")
+retriever = KnowledgeRetriever(CACHE / "retrieval_index.json")
+episodic_retriever = EpisodicRetriever(CACHE / "episodic_retrieval_index.json")
 
 
 def bullet_evidence(results: list[RetrievalResult]) -> str:
@@ -2129,6 +2136,92 @@ def external_advisory(model: str, use_ollama: bool, semantic: bool, embedding_mo
                 st.success("다음 유사 자문에서 선례 기반 빠른 경로로 리콜할 수 있습니다.")
 
 
+
+def render_workspace_sync() -> None:
+    """Sidebar control for explicit local ↔ integrated-server database merge."""
+    with st.sidebar.expander("작업공간 동기화", expanded=False):
+        st.caption("집/학교에서는 로컬 DB로 작업하고, 필요할 때 서버 Workspace와 통합합니다.")
+        st.caption(f"Local · {LOCAL_DB}")
+        default_server = os.environ.get("RESEARCH_FELLOW_SERVER_DIR", "")
+        if not default_server:
+            legacy = os.environ.get("RESEARCH_FELLOW_SERVER_DB", "")
+            if legacy:
+                legacy_path = Path(legacy).expanduser()
+                default_server = str(legacy_path.parent if legacy_path.suffix.lower() == ".db" else legacy_path)
+        server_value = st.text_input(
+            "서버 Workspace 디렉터리",
+            value=default_server,
+            placeholder="예: ~/Library/Mobile Documents/com~apple~CloudDocs/ResearchFellow",
+            key="workspace-sync-server-dir",
+            help="Google Drive/iCloud Drive/NAS의 폴더를 지정하세요. 앱이 이 안의 research_fellow.db를 자동으로 사용합니다.",
+        ).strip()
+        if not server_value:
+            st.info("서버 Workspace 디렉터리를 지정하면 초기화 또는 통합 기능이 활성화됩니다.")
+            return
+        try:
+            sync = WorkspaceSync(LOCAL_DB, server_value)
+            st.caption(f"Server · {sync.server_db}")
+
+            if not sync.server_exists:
+                st.info("서버 DB가 아직 없습니다. 현재 Local DB를 서버의 초기 상태로 복사합니다.")
+                counts = sync.initialization_counts()
+                if counts:
+                    labels = {
+                        "paper_shelf": "논문",
+                        "paper_analyses": "논문 분석",
+                        "knowledge_cards": "지식카드",
+                        "knowledge_relations": "카드 관계",
+                        "ontology_facets": "Facet",
+                        "ontology_types": "Type",
+                        "ontology_type_relations": "Type 관계",
+                        "ontology_card_assignments": "Card-Type",
+                    }
+                    summary_rows = [
+                        {"데이터": labels.get(table, table), "건수": count}
+                        for table, count in counts.items()
+                        if count
+                    ]
+                    st.dataframe(summary_rows, use_container_width=True, hide_index=True, height=min(220, 38 + 35 * len(summary_rows)))
+                if st.button("현재 Local DB로 서버 초기화", use_container_width=True, key="workspace-sync-init"):
+                    sync.initialize_server_from_local()
+                    st.success("서버 초기화 완료 · 현재 Local 상태를 동기화 기준으로 기록했습니다.")
+                    st.rerun()
+                return
+
+            last = sync.last_run()
+            if last:
+                st.caption(f"최근 통합 · {last['completed_at']} · 적용 {last['applied_count']} · 충돌 {last['conflict_count']}")
+            preview = sync.preview()
+            counts = preview.counts()
+            upload = sum(value for key, value in counts.items() if key.startswith("local→server:"))
+            download = sum(value for key, value in counts.items() if key.startswith("server→local:"))
+            conflicts = len(preview.conflicts)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("서버로", upload)
+            c2.metric("로컬로", download)
+            c3.metric("충돌", conflicts)
+            if preview.changes:
+                rows = [
+                    {
+                        "방향": item.direction,
+                        "동작": item.action,
+                        "데이터": item.table,
+                        "키": item.key,
+                    }
+                    for item in preview.changes
+                ]
+                st.dataframe(rows, use_container_width=True, hide_index=True, height=min(260, 38 + 35 * len(rows)))
+            else:
+                st.caption("현재 양쪽에서 병합할 변경이 없습니다.")
+            if conflicts:
+                st.warning("같은 레코드가 집/학교 양쪽에서 변경된 충돌은 자동 덮어쓰지 않습니다. 비충돌 변경만 통합됩니다.")
+            if st.button("서버와 통합 실행", use_container_width=True, key="workspace-sync-apply"):
+                result = sync.apply()
+                st.success(f"통합 완료 · 비충돌 변경 {len(result.actionable)}건 적용 · 충돌 {len(result.conflicts)}건 보류")
+                st.rerun()
+        except Exception as exc:
+            st.error(f"동기화 준비 실패: {exc}")
+
 def main() -> None:
     st.set_page_config(page_title="Research Fellow", layout="wide")
     st.markdown("""<style>
@@ -2137,6 +2230,7 @@ def main() -> None:
     .rf-running { position: fixed; top: 0.55rem; right: 5.9rem; z-index: 999999; max-width: 30rem; padding: 0.42rem 0.75rem; border: 1px solid #b54708; border-radius: 0.45rem; background: #f79009; color: #1f1300; font-weight: 700; box-shadow: 0 2px 7px rgba(0,0,0,.22); }
     </style>""", unsafe_allow_html=True)
     st.sidebar.title("도메인 전문 연구위원")
+    render_workspace_sync()
     paper_provider = st.sidebar.radio(
         "본문 읽기·비교", ["gemini", "ollama"], horizontal=True,
         format_func={"ollama": "Ollama 로컬", "gemini": "Gemini 외부 API"}.get,
@@ -2189,7 +2283,7 @@ def main() -> None:
         with manage_tab:
             management_screen()
     elif screen == "개발·프롬프트":
-        render_developer_screen(memory.all(), model, use_ollama, EXTRACTION_CACHE, ledger, DATA / "logs" / "llm_calls.jsonl", provider=internal_provider)
+        render_developer_screen(memory.all(), model, use_ollama, EXTRACTION_CACHE, ledger, CACHE / "logs" / "llm_calls.jsonl", provider=internal_provider)
 
 
 if __name__ == "__main__":

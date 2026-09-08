@@ -30,6 +30,12 @@ SYNC_TABLES = (
     "ontology_card_assignments",
     "ontology_type_relations",
     "episode_memories",
+    "research_questions",
+    "research_question_intents",
+    "research_state_reviews",
+    "research_state_review_cards",
+    "research_state_review_questions",
+    "research_question_sources",
 )
 
 # These values describe a machine-local artifact. They are deliberately excluded

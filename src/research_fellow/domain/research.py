@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field, field_validator
 
 ConfidenceLevel = Literal["low", "medium", "high"]
 Priority = Literal["높음", "보통", "낮음"]
+ResearchQuestionStatus = Literal["candidate", "interested", "exploring", "hold", "rejected"]
+ExecutionMode = Literal["manual", "auto"]
+IntentCreator = Literal["m2", "m2_auto"]
 
 
 class ResearchState(BaseModel):
@@ -28,6 +31,25 @@ class ResearchState(BaseModel):
         return [item.strip() for item in value if item.strip()][:8]
 
 
+class ResearchQuestionCandidate(BaseModel):
+    """An evidence-grounded question that can mature in the researcher backlog."""
+
+    rq_id: str = ""
+    question: str = Field(min_length=3)
+    rationale: str = Field(min_length=3)
+    gap_or_tension: str = ""
+    research_context: str = ""
+    exploration_need: str = ""
+    source_card_ids: list[str] = Field(default_factory=list)
+    source_update_ids: list[str] = Field(default_factory=list)
+    status: ResearchQuestionStatus = "candidate"
+
+    @field_validator("source_card_ids", "source_update_ids")
+    @classmethod
+    def compact_ids(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in value if item.strip()))[:12]
+
+
 class CurationIntent(BaseModel):
     """A proposed M2→M1 request. Researcher approval is still required."""
 
@@ -40,6 +62,8 @@ class CurationIntent(BaseModel):
     priority: Priority = "보통"
     expected_evidence: str = Field(min_length=3)
     completion_condition: str = Field(min_length=3)
+    execution_mode: ExecutionMode = "manual"
+    created_by: IntentCreator = "m2"
 
     @field_validator("labels")
     @classmethod

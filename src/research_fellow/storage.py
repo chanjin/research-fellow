@@ -242,6 +242,78 @@ class Ledger:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_type_relation_unique
                     ON ontology_type_relations(source_type_id, target_type_id, lower(relation_name))
                     WHERE deleted_at IS NULL;
+                CREATE TABLE IF NOT EXISTS research_questions (
+                    rq_id TEXT PRIMARY KEY,
+                    question TEXT NOT NULL,
+                    rationale TEXT NOT NULL DEFAULT '',
+                    gap_or_tension TEXT NOT NULL DEFAULT '',
+                    research_context TEXT NOT NULL DEFAULT '',
+                    exploration_need TEXT NOT NULL DEFAULT '',
+                    source_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                    source_update_ids_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'candidate',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_research_questions_unique
+                    ON research_questions(lower(question)) WHERE deleted_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_research_questions_status
+                    ON research_questions(status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS research_question_intents (
+                    rq_id TEXT NOT NULL,
+                    intent_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(rq_id, intent_id),
+                    FOREIGN KEY(rq_id) REFERENCES research_questions(rq_id)
+                );
+                CREATE TABLE IF NOT EXISTS research_state_reviews (
+                    review_id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source_card_count INTEGER NOT NULL DEFAULT 0,
+                    generated_rq_count INTEGER NOT NULL DEFAULT 0,
+                    selected_rq_count INTEGER NOT NULL DEFAULT 0,
+                    summary TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS research_state_review_cards (
+                    review_id TEXT NOT NULL,
+                    update_id TEXT NOT NULL,
+                    card_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(review_id, update_id),
+                    FOREIGN KEY(review_id) REFERENCES research_state_reviews(review_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_state_review_cards_card
+                    ON research_state_review_cards(card_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS research_state_review_questions (
+                    review_id TEXT NOT NULL,
+                    rq_id TEXT NOT NULL,
+                    change_kind TEXT NOT NULL DEFAULT 'new',
+                    priority_score INTEGER,
+                    selection_reason TEXT NOT NULL DEFAULT '',
+                    selected INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(review_id, rq_id),
+                    FOREIGN KEY(review_id) REFERENCES research_state_reviews(review_id),
+                    FOREIGN KEY(rq_id) REFERENCES research_questions(rq_id)
+                );
+                CREATE TABLE IF NOT EXISTS research_question_sources (
+                    rq_id TEXT NOT NULL,
+                    review_id TEXT NOT NULL,
+                    card_id TEXT NOT NULL,
+                    update_id TEXT NOT NULL DEFAULT '',
+                    relation_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(rq_id, review_id, card_id),
+                    FOREIGN KEY(rq_id) REFERENCES research_questions(rq_id),
+                    FOREIGN KEY(review_id) REFERENCES research_state_reviews(review_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_question_sources_rq
+                    ON research_question_sources(rq_id, created_at DESC);
                 CREATE TABLE IF NOT EXISTS paper_reading_reviews (
                     review_id TEXT PRIMARY KEY, question_id TEXT NOT NULL, refined_answer TEXT NOT NULL,
                     additional_evidence_json TEXT NOT NULL, remaining_uncertainty TEXT NOT NULL,
@@ -308,7 +380,7 @@ class Ledger:
             ontology_type_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_types)").fetchall()}
             if "facet_id" not in ontology_type_columns:
                 conn.execute("ALTER TABLE ontology_types ADD COLUMN facet_id TEXT")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "9"))
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "11"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()
@@ -664,6 +736,232 @@ class Ledger:
         query += " ORDER BY approved_at DESC"
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(query, values).fetchall()]
+
+
+    # --- Research-state review batches ------------------------------------
+
+    def reviewed_knowledge_update_ids(self) -> set[str]:
+        """Knowledge-update events consumed by a completed M2 state review."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT rc.update_id
+                   FROM research_state_review_cards rc
+                   JOIN research_state_reviews r ON r.review_id=rc.review_id
+                   WHERE r.status='completed'"""
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def create_research_state_review(self, mode: str, updates: list[dict[str, Any]]) -> str:
+        mode = mode if mode in {"manual", "auto"} else "manual"
+        review_id, timestamp = f"rsr-{uuid.uuid4().hex[:12]}", now()
+        card_ids = {
+            str((item.get("payload") or {}).get("card_id", ""))
+            for item in updates if str((item.get("payload") or {}).get("card_id", ""))
+        }
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO research_state_reviews VALUES (?,?,?,?,?,?,?,?,?)",
+                (review_id, mode, "processing", len(card_ids), 0, 0, "", timestamp, None),
+            )
+            for item in updates:
+                payload = item.get("payload") or {}
+                card_id = str(payload.get("card_id", ""))
+                pending_ids = item.get("pending_update_ids") or [item.get("phenomenon_id", "")]
+                if not card_id:
+                    continue
+                for update_id in pending_ids:
+                    if update_id:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO research_state_review_cards VALUES (?,?,?,?)",
+                            (review_id, str(update_id), card_id, timestamp),
+                        )
+        return review_id
+
+    def complete_research_state_review(self, review_id: str, *, generated_rq_count: int, selected_rq_count: int = 0, summary: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE research_state_reviews
+                   SET status='completed', generated_rq_count=?, selected_rq_count=?, summary=?, completed_at=?
+                   WHERE review_id=?""",
+                (generated_rq_count, selected_rq_count, summary.strip(), now(), review_id),
+            )
+
+    def fail_research_state_review(self, review_id: str, summary: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE research_state_reviews SET status='failed', summary=?, completed_at=? WHERE review_id=?",
+                (summary.strip(), now(), review_id),
+            )
+
+    def research_state_reviews(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM research_state_reviews ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def link_research_question_review(self, review_id: str, rq_id: str, change_kind: str) -> None:
+        kind = change_kind if change_kind in {"new", "strengthened"} else "strengthened"
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO research_state_review_questions(review_id,rq_id,change_kind,priority_score,selection_reason,selected,created_at) VALUES (?,?,?,?,?,?,?)",
+                (review_id, rq_id, kind, None, "", 0, now()),
+            )
+
+    def update_review_question_selection(self, review_id: str, rq_id: str, *, score: int, reason: str, selected: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE research_state_review_questions SET priority_score=?, selection_reason=?, selected=? WHERE review_id=? AND rq_id=?",
+                (max(1, min(int(score), 5)), reason.strip(), 1 if selected else 0, review_id, rq_id),
+            )
+
+    def research_state_review_questions(self, review_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT rrq.*, rq.question, rq.status
+                   FROM research_state_review_questions rrq
+                   JOIN research_questions rq ON rq.rq_id=rrq.rq_id
+                   WHERE rrq.review_id=? ORDER BY rrq.selected DESC, COALESCE(rrq.priority_score,0) DESC, rrq.created_at""",
+                (review_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_research_question_source(self, rq_id: str, review_id: str, card_id: str, update_id: str = "", relation_reason: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO research_question_sources VALUES (?,?,?,?,?,?)",
+                (rq_id, review_id, card_id, update_id, relation_reason.strip(), now()),
+            )
+
+    def research_question_sources(self, rq_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT s.*, r.completed_at AS review_completed_at, r.mode AS review_mode
+                   FROM research_question_sources s
+                   JOIN research_state_reviews r ON r.review_id=s.review_id
+                   WHERE s.rq_id=? ORDER BY s.created_at DESC""",
+                (rq_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- Research question backlog -----------------------------------------
+
+    def upsert_research_question(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        question = str(candidate.get("question", "")).strip()
+        rationale = str(candidate.get("rationale", "")).strip()
+        if not question or not rationale:
+            raise ValueError("연구질문과 도출 이유가 필요합니다.")
+        timestamp = now()
+        source_card_ids = list(dict.fromkeys(str(item).strip() for item in candidate.get("source_card_ids", []) if str(item).strip()))[:12]
+        source_update_ids = list(dict.fromkeys(str(item).strip() for item in candidate.get("source_update_ids", []) if str(item).strip()))[:12]
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT * FROM research_questions WHERE lower(question)=lower(?) AND deleted_at IS NULL",
+                (question,),
+            ).fetchone()
+            if existing:
+                rq_id = str(existing["rq_id"])
+                # Keep the researcher's lifecycle status and accumulate provenance when new M1 evidence strengthens the same RQ.
+                prior_cards = json.loads(existing["source_card_ids_json"] or "[]")
+                prior_updates = json.loads(existing["source_update_ids_json"] or "[]")
+                merged_cards = list(dict.fromkeys([*prior_cards, *source_card_ids]))[:50]
+                merged_updates = list(dict.fromkeys([*prior_updates, *source_update_ids]))[:100]
+                conn.execute(
+                    """UPDATE research_questions
+                       SET rationale=?, gap_or_tension=?, research_context=?, exploration_need=?,
+                           source_card_ids_json=?, source_update_ids_json=?, updated_at=?
+                       WHERE rq_id=?""",
+                    (rationale, str(candidate.get("gap_or_tension", "")).strip(),
+                     str(candidate.get("research_context", "")).strip(),
+                     str(candidate.get("exploration_need", "")).strip(),
+                     json.dumps(merged_cards, ensure_ascii=False), json.dumps(merged_updates, ensure_ascii=False),
+                     timestamp, rq_id),
+                )
+            else:
+                rq_id = str(candidate.get("rq_id") or f"rq-{uuid.uuid4().hex[:12]}")
+                status = str(candidate.get("status", "candidate"))
+                if status not in {"candidate", "interested", "exploring", "hold", "rejected"}:
+                    status = "candidate"
+                conn.execute(
+                    """INSERT INTO research_questions(
+                           rq_id,question,rationale,gap_or_tension,research_context,exploration_need,
+                           source_card_ids_json,source_update_ids_json,status,created_at,updated_at,deleted_at
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)""",
+                    (rq_id, question, rationale, str(candidate.get("gap_or_tension", "")).strip(),
+                     str(candidate.get("research_context", "")).strip(), str(candidate.get("exploration_need", "")).strip(),
+                     json.dumps(source_card_ids, ensure_ascii=False), json.dumps(source_update_ids, ensure_ascii=False),
+                     status, timestamp, timestamp),
+                )
+            row = conn.execute("SELECT * FROM research_questions WHERE rq_id=?", (rq_id,)).fetchone()
+        return self._research_question_row(row)
+
+    @staticmethod
+    def _research_question_row(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        item = dict(row)
+        item["source_card_ids"] = json.loads(item.pop("source_card_ids_json") or "[]")
+        item["source_update_ids"] = json.loads(item.pop("source_update_ids_json") or "[]")
+        return item
+
+    def research_question_by_text(self, question: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM research_questions WHERE lower(question)=lower(?) AND deleted_at IS NULL",
+                (question.strip(),),
+            ).fetchone()
+        return self._research_question_row(row) if row else None
+
+    def research_question(self, rq_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM research_questions WHERE rq_id=? AND deleted_at IS NULL", (rq_id,)
+            ).fetchone()
+        return self._research_question_row(row) if row else None
+
+    def research_question_backlog(self, statuses: list[str] | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM research_questions WHERE deleted_at IS NULL"
+        values: list[object] = []
+        if statuses:
+            clean = [item for item in statuses if item in {"candidate", "interested", "exploring", "hold", "rejected"}]
+            if clean:
+                marks = ",".join("?" for _ in clean)
+                query += f" AND status IN ({marks})"
+                values.extend(clean)
+        query += " ORDER BY CASE status WHEN 'exploring' THEN 0 WHEN 'interested' THEN 1 WHEN 'candidate' THEN 2 WHEN 'hold' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?"
+        values.append(max(1, min(int(limit), 500)))
+        with self.connect() as conn:
+            rows = conn.execute(query, values).fetchall()
+        return [self._research_question_row(row) for row in rows]
+
+    def update_research_question_status(self, rq_id: str, status: str) -> bool:
+        if status not in {"candidate", "interested", "exploring", "hold", "rejected"}:
+            raise ValueError("지원하지 않는 연구질문 상태입니다.")
+        with self.connect() as conn:
+            result = conn.execute(
+                "UPDATE research_questions SET status=?, updated_at=? WHERE rq_id=? AND deleted_at IS NULL",
+                (status, now(), rq_id),
+            )
+        return result.rowcount == 1
+
+    def link_research_question_intent(self, rq_id: str, intent_id: str, request_id: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO research_question_intents(rq_id,intent_id,request_id,created_at) VALUES (?,?,?,?)",
+                (rq_id, intent_id, request_id, now()),
+            )
+            conn.execute(
+                "UPDATE research_questions SET status='exploring', updated_at=? WHERE rq_id=? AND deleted_at IS NULL",
+                (now(), rq_id),
+            )
+
+    def research_question_intents(self, rq_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM research_question_intents WHERE rq_id=? ORDER BY created_at DESC", (rq_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- Ontology schema -------------------------------------------------
 

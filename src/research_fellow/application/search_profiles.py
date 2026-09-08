@@ -6,6 +6,7 @@ import re
 from typing import Any, Callable
 
 from research_fellow.infrastructure.arxiv import ArxivError, search as arxiv_search
+from research_fellow.infrastructure.semantic_scholar import enrich_citation_counts
 from research_fellow.storage import Ledger
 
 
@@ -14,6 +15,99 @@ def keyword_prompt(profile: dict[str, Any]) -> str:
 
     return render_prompt("m2_search_keywords.j2", profile=profile)
 
+
+
+
+def auto_search_strategy_prompt(profile: dict[str, Any]) -> str:
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+
+    return render_prompt("m1_auto_search_strategy.j2", profile=profile)
+
+
+def parse_auto_search_strategy(text: str) -> dict[str, Any]:
+    """Parse concept groups and arXiv-ready Boolean query variants for auto mode.
+
+    Falls back to the legacy phrase plan so auto execution is not blocked by a
+    local model that still returns the old keyword format.
+    """
+    section = "concepts"
+    groups: list[dict[str, Any]] = []
+    core_terms: list[str] = []
+    queries: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        marker = line.rstrip(":").upper()
+        if marker == "CONCEPT_GROUPS":
+            section = "concepts"
+            continue
+        if marker in {"CORE_TERMS", "CORE TERMS"}:
+            section = "terms"
+            continue
+        if marker in {"QUERY_VARIANTS", "QUERY VARIANTS"}:
+            section = "queries"
+            continue
+        value = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if section == "concepts" and "|" in value:
+            label, raw_terms = [part.strip() for part in value.split("|", 1)]
+            terms = [term.strip().strip('"') for term in raw_terms.split(";") if is_english_search_term(term.strip().strip('"'))]
+            if label and terms:
+                groups.append({"concept": label, "terms": terms[:6]})
+        elif section == "terms":
+            if is_english_search_term(value.strip('"')):
+                core_terms.append(value.strip('"'))
+        elif section == "queries":
+            if _valid_boolean_query(value):
+                queries.append(value)
+
+    core_terms = _clean_core_terms(core_terms)
+    queries = _dedupe_queries(queries)[:5]
+    phrases = []
+    for group in groups:
+        for term in group["terms"]:
+            if term.lower() not in {item.lower() for item in phrases}:
+                phrases.append(term)
+    if not queries:
+        legacy_phrases, legacy_terms = parse_keyword_plan(text)
+        phrases = phrases or legacy_phrases
+        core_terms = core_terms or legacy_terms
+        queries = _boolean_queries_from_phrases(phrases)
+    return {"concept_groups": groups, "phrases": phrases[:12], "core_terms": core_terms, "queries": queries[:5]}
+
+
+def _valid_boolean_query(value: str) -> bool:
+    if not value or any("가" <= character <= "힣" for character in value):
+        return False
+    upper = value.upper()
+    return 'ALL:"' in upper and (" AND " in upper or " OR " in upper)
+
+
+def _dedupe_queries(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", value.strip()).lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(re.sub(r"\s+", " ", value.strip()))
+    return result
+
+
+def _boolean_queries_from_phrases(phrases: list[str]) -> list[str]:
+    """Safe fallback: pair independent phrases with OR/AND without inventing terms."""
+    cleaned = [phrase for phrase in phrases if is_english_search_term(phrase)]
+    if not cleaned:
+        return []
+    expressions = [_phrase_expression(phrase) for phrase in cleaned[:6]]
+    if len(expressions) == 1:
+        return expressions
+    queries: list[str] = []
+    # Broad OR query protects recall. Pairwise AND variants add contextual precision.
+    queries.append("(" + " OR ".join(expressions[: min(3, len(expressions))]) + ")")
+    for index in range(min(3, len(expressions) - 1)):
+        queries.append(f"({expressions[index]}) AND ({expressions[index + 1]})")
+    return _dedupe_queries(queries)[:5]
 
 def abstract_relevance_prompt(profile: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
     from research_fellow.infrastructure.prompt_renderer import render_prompt
@@ -77,6 +171,9 @@ def query_ladder(profile: dict[str, Any]) -> list[tuple[str, str]]:
     executed separately.  The final two queries expose both a transparent
     all-term intersection and a compact, LLM-selected five-term intersection.
     """
+    boolean_queries = _dedupe_queries(list(profile.get("boolean_queries") or []))
+    if boolean_queries:
+        return [(f"자동 Boolean {index}", query) for index, query in enumerate(boolean_queries[:5], start=1)]
     keywords = profile["keywords"]
     if invalid := [keyword for keyword in keywords if not is_english_search_term(keyword)]:
         raise ValueError(f"영문 검색어가 아닌 키워드가 있습니다: {', '.join(invalid[:3])}")
@@ -187,9 +284,21 @@ def shortlist_candidates(
             batch, reviewer(abstract_relevance_prompt(profile, batch)) if reviewer else None,
         )})
     order = {"high": 0, "medium": 1, "low": 2, "unreviewed": 3}
+    def citation_signal(candidate: dict[str, Any]) -> float:
+        # Citation is a supporting importance signal, never a substitute for topical relevance.
+        import math
+        count = candidate.get("citation_count")
+        try:
+            return math.log10(1 + max(0, int(count)))
+        except (TypeError, ValueError):
+            return 0.0
+
     ranked = sorted(
         candidates,
-        key=lambda item: (order.get(reviewed_by_id[item["source_id"]]["relevance"]["level"], 3), -lexical_score(item)[0]),
+        key=lambda item: (
+            order.get(reviewed_by_id[item["source_id"]]["relevance"]["level"], 3),
+            -(lexical_score(item)[0] * 5 + citation_signal(item)),
+        ),
     )
     shortlist_ids = {item["source_id"] for item in ranked[:5]}
     enriched = []
@@ -229,6 +338,9 @@ def run_profile(ledger: Ledger, profile: dict[str, Any], trigger: str, reviewer:
                 candidates.append({**candidate, "query_scope": label, "query_scopes": [label]})
                 known_ids[candidate["source_id"]] = len(candidates) - 1
         candidates = candidates[:100]
+        # Citation count is a secondary ranking signal shown to the researcher.
+        # Search continues even when Semantic Scholar is unavailable.
+        candidates = enrich_citation_counts(candidates)
         query = " → ".join(attempted)
         candidates = shortlist_candidates(profile, candidates, reviewer)
         status = "completed" if candidates else "completed_no_candidates"

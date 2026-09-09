@@ -4,7 +4,7 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import streamlit as st
 
@@ -36,7 +36,9 @@ from research_fellow.application.search_profiles import (
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.auto_literature import execute_auto_literature_review
 from research_fellow.application.research_cycle import execute_auto_research_cycle
-from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, store_paper_upload, suggested_paper_labels
+from research_fellow.application.manual_recovery import external_recovery_prompt, validate_external_response
+from research_fellow.application.m2_threads import build_m2_thread_review_prompt, extract_knowledge_gaps, extract_refined_question, validate_manual_m2_report
+from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, ensure_shelf_pdf, store_paper_upload, suggested_paper_labels
 from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, reading_prompt, unconsumed_reading_sections
 from research_fellow.application.ontology import ontology_context_dot, ontology_dot, search_cards_for_ontology
 from research_fellow.application.duplicate_review import similar_approved_cards
@@ -336,10 +338,196 @@ def show_auto_literature_reports() -> None:
                         saved = ledger.upsert_shelf_paper({
                             "title": paper.get("title", ""), "authors": [],
                             "publication_year": str(paper.get("published", ""))[:4], "source_url": paper.get("url", ""),
-                            "source_id": paper.get("source_id", ""), "pdf_path": "",
+                            "source_id": paper.get("source_id", ""), "pdf_path": paper.get("pdf_path", ""),
                             "shelf_status": "reference", "reading_status": "unread", "asset_type": "paper", "intake_source": "auto_search",
                         })
                         st.success(f"서재함에 추가했습니다: {saved['title']}")
+
+
+
+def show_auto_retry_tasks(model: str, use_ollama: bool) -> None:
+    failures = ledger.auto_research_failures(status="needs_attention", limit=50)
+    if not failures:
+        st.success("현재 Retry가 필요한 자동 연구 작업이 없습니다.")
+        return
+    st.caption(f"중간 실패로 연구자 확인이 필요한 작업 {len(failures)}건입니다. 기존 성공 결과와 로그는 보존하면서 해당 자동 작업을 다시 실행할 수 있습니다.")
+    stage_labels = {
+        "rq_generation": "새 지식 → 연구질문 생성",
+        "rq_prioritization": "연구질문 중요도 평가",
+        "search_strategy": "영문 검색전략 생성",
+        "search_strategy_legacy": "영문 검색키워드 복구",
+        "abstract_screening": "초록 스크리닝",
+        "fulltext_review": "상위 논문 본문 검토",
+        "synthesis": "문헌탐색 종합 보고",
+    }
+
+    def rerun_failure(failure: dict[str, object], *, abstract_batch_size: int = 20):
+        context = dict(failure.get("context") or {})
+        if failure.get("intent_id"):
+            event = ledger.prepare_intent_for_retry(str(failure["intent_id"]))
+            if not event:
+                return None
+            return execute_auto_literature_review(
+                ledger, event, CACHE,
+                keyword_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                abstract_reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                fulltext_drafter=lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text,
+                synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                resume_run_id=str(failure.get("run_id") or context.get("resume_run_id") or ""),
+                abstract_batch_size=abstract_batch_size,
+            )
+        return execute_auto_research_cycle(
+            ledger, memory.all(), CACHE,
+            rq_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+            priority_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+            keyword_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+            abstract_reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+            fulltext_drafter=lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text,
+            synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+            resume_run_id=str(failure.get("run_id") or ""),
+        )
+    for failure in failures:
+        context = failure.get("context") or {}
+        stage = failure.get("stage", "")
+        title = stage_labels.get(stage, stage or "자동 연구 작업")
+        with st.expander(f"주의 필요 · {title} · {failure.get('created_at', '')[:16].replace('T', ' ')}"):
+            left, right = st.columns(2)
+            left.write(f"**실패 원인:** `{failure.get('error_type', 'unknown')}`")
+            right.write(f"**자동 Retry:** {failure.get('attempt_count', 0)} / 3")
+            st.write(failure.get("error_message") or "오류 메시지가 없습니다.")
+            st.info(f"권장 Retry 방법: {failure.get('recommended_action') or '실패 단계부터 다시 시도하세요.'}")
+            if context.get("retry_hint"):
+                st.caption(f"추가 제안: {context['retry_hint']}")
+            if failure.get("intent_id"):
+                st.caption(f"M1 Intent: {failure['intent_id']} · 앞 단계 결과는 유지하고 실패 단계부터 재개합니다.")
+                linked_rqs = ledger.research_questions_for_intent(str(failure["intent_id"]))
+                if linked_rqs:
+                    st.caption("연결 RQ: " + " · ".join(str(item.get("question", ""))[:60] for item in linked_rqs))
+                    st.info("M2 연구상태 검토와 RQ 생성은 이미 완료된 상태입니다. 따라서 새 지식카드가 입력함에서 사라진 것은 정상이며, 이 Retry는 M1 후속 문헌탐색만 재개합니다.")
+            elif context.get("kind") == "auto_cycle":
+                st.caption("M2 자동 연구 사이클의 RQ 생성/중요도 평가 단계에서 실패했습니다. 이 경우 새 지식카드는 미처리 상태로 남아 다시 시작할 수 있습니다.")
+
+            if stage == "abstract_screening":
+                st.caption(f"보존된 checkpoint: 초록 {context.get('batch_no', '?')}번째 batch 직전까지. 기존 검색전략·검색 후보·완료 batch는 다시 만들지 않습니다.")
+
+            with st.expander("외부 LLM으로 수동 복구", expanded=False):
+                st.caption("로컬/무료 LLM이 반복 실패한 경우 아래 프롬프트를 ChatGPT·Claude 등 외부 LLM에 붙여 넣고, 응답을 다시 가져와 이 단계만 복구할 수 있습니다.")
+                recovery_text = external_recovery_prompt(failure)
+                st.text_area(
+                    "외부 LLM용 복구 프롬프트",
+                    value=recovery_text,
+                    height=360,
+                    key=f"manual-recovery-prompt-{failure['failure_id']}",
+                    help="영역 높이는 고정되어 있으며 긴 프롬프트는 내부 스크롤로 확인할 수 있습니다.",
+                )
+                external_response = st.text_area(
+                    "외부 LLM 응답 붙여넣기",
+                    value="",
+                    height=280,
+                    key=f"manual-recovery-response-{failure['failure_id']}",
+                    placeholder="외부 LLM의 전체 응답을 여기에 붙여 넣으세요.",
+                )
+                st.caption("응답은 현재 stage의 기대 형식으로 검증한 뒤에만 checkpoint에 반영됩니다.")
+                if st.button("외부 응답 검증 · 이 단계부터 재개", key=f"apply-manual-recovery-{failure['failure_id']}", type="primary"):
+                    ok, validation_message = validate_external_response(stage, external_response, context)
+                    ledger.record_manual_recovery_attempt(
+                        failure["failure_id"],
+                        run_id=str(failure.get("run_id") or ""),
+                        stage=stage,
+                        item_key=str(failure.get("item_key") or ""),
+                        response_text=external_response,
+                        validation_status="valid" if ok else "invalid",
+                        validation_message=validation_message,
+                        applied=ok,
+                    )
+                    if not ok:
+                        st.error(f"외부 응답 검증 실패: {validation_message}")
+                    else:
+                        ledger.set_manual_recovery_override(
+                            str(failure.get("run_id") or ""), stage=stage,
+                            item_key=str(failure.get("item_key") or ""), response=external_response,
+                        )
+                        st.success("외부 응답이 검증되었습니다. 이 응답을 실패 stage의 LLM 결과로 사용해 재개합니다.")
+                        # 기존 failure는 재개 전에 닫아 두어, 같은 run의 완료 판정에서
+                        # 이미 수동 복구한 실패가 다시 unresolved로 집계되지 않게 합니다.
+                        ledger.resolve_auto_research_failure(failure["failure_id"], status="manual_resolved")
+                        with st.spinner("수동 복구 결과를 반영하고 다음 단계부터 계속 수행합니다."):
+                            result = rerun_failure(failure)
+                        if result and result.get("status") == "completed":
+                            st.success("수동 복구 후 자동 연구 작업이 완료되었습니다.")
+                        elif result and result.get("status") in {"needs_attention", "failed"}:
+                            st.warning("해당 실패 stage는 수동으로 복구했지만 이후 단계에서 추가 확인이 필요합니다. 새 처리 필요 작업을 확인하세요.")
+                        else:
+                            st.info("수동 복구 결과를 반영했습니다. 현재 작업 상태를 다시 확인하세요.")
+                        st.rerun()
+
+            if st.button("실패 단계부터 재시도", key=f"retry-auto-{failure['failure_id']}", type="primary"):
+                with st.spinner("보존된 checkpoint를 사용해 실패 단계부터 다시 수행하고 있습니다."):
+                    result = None
+                    if failure.get("intent_id"):
+                        event = ledger.prepare_intent_for_retry(str(failure["intent_id"]))
+                        if event:
+                            result = execute_auto_literature_review(
+                                ledger, event, CACHE,
+                                keyword_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                                abstract_reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                                fulltext_drafter=lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text,
+                                synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                                resume_run_id=str(failure.get("run_id") or context.get("resume_run_id") or ""),
+                            )
+                    else:
+                        result = execute_auto_research_cycle(
+                            ledger, memory.all(), CACHE,
+                            rq_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                            priority_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                            keyword_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                            abstract_reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                            fulltext_drafter=lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text,
+                            synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                            resume_run_id=str(failure.get("run_id") or ""),
+                        )
+                if result and result.get("status") in {"completed", "no_new_information"}:
+                    ledger.resolve_auto_research_failure(failure["failure_id"])
+                    st.success("Retry가 완료되었습니다. 기존 앞 단계 결과를 유지한 채 최신 결과를 반영합니다.")
+                    st.rerun()
+                else:
+                    st.warning("Retry 후에도 처리가 완료되지 않았습니다. 새 실패 기록과 권장 조치를 확인하세요.")
+
+            if stage == "abstract_screening" and st.button("추천 설정으로 Retry · batch 10편", key=f"retry-small-batch-{failure['failure_id']}"):
+                event = ledger.prepare_intent_for_retry(str(failure.get("intent_id", ""))) if failure.get("intent_id") else None
+                if event:
+                    with st.spinner("완료된 batch를 유지하고 실패 지점부터 10편 단위로 재시도합니다."):
+                        result = execute_auto_literature_review(
+                            ledger, event, CACHE,
+                            keyword_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                            abstract_reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                            fulltext_drafter=lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text,
+                            synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+                            resume_run_id=str(failure.get("run_id") or context.get("resume_run_id") or ""),
+                            abstract_batch_size=10,
+                        )
+                    if result.get("status") == "completed":
+                        ledger.resolve_auto_research_failure(failure["failure_id"])
+                        st.success("추천 설정 Retry가 완료되었습니다.")
+                        st.rerun()
+                    else:
+                        st.warning("10편 단위 Retry 후에도 완료되지 않았습니다. 새 실패 기록을 확인하세요.")
+
+            if failure.get("intent_id"):
+                linked_rqs = ledger.research_questions_for_intent(str(failure["intent_id"]))
+                review_ids = []
+                for rq in linked_rqs:
+                    review_ids.extend(str(item.get("review_id", "")) for item in ledger.research_question_sources(str(rq.get("rq_id", ""))) if item.get("review_id"))
+                review_ids = list(dict.fromkeys(review_ids))
+                if review_ids:
+                    rollback_review_id = review_ids[0]
+                    with st.expander("전체 M2 검토를 되돌려 새 지식부터 다시 시작하려면"):
+                        st.warning("이 기능은 기본 복구가 아닙니다. RQ와 Intent 기록은 감사 이력으로 남기고, 해당 검토 배치의 지식카드만 다시 '미처리 새 정보'로 돌립니다.")
+                        if st.button("M2 검토 배치 되돌리기", key=f"rollback-review-{failure['failure_id']}-{rollback_review_id}"):
+                            ledger.rollback_research_state_review(rollback_review_id)
+                            st.success(f"{rollback_review_id}를 되돌렸습니다. 연결된 카드가 M1 새 정보 입력함에 다시 나타납니다.")
+                            st.rerun()
+
 
 def show_m2_report_history(reports: list[dict[str, object]]) -> None:
     """Read-only, researcher-facing projection of persisted M2 advice reports."""
@@ -604,6 +792,9 @@ def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> 
             for item in selected:
                 decide_request(ledger, memory, item["phenomenon_id"], "rejected", note, relations)
             st.rerun()
+
+    st.subheader("처리 필요 작업 · Retry")
+    show_auto_retry_tasks(model, use_ollama)
 
     st.subheader("M1 자동 문헌탐색 보고")
     show_auto_literature_reports()
@@ -940,11 +1131,22 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
             with actions:
                 if paper.get("source_url"):
                     st.link_button("원문 페이지 열기", paper["source_url"], key=f"shelf-url-{paper['paper_id']}")
-                path = Path(paper["pdf_path"]) if paper.get("pdf_path") else None
-                if path and path.exists():
+                path = Path(paper["pdf_path"]) if paper.get("pdf_path") and Path(paper["pdf_path"]).exists() else None
+                if path:
                     st.download_button("보관 원문 내려받기", data=path.read_bytes(), file_name=path.name, key=f"shelf-download-{paper['paper_id']}")
                 else:
-                    st.caption("보관 원문 없음")
+                    st.caption("로컬 원문 없음 · arXiv 논문이면 읽기 실행 시 자동으로 다시 가져옵니다.")
+                    if paper.get("source_url") and "arxiv.org" in paper.get("source_url", ""):
+                        if st.button("원문 지금 가져오기", key=f"fetch-shelf-pdf-{paper['paper_id']}"):
+                            try:
+                                recovered = ensure_shelf_pdf(paper, DATA / "papers")
+                                if not recovered:
+                                    raise ValueError("이 논문의 원문 다운로드 주소를 만들 수 없습니다.")
+                                ledger.update_shelf_pdf_path(paper["paper_id"], recovered)
+                                st.success("원문을 로컬에 가져왔습니다.")
+                                st.rerun()
+                            except Exception as error:
+                                st.error(f"원문 가져오기에 실패했습니다: {error}")
                 with st.expander("서재함에서 삭제"):
                     st.caption("읽기 요약·질문·일반화 메모·이력·카드 연결이 함께 삭제됩니다. 이미 승인된 지식카드는 유지됩니다.")
                     with st.form(f"paper-shelf-delete-{paper['paper_id']}"):
@@ -966,9 +1168,14 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
             st.caption("논문 요약, 현재 연구 맥락 해석, 추천 서재 레이블, 원문 근거 기반 읽기 질문을 한 번에 만듭니다.")
             has_reading_record = bool(analysis.get("reading_raw_output") or ledger.paper_reading_questions(paper["paper_id"]))
             reading_action_label = "M1 논문 다시 읽기" if has_reading_record else "M1 논문 읽기 시작"
-            if st.button(reading_action_label, type="primary", key=f"paper-reading-{paper['paper_id']}", disabled=not (path and path.exists())):
+            if st.button(reading_action_label, type="primary", key=f"paper-reading-{paper['paper_id']}"):
                 try:
-                    document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
+                    resolved_path = str(path) if path and path.exists() else ensure_shelf_pdf(paper, DATA / "papers")
+                    if not resolved_path:
+                        raise ValueError("로컬 원문이 없고 자동으로 원문을 가져올 수 없습니다. PDF를 직접 등록하거나 원문 URL을 확인하세요.")
+                    if resolved_path != paper.get("pdf_path"):
+                        ledger.update_shelf_pdf_path(paper["paper_id"], resolved_path)
+                    document = extract_document(document_from_shelf_path(resolved_path), cache_dir=EXTRACTION_CACHE)
                     streamed_parts: list[str] = []
                     live_output = st.empty()
 
@@ -1004,9 +1211,17 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
             with st.expander("외부 채팅으로 수동 처리", expanded=False):
                 st.caption("API 한도·장애 시에 사용합니다. 생성한 프롬프트와 논문 발췌문을 Gemini 웹 또는 ChatGPT에 직접 전달한 뒤, 응답 전체를 붙여 넣으세요. 비공개 원문은 전송 전에 연구자가 판단해야 합니다.")
                 prompt_key = f"manual-reading-prompt-{paper['paper_id']}"
-                if st.button("외부 채팅용 M1 프롬프트 만들기", key=f"make-{prompt_key}", disabled=not (path and path.exists())):
-                    document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
-                    st.session_state[prompt_key] = reading_prompt(document, paper, question)
+                if st.button("외부 채팅용 M1 프롬프트 만들기", key=f"make-{prompt_key}"):
+                    try:
+                        resolved_path = str(path) if path and path.exists() else ensure_shelf_pdf(paper, DATA / "papers")
+                        if not resolved_path:
+                            raise ValueError("로컬 원문이 없고 자동으로 원문을 가져올 수 없습니다. PDF를 직접 등록하거나 원문 URL을 확인하세요.")
+                        if resolved_path != paper.get("pdf_path"):
+                            ledger.update_shelf_pdf_path(paper["paper_id"], resolved_path)
+                        document = extract_document(document_from_shelf_path(resolved_path), cache_dir=EXTRACTION_CACHE)
+                        st.session_state[prompt_key] = reading_prompt(document, paper, question)
+                    except Exception as error:
+                        st.error(f"M1 프롬프트 준비에 실패했습니다: {error}")
                 manual_prompt = st.session_state.get(prompt_key, "")
                 if manual_prompt:
                     st.code(manual_prompt, language="markdown")
@@ -1964,6 +2179,23 @@ def render_research_question_backlog() -> None:
     backlog = ledger.research_question_backlog(limit=100)
     st.subheader("Research Question Backlog")
     st.caption("질문을 한 번에 확정하지 않고 관심·탐색중·보류 상태로 관리합니다. 각 질문은 왜 도출되었는지와 M1 근거를 함께 보존합니다.")
+    reviews = ledger.research_state_reviews(limit=1)
+    if reviews:
+        latest_review = reviews[0]
+        review_changes = ledger.research_question_changes(review_id=str(latest_review.get("review_id", "")), limit=100)
+        created = sum(1 for item in review_changes if item.get("change_type") == "created")
+        strengthened = sum(1 for item in review_changes if item.get("change_type") == "evidence_added")
+        failed = sum(1 for item in ledger.research_question_changes(limit=100) if item.get("change_type") == "exploration_failed" and item.get("created_at", "") >= str(latest_review.get("created_at", "")))
+        mode_label = "자동" if latest_review.get("mode") == "auto" else "수동"
+        summary_text = str(latest_review.get("summary") or "").strip()
+        if not summary_text:
+            summary_text = f"최근 {mode_label} 연구상태 검토에서 새 지식카드 {latest_review.get('source_card_count', 0)}건을 처리했습니다."
+        extra = []
+        if created or strengthened:
+            extra.append(f"연구질문은 신규 {created}건, 기존 질문 보강 {strengthened}건의 변화가 있었습니다.")
+        if failed:
+            extra.append(f"후속 문헌탐색 {failed}건은 중간 실패로 재시도가 필요합니다.")
+        st.info("**최근 변화**  \n" + summary_text + (" " + " ".join(extra) if extra else ""))
     if not backlog:
         st.info("아직 저장된 연구질문 후보가 없습니다. 위에서 M1 새 정보로 후보를 도출하거나 직접 질문을 시작하세요.")
         return
@@ -2016,6 +2248,9 @@ def render_research_question_backlog() -> None:
                     for card_id in source_ids:
                         card = cards_by_id.get(card_id)
                         st.write(f"- `{card_id}` · {card.get('claim', card.get('title', '')) if card else ''}")
+            latest_change = ledger.latest_research_question_change(rq_id)
+            if latest_change:
+                st.caption(f"최근 변화 · {str(latest_change.get('created_at', ''))[:16].replace('T', ' ')} · {latest_change.get('summary', '')}")
             if linked_intents:
                 st.caption(f"연결된 M1 탐색 Intent {len(linked_intents)}건")
 
@@ -2041,272 +2276,498 @@ def render_research_question_backlog() -> None:
     if st.session_state.pop("p4-last-rq-intent-request", None):
         st.success("선택한 연구질문에서 M1 탐색 Intent 승인 안건을 만들었습니다. 연구자 홈 승인함에서 승인하면 M1 실행함으로 전달됩니다.")
 
-def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
-    st.header("M2 · 지식 기반 자문 작업실")
-    st.caption("M2는 M1이 축적한 승인 지식을 근거로 연구자 질문과 외부 자문에 대응합니다. 지식 공백은 내부 보고와 M1 탐색 Intent 제안으로 전환합니다.")
-    question_tab, state_tab, external_tab, updates_tab = st.tabs(["연구자 질문 대응", "연구 상태·방향 검토", "외부 자문 대응", "M1 새 정보 입력함"])
-    with question_tab:
-        research_advisory_screen(model, use_ollama, semantic, embedding_model)
-    latest_state = latest_research_state(ledger)
-    with state_tab:
-        st.caption("M1 새 정보에서 근거가 붙은 연구질문 후보를 만들고 Backlog로 관리합니다. 관심 질문은 여러 개 유지할 수 있으며, 질문별로 M1 탐색 Intent를 제안할 수 있습니다.")
 
-        st.subheader("연구 방향 후보 도출")
-        updates = recent_knowledge_updates(ledger)
-        all_cards = memory.all()
-        valid_card_ids = {str((update.get("payload") or {}).get("card_id", "")) for update in updates if str((update.get("payload") or {}).get("card_id", ""))}
-        suggestion_prompt = research_question_suggestions_prompt(
-            updates, recent_research_questions(ledger), all_cards, max_suggestions=8,
-        ) if updates else ""
+M2_SOURCE_LABELS = {
+    "m1_knowledge": "M1 새 지식",
+    "researcher": "연구자 질문",
+    "external_advisory": "외부 자문",
+}
 
-        manual_col, auto_col = st.columns(2)
-        with manual_col:
-            st.markdown("**수동 모드**")
-            st.caption(f"미처리 새 지식카드 {len(updates)}건에서 RQ 후보를 도출하고, 연구자가 Backlog에서 관심·보류·탐색 여부를 결정합니다.")
-            if st.button("미처리 새 지식카드로 연구질문 후보 도출", disabled=not updates, key="p4-question-suggest"):
-                suggested = llm_draft(suggestion_prompt, model, use_ollama)
-                parsed = parse_research_question_suggestions(suggested or "", valid_card_ids={str((u.get("payload") or {}).get("card_id", "")) for u in updates}, limit=8)
-                if parsed:
-                    review_id = ledger.create_research_state_review("manual", updates)
-                    saved = store_research_question_candidates(ledger, parsed, updates, review_id=review_id)
-                    ledger.complete_research_state_review(
-                        review_id, generated_rq_count=len(saved), selected_rq_count=0,
-                        summary=f"새 지식카드 {len(updates)}건에서 연구질문 후보 {len(saved)}건을 도출했습니다.",
-                    )
-                    st.session_state["p4-last-rq-generated"] = {"count": len(saved), "cards": len(updates), "review_id": review_id}
-                    st.rerun()
-                else:
-                    st.warning("질문 후보를 구조화해서 읽지 못했습니다. 새 지식카드는 아직 미처리 상태로 남아 있으므로 다시 시도할 수 있습니다.")
 
-        with auto_col:
-            st.markdown("**자동 모드**")
-            st.caption(f"미처리 새 지식카드 {len(updates)}건을 M2가 검토해 RQ를 생성·보강하고, 이번 검토에서 중요한 질문 최대 3개를 골라 M1 문헌탐색과 보고까지 자동 수행합니다.")
-            if st.button(
-                "새 지식 자동 연구 사이클 실행",
-                key="p4-auto-research-cycle",
-                type="primary",
-                disabled=not updates,
-                help="미처리 새 지식카드가 있을 때만 시작합니다. RQ 생성·보강, Top 3 선정, Intent 중복 제거, M1 자동 문헌탐색까지 수행합니다.",
-            ):
-                with st.spinner("새 지식 검토 → 연구질문 도출 → 중요도 평가 → M1 자동 문헌탐색을 수행하고 있습니다."):
-                    result = execute_auto_research_cycle(
-                        ledger, all_cards, CACHE,
-                        rq_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
-                        priority_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
-                        keyword_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
-                        abstract_reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
-                        fulltext_drafter=lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text,
-                        synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
-                    )
-                st.session_state["p4-auto-cycle-result"] = result
+def _record_thread_report_to_desk(rq: dict[str, Any], report: dict[str, Any]) -> None:
+    case_id = ledger.create_case("research", f"M2 Thread: {str(rq.get('question', ''))[:80]}")
+    ledger.record(
+        case_id, "advice_report", "m2", ["researcher"], "research_question_thread_report",
+        {
+            "title": f"M2 · {M2_SOURCE_LABELS.get(str(rq.get('source_type', 'm1_knowledge')), '연구질문')} 보고",
+            "rq_id": rq.get("rq_id"), "question": rq.get("question", ""),
+            "report_id": report.get("report_id"), "report": report.get("report_text", ""),
+            "evidence_card_ids": report.get("evidence_card_ids", []),
+            "knowledge_gaps": report.get("knowledge_gaps", ""),
+            "generation_mode": report.get("generation_mode", ""),
+        },
+        status="completed",
+    )
+
+
+def _save_m2_thread_report(rq: dict[str, Any], context: str, evidence_ids: list[str], report_text: str, generation_mode: str) -> dict[str, Any]:
+    gaps = extract_knowledge_gaps(report_text)
+    report = ledger.save_m2_report(
+        rq_id=str(rq["rq_id"]), report_text=report_text, context_text=context,
+        evidence_card_ids=evidence_ids, generation_mode=generation_mode,
+        report_type="external_advisory" if rq.get("source_type") == "external_advisory" else "research_review",
+        knowledge_gaps=gaps,
+    )
+    _record_thread_report_to_desk(rq, report)
+    return report
+
+
+def _render_researcher_question_intake() -> None:
+    st.subheader("새 연구자 질문")
+    st.caption("연구자가 직접 제기한 질문은 후보 단계를 거치지 않고 바로 Research Question Thread로 시작합니다.")
+    question = st.text_area(
+        "연구자 질문",
+        key="m2-thread-new-researcher-question",
+        placeholder="예: Architect Agent의 working memory에 NFR dependency를 명시적으로 표현해야 하는가?",
+        height=110,
+    )
+    comment = st.text_area(
+        "연구자 코멘트 / 현재 맥락 (선택)",
+        key="m2-thread-new-researcher-context",
+        height=100,
+    )
+    if st.button(
+        "Research Question Thread 시작",
+        key="m2-thread-create-researcher",
+        type="primary",
+        disabled=not question.strip(),
+    ):
+        rq = ledger.create_research_question_thread(
+            question=question,
+            source_type="researcher",
+            rationale="연구자가 직접 제기한 연구질문입니다.",
+            research_context=comment,
+            source_payload={"researcher_comment": comment},
+            status="interested",
+        )
+        st.session_state["m2-selected-researcher-thread-id"] = str(rq["rq_id"])
+        st.rerun()
+
+
+def _render_external_question_intake(model: str, use_ollama: bool) -> None:
+    st.subheader("새 외부 자문 요청")
+    st.caption("외부 요청 원문을 보존하고, M2 전문성에 비추어 내부적으로 관리할 질문으로 해석한 뒤 Thread를 시작합니다.")
+    requester = st.text_input("요청자", key="m2-thread-external-requester")
+    request = st.text_area("외부 자문 요청 원문", key="m2-thread-external-request", height=140)
+    context = st.text_area("요청 맥락·제약 (선택)", key="m2-thread-external-context", height=100)
+    if st.button("M2 관점의 질문 해석안 만들기", key="m2-thread-interpret-external", disabled=not request.strip()):
+        prompt = render_prompt(
+            "m2_external_interpretation.j2", requester=requester or "external requester",
+            expertise="에이전트 공학과 도메인 전문 연구위원 설계", question=request, context=context,
+        )
+        interpreted = llm_draft(prompt, model, use_ollama) or request
+        st.session_state["m2-thread-external-interpretation"] = interpreted
+    interpretation = st.session_state.get("m2-thread-external-interpretation", "")
+    if interpretation:
+        st.markdown("**M2 요청 해석**")
+        st.markdown(interpretation)
+    interpreted_question = st.text_area(
+        "Thread에서 관리할 질문", value=st.session_state.get("m2-thread-external-question", request),
+        key="m2-thread-external-question", height=100,
+        placeholder="외부 요청을 M2 전문성에 비추어 내부적으로 관리할 질문으로 정리하세요.",
+    )
+    if st.button("외부 자문 Thread 시작", key="m2-thread-create-external", type="primary", disabled=not interpreted_question.strip()):
+        rq = ledger.create_research_question_thread(
+            question=interpreted_question, source_type="external_advisory",
+            rationale="외부 자문 요청을 M2 전문성에 비추어 해석한 질문입니다.", research_context=context,
+            source_payload={
+                "requester": requester,
+                "original_request": request,
+                "request_context": context,
+                "interpretation": interpretation,
+            },
+            status="interested",
+        )
+        st.session_state["m2-selected-external-thread-id"] = str(rq["rq_id"])
+        st.rerun()
+
+
+def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    rq = ledger.research_question_thread(rq_id)
+    if not rq:
+        st.warning("선택한 Research Question Thread를 찾을 수 없습니다.")
+        return
+    source_label = M2_SOURCE_LABELS.get(str(rq.get("source_type", "m1_knowledge")), str(rq.get("source_type", "")))
+    st.subheader(str(rq.get("question", "")))
+    st.caption(f"{source_label} · {RQ_STATUS_LABELS.get(str(rq.get('status')), str(rq.get('status', '')))} · {rq_id}")
+    payload = rq.get("source_payload") or {}
+    if rq.get("source_type") == "external_advisory":
+        with st.expander("외부 요청 원문과 해석", expanded=False):
+            st.write(f"**요청자:** {payload.get('requester', '')}")
+            st.write(f"**원 요청:** {payload.get('original_request', '')}")
+            if payload.get("interpretation"):
+                st.markdown(str(payload["interpretation"]))
+    if rq.get("rationale"):
+        st.markdown(f"**도출 이유**  \n{rq['rationale']}")
+    latest_change = ledger.latest_research_question_change(rq_id)
+    if latest_change:
+        st.info(f"최근 변화 · {str(latest_change.get('created_at', ''))[:16].replace('T', ' ')} · {latest_change.get('summary', '')}")
+
+    status_cols = st.columns(4)
+    for col, status, label in zip(status_cols, ["interested", "exploring", "hold", "rejected"], ["관심", "탐색중", "보류", "제외"]):
+        if col.button(label, key=f"thread-status-{rq_id}-{status}", disabled=rq.get("status") == status):
+            ledger.update_research_question_status(rq_id, status); st.rerun()
+
+    source_ids = list(rq.get("source_card_ids", []))
+    cards_by_id = {str(card.get("card_id", "")): card for card in memory.all()}
+    if source_ids:
+        with st.expander(f"질문의 출발 근거 카드 {len(source_ids)}건", expanded=False):
+            for card_id in source_ids:
+                card = cards_by_id.get(card_id)
+                if card:
+                    st.write(f"- `{card_id}` · {card.get('claim', card.get('title', ''))}")
+
+    st.divider()
+    st.markdown("### M2 Knowledge Review")
+    st.caption("질문과 선택적 연구자 코멘트를 기준으로 관련 승인 지식카드를 고르고 M2 Report를 만듭니다. 제약·미결사항·지식공백은 보고서가 산출합니다.")
+    default_context = str(rq.get("research_context", ""))
+    context = st.text_area("이번 검토 코멘트 / 적용 맥락 (선택)", value=default_context, key=f"thread-context-{rq_id}", height=110)
+    query = st.text_input("근거 지식카드 검색", value=str(rq.get("question", "")), key=f"thread-search-{rq_id}")
+    if st.button("관련 지식카드 찾기", key=f"thread-search-run-{rq_id}", disabled=not query.strip()):
+        hits = search_knowledge(query, semantic, embedding_model, limit=12)
+        st.session_state[f"thread-hits-{rq_id}"] = [item.card["card_id"] for item in hits]
+    hit_ids = st.session_state.get(f"thread-hits-{rq_id}", [])
+    candidate_ids = list(dict.fromkeys([*source_ids, *hit_ids]))
+    candidate_ids = [cid for cid in candidate_ids if cid in cards_by_id]
+    options = {
+        cid: f"{cards_by_id[cid].get('title', '')} · {cards_by_id[cid].get('claim', '')[:100]}"
+        for cid in candidate_ids
+    }
+    selected_ids = st.multiselect(
+        "이번 M2 Report에 사용할 지식카드", candidate_ids,
+        default=source_ids[:8] if source_ids else candidate_ids[:6],
+        format_func=lambda cid: options.get(cid, cid), key=f"thread-evidence-{rq_id}",
+    )
+    for cid in selected_ids[:8]:
+        card = cards_by_id[cid]
+        st.caption(f"`{cid}` · {card.get('claim', '')[:220]}")
+
+    selected_cards = [cards_by_id[cid] for cid in selected_ids if cid in cards_by_id]
+    prompt = build_m2_thread_review_prompt(
+        question=str(rq.get("question", "")), context=context, cards=selected_cards,
+        source_type=str(rq.get("source_type", "m1_knowledge")), source_payload=payload,
+    )
+    run_col, external_col = st.columns(2)
+    with run_col:
+        if st.button("현재 LLM으로 M2 Report 만들기", key=f"thread-report-internal-{rq_id}", type="primary"):
+            result = llm_draft_result(prompt, model, use_ollama)
+            if result.text:
+                report = _save_m2_thread_report(rq, context, selected_ids, result.text, "internal_llm")
+                st.session_state[f"thread-latest-report-{rq_id}"] = report["report_id"]
+                st.success("M2 Report를 저장했습니다.")
+                st.rerun()
+            else:
+                st.warning(f"M2 Report 생성에 실패했습니다: {result.error}")
+    with external_col:
+        st.caption("로컬/무료 LLM이 불안정하거나 여러 지식카드로 긴 프롬프트가 필요한 경우 외부 LLM을 사용할 수 있습니다.")
+
+    with st.expander("외부 LLM으로 수동 M2 Review", expanded=False):
+        prompt_key = f"thread-external-prompt-{rq_id}-{abs(hash(tuple(selected_ids))) % 100000}"
+        st.text_area(
+            "외부 LLM용 프롬프트", value=prompt, key=prompt_key, height=360,
+            help="고정 높이 영역입니다. 긴 프롬프트는 내부 스크롤로 확인하고 전체 선택하여 복사할 수 있습니다.",
+        )
+        manual_response = st.text_area(
+            "외부 LLM 응답 붙여넣기", key=f"thread-external-response-{rq_id}", height=280,
+            placeholder="외부 LLM이 작성한 M2 Report 전체를 붙여넣으세요."
+        )
+        if st.button("외부 응답 검증 · M2 Report로 반영", key=f"thread-external-apply-{rq_id}", disabled=not manual_response.strip()):
+            ok, message = validate_manual_m2_report(manual_response, valid_card_ids=set(selected_ids))
+            if not ok:
+                st.error(message)
+            else:
+                report = _save_m2_thread_report(rq, context, selected_ids, manual_response, "manual_external_llm")
+                st.success(message + " M2 Report로 저장했습니다.")
+                st.session_state[f"thread-latest-report-{rq_id}"] = report["report_id"]
                 st.rerun()
 
-        generated_notice = st.session_state.pop("p4-last-rq-generated", None)
-        if generated_notice:
-            st.success(
-                f"새 지식카드 {generated_notice['cards']}건을 검토하여 연구질문 후보 {generated_notice['count']}건을 Backlog에 저장했습니다. "
-                f"검토 배치: {generated_notice['review_id']}"
-            )
+    reports = ledger.m2_reports(rq_id, include_archived=True, limit=20)
+    if reports:
+        latest = reports[0]
+        st.divider(); st.markdown("### 최신 M2 Report")
+        st.caption(f"{latest['created_at'][:16].replace('T',' ')} · {latest['generation_mode']} · 근거 카드 {len(latest['evidence_card_ids'])}건")
+        st.markdown(latest["report_text"])
+        if latest.get("knowledge_gaps"):
+            st.warning("**지식 보강 필요**  \n" + latest["knowledge_gaps"])
+            if st.button("이 공백으로 M1 문헌 보강 Intent 만들기", key=f"thread-gap-intent-{rq_id}"):
+                refreshed = ledger.research_question(rq_id) or rq
+                _, request_id = create_exploration_intent_for_rq(ledger, refreshed)
+                st.success(f"M1 탐색 Intent 승인 안건을 만들었습니다: {request_id}")
+        refined = extract_refined_question(latest["report_text"])
+        default_refine = refined or str(rq.get("question", ""))
+        with st.expander("질문 보강·구체화", expanded=bool(refined)):
+            new_question = st.text_area("구체화된 질문", value=default_refine, key=f"thread-refine-{rq_id}", height=90)
+            reason = st.text_input("변경 이유", value="M2 Report와 보강된 지식을 반영한 질문 구체화", key=f"thread-refine-reason-{rq_id}")
+            if st.button("질문 새 버전으로 반영", key=f"thread-refine-apply-{rq_id}", disabled=not new_question.strip() or new_question.strip() == str(rq.get("question", "")).strip()):
+                ledger.refine_research_question(rq_id, new_question, reason)
+                st.rerun()
 
-        auto_result = st.session_state.pop("p4-auto-cycle-result", None)
-        if auto_result:
-            if auto_result.get("status") == "rq_generation_failed":
-                st.warning("새 지식에서 연구질문 후보를 구조화하지 못했습니다. 해당 카드는 미처리 상태로 유지됩니다.")
-            elif auto_result.get("status") == "no_new_information":
-                st.info("자동 처리할 미처리 새 지식카드가 없습니다.")
-            else:
-                completed = sum(1 for row in auto_result.get("executions", []) if row.get("status") == "completed")
-                reused = sum(1 for row in auto_result.get("executions", []) if row.get("status") == "reused")
-                st.success(
-                    f"자동 연구 사이클 완료 · 새 지식 {auto_result.get('source_card_count', 0)}건 → "
-                    f"RQ 신규 {auto_result.get('new_rq_count', 0)}건 / 보강 {auto_result.get('strengthened_rq_count', 0)}건 → "
-                    f"M1 자동 탐색 완료 {completed}건 / 기존 Intent 재사용 {reused}건"
-                )
-                for index, item in enumerate(auto_result.get("dispatched", []), 1):
-                    st.markdown(f"**{index}. [{item['score']}/5] {item['question']}**")
-                    if item.get("selection_reason"):
-                        st.caption(f"선정 이유: {item['selection_reason']}")
-                    st.caption(f"M1 Intent: {item['intent'].intent_id} · {'기존 Intent 재사용' if item.get('reused') else '자동 문헌탐색 실행'}")
-                st.info("각 문헌탐색의 초록 100편 검토·Citation·Top 5 본문 비교 결과는 연구위원 데스크의 M1 자동 문헌탐색 보고에서 확인합니다.")
+    versions = rq.get("versions", [])
+    linked_intents = ledger.research_question_intents(rq_id)
+    with st.expander(f"Thread 이력 · 질문 버전 {len(versions)} · M2 Report {len(reports)} · M1 Intent {len(linked_intents)}", expanded=False):
+        for version in versions:
+            st.write(f"- v{version['version_no']} · {version['question']}")
+            if version.get("change_reason"):
+                st.caption(version["change_reason"])
+        for report in reports:
+            archive = "보관" if report.get("archived_at") else "활성"
+            st.write(f"- Report `{report['report_id']}` · {archive} · {report['created_at'][:16].replace('T',' ')}")
+        for intent in linked_intents:
+            st.write(f"- M1 Intent `{intent['intent_id']}`")
 
-        if updates:
-            with st.expander("외부 채팅으로 연구질문 후보 만들기"):
-                st.caption("아래 프롬프트에는 기존 연구질문과 승인 지식카드의 내용이 포함됩니다. 공개해도 되는 정보인지 확인한 뒤 Gemini 또는 ChatGPT에 붙여넣으세요.")
-                st.code(suggestion_prompt, language="text")
-                manual_suggestions = st.text_area(
-                    "외부 채팅의 응답 전체 붙여넣기",
-                    key="p4-question-suggestions-manual-output",
-                    height=260,
-                    placeholder="## RQ 1\nQuestion: ...?\nWhy Now: ...\nGap/Tension: ...\nResearch Context: ...\nSource Card IDs: kc-...\nExploration Need: ...",
-                )
-                if st.button(
-                    "붙여넣은 후보를 Backlog에 저장",
-                    key="p4-question-suggestions-apply-manual",
-                    disabled=not manual_suggestions.strip(),
-                ):
-                    parsed = parse_research_question_suggestions(
-                        manual_suggestions, valid_card_ids=valid_card_ids, limit=8,
-                    )
+
+_THREAD_STATUS_ORDER = {
+    "exploring": 0,
+    "interested": 1,
+    "candidate": 2,
+    "hold": 3,
+    "rejected": 4,
+}
+
+
+def _sorted_threads(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # First keep the most recently changed question within each state, then force active work to the top.
+    by_recent = sorted(items, key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    return sorted(by_recent, key=lambda item: _THREAD_STATUS_ORDER.get(str(item.get("status", "candidate")), 99))
+
+
+def _thread_card_summary(rq: dict[str, Any]) -> str:
+    rq_id = str(rq.get("rq_id", ""))
+    reports = ledger.m2_reports(rq_id, include_archived=False, limit=1)
+    intents = ledger.research_question_intents(rq_id)
+    source_count = len(rq.get("source_card_ids", []))
+    parts = []
+    if source_count:
+        parts.append(f"근거 {source_count}")
+    if reports:
+        parts.append("M2 Report 있음")
+    if intents:
+        parts.append(f"M1 Intent {len(intents)}")
+    return " · ".join(parts) if parts else "아직 후속 작업 없음"
+
+
+def _render_thread_list_for_source(
+    source_type: str,
+    model: str,
+    use_ollama: bool,
+    semantic: bool,
+    embedding_model: str,
+    *,
+    session_key: str,
+) -> None:
+    backlog = ledger.research_question_backlog(limit=300)
+    for item in backlog:
+        if str(item.get("source_type") or "m1_knowledge") == "m1_knowledge":
+            ledger.ensure_research_question_thread(str(item["rq_id"]), source_type="m1_knowledge")
+    threads = []
+    for item in backlog:
+        thread = ledger.research_question_thread(str(item["rq_id"])) or item
+        if str(thread.get("source_type", "m1_knowledge")) == source_type:
+            threads.append(thread)
+    threads = _sorted_threads(threads)
+
+    st.markdown("### Research Question Threads")
+    status_counts = {status: sum(1 for rq in threads if rq.get("status") == status) for status in RQ_STATUS_LABELS}
+    metric_cols = st.columns(4)
+    for col, status in zip(metric_cols, ["exploring", "interested", "candidate", "hold"]):
+        col.metric(RQ_STATUS_LABELS[status], status_counts.get(status, 0))
+
+    statuses = st.multiselect(
+        "표시 상태",
+        list(RQ_STATUS_LABELS),
+        default=["exploring", "interested", "candidate", "hold"],
+        format_func=lambda x: RQ_STATUS_LABELS[x],
+        key=f"{session_key}-status-filter",
+    )
+    visible = [rq for rq in threads if rq.get("status") == "exploring" or rq.get("status") in statuses]
+    visible = _sorted_threads(visible)
+    if not visible:
+        st.info("이 페이지에 표시할 Research Question Thread가 없습니다.")
+        return
+
+    active = [rq for rq in visible if rq.get("status") == "exploring"]
+    if active:
+        st.info(f"현재 작업중인 탐색중 Thread {len(active)}건을 목록 맨 위에 표시합니다.")
+
+    selected_id = str(st.session_state.get(session_key) or "")
+    if selected_id and not any(str(rq.get("rq_id")) == selected_id for rq in visible):
+        selected_id = ""
+
+    for rq in visible:
+        rq_id = str(rq["rq_id"])
+        status = str(rq.get("status", "candidate"))
+        status_label = RQ_STATUS_LABELS.get(status, status)
+        is_selected = rq_id == selected_id
+        with st.container(border=True):
+            top = st.columns([5, 1.4])
+            with top[0]:
+                st.markdown(f"#### {rq.get('question', '')}")
+            with top[1]:
+                if status == "exploring":
+                    st.markdown("**🔵 탐색중**")
+                else:
+                    st.markdown(f"**{status_label}**")
+            latest_change = ledger.latest_research_question_change(rq_id)
+            summary = _thread_card_summary(rq)
+            st.caption(summary)
+            if latest_change and latest_change.get("summary"):
+                st.write(f"최근 변화: {latest_change.get('summary')}")
+            action_cols = st.columns([1.2, 4.8])
+            if action_cols[0].button("닫기" if is_selected else "열기", key=f"{session_key}-open-{rq_id}", type="primary" if status == "exploring" and not is_selected else "secondary"):
+                st.session_state[session_key] = "" if is_selected else rq_id
+                st.rerun()
+            action_cols[1].caption(f"{M2_SOURCE_LABELS.get(source_type, source_type)} · {rq_id}")
+        if is_selected:
+            with st.container(border=True):
+                _render_thread_detail(rq_id, model, use_ollama, semantic, embedding_model)
+            st.divider()
+
+
+def _render_researcher_question_page(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    _render_researcher_question_intake()
+    st.divider()
+    _render_thread_list_for_source(
+        "researcher", model, use_ollama, semantic, embedding_model,
+        session_key="m2-selected-researcher-thread-id",
+    )
+
+
+def _render_external_advisory_page(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    _render_external_question_intake(model, use_ollama)
+    st.divider()
+    _render_thread_list_for_source(
+        "external_advisory", model, use_ollama, semantic, embedding_model,
+        session_key="m2-selected-external-thread-id",
+    )
+
+def _render_m1_new_information(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    updates = recent_knowledge_updates(ledger, limit=500)
+    all_cards = memory.all()
+    cards_by_id = {str(card.get("card_id", "")): card for card in all_cards}
+    st.subheader("M1 새 정보 → 연구질문")
+    st.caption("M2 연구상태 검토에서 아직 처리하지 않은 승인 지식카드입니다. 수동 모드는 RQ 후보를 Thread에 추가하고, 자동 모드는 Top 3 후속 문헌탐색까지 수행합니다.")
+    st.metric("미처리 새 지식카드", len(updates))
+    if updates:
+        with st.expander(f"미처리 지식카드 {len(updates)}건 보기", expanded=False):
+            for update in updates:
+                cid = str((update.get("payload") or {}).get("card_id", ""))
+                card = cards_by_id.get(cid, {})
+                st.write(f"- `{cid}` · {card.get('claim', card.get('title', ''))}")
+        valid_ids = {str((u.get("payload") or {}).get("card_id", "")) for u in updates if str((u.get("payload") or {}).get("card_id", ""))}
+        prompt = research_question_suggestions_prompt(updates, recent_research_questions(ledger), all_cards, max_suggestions=8)
+        manual_col, auto_col = st.columns(2)
+        with manual_col:
+            if st.button("수동 · 연구질문 후보 도출", key="m2-new-info-manual", type="primary"):
+                parsed = parse_research_question_suggestions(llm_draft(prompt, model, use_ollama) or "", valid_card_ids=valid_ids, limit=8)
+                if not parsed:
+                    st.warning("RQ 후보를 읽지 못했습니다. 새 지식은 미처리 상태로 유지됩니다.")
+                else:
+                    review_id = ledger.create_research_state_review("manual", updates)
+                    saved = store_research_question_candidates(ledger, parsed, updates, review_id=review_id)
+                    for rq in saved:
+                        ledger.ensure_research_question_thread(str(rq["rq_id"]), source_type="m1_knowledge", source_payload={"review_id": review_id})
+                    ledger.complete_research_state_review(review_id, generated_rq_count=len(saved), selected_rq_count=0, summary=f"새 지식카드 {len(updates)}건에서 RQ {len(saved)}건을 도출했습니다.")
+                    st.success(f"RQ Thread {len(saved)}건을 생성·보강했습니다."); st.rerun()
+            with st.expander("외부 LLM으로 RQ 후보 도출", expanded=False):
+                st.text_area("외부 LLM용 프롬프트", value=prompt, key="m2-rq-external-prompt", height=360)
+                manual = st.text_area("외부 LLM 응답 붙여넣기", key="m2-rq-external-response", height=280)
+                if st.button("외부 응답을 RQ Thread에 반영", key="m2-rq-external-apply", disabled=not manual.strip()):
+                    parsed = parse_research_question_suggestions(manual, valid_card_ids=valid_ids, limit=8)
                     if not parsed:
-                        st.error("RQ 블록을 읽지 못했습니다. 프롬프트에 표시된 형식을 유지해주세요.")
+                        st.error("RQ 블록을 읽지 못했습니다.")
                     else:
                         review_id = ledger.create_research_state_review("manual", updates)
                         saved = store_research_question_candidates(ledger, parsed, updates, review_id=review_id)
-                        ledger.complete_research_state_review(
-                            review_id, generated_rq_count=len(saved), selected_rq_count=0,
-                            summary=f"새 지식카드 {len(updates)}건에서 외부 채팅으로 연구질문 후보 {len(saved)}건을 도출했습니다.",
-                        )
-                        st.success(f"새 지식카드 {len(updates)}건을 처리해 연구질문 후보 {len(saved)}개를 Backlog에 저장했습니다. 검토 배치: {review_id}")
-                        st.rerun()
-        elif not updates:
-            st.info("후보 도출에 사용할 M1 새 정보가 없습니다.")
-
-        render_research_question_backlog()
-        st.divider()
-        st.subheader("연구질문 검토")
-        question_mode = st.radio(
-            "검토할 질문 선택 방식",
-            ["직접 새 질문", "RQ Backlog에서 검토", "기존 질문 심화"],
-            horizontal=True,
-            key="p4-question-mode",
-        )
-        question_seed = ""
-        selected_review_rq_id = None
-        if question_mode == "RQ Backlog에서 검토":
-            backlog = ledger.research_question_backlog(statuses=["candidate", "interested", "exploring", "hold"], limit=100)
-            if backlog:
-                preferred_id = st.session_state.get("p4-selected-rq-id")
-                ids = [str(item["rq_id"]) for item in backlog]
-                index = ids.index(preferred_id) if preferred_id in ids else 0
-                selected_rq_id = st.selectbox(
-                    "Backlog 연구질문",
-                    ids,
-                    index=index,
-                    format_func=lambda rq_id: next(
-                        f"{RQ_STATUS_LABELS.get(str(item.get('status')), '')} · {item['question']}"
-                        for item in backlog if str(item["rq_id"]) == rq_id
-                    ),
-                    key="p4-backlog-review-choice",
-                )
-                selected_rq = next(item for item in backlog if str(item["rq_id"]) == selected_rq_id)
-                selected_review_rq_id = selected_rq_id
-                question_seed = str(selected_rq["question"])
-                st.caption(f"도출 이유: {selected_rq.get('rationale', '')}")
+                        for rq in saved:
+                            ledger.ensure_research_question_thread(str(rq["rq_id"]), source_type="m1_knowledge", source_payload={"review_id": review_id, "generation_mode": "manual_external_llm"})
+                        ledger.complete_research_state_review(review_id, generated_rq_count=len(saved), selected_rq_count=0, summary=f"외부 LLM으로 새 지식카드 {len(updates)}건에서 RQ {len(saved)}건을 도출했습니다.")
+                        st.success("RQ Thread에 반영했습니다."); st.rerun()
+        with auto_col:
+            if st.button("자동 · 새 지식 연구 사이클 실행", key="m2-new-info-auto", type="primary"):
+                with st.spinner("RQ 생성·보강 → 중요도 평가 → M1 자동 문헌탐색을 수행합니다."):
+                    result = execute_auto_research_cycle(
+                        ledger, all_cards, CACHE,
+                        rq_drafter=lambda p: llm_draft(p, model, use_ollama), priority_drafter=lambda p: llm_draft(p, model, use_ollama),
+                        keyword_drafter=lambda p: llm_draft(p, model, use_ollama), abstract_reviewer=lambda p: llm_draft(p, model, use_ollama, profile="abstract_triage"),
+                        fulltext_drafter=lambda p: paper_draft_result(p, model, use_ollama, "full_text_similarity").text,
+                        synthesis_drafter=lambda p: llm_draft(p, model, use_ollama),
+                    )
+                st.session_state["m2-auto-result"] = result; st.rerun()
+        auto_result = st.session_state.pop("m2-auto-result", None)
+        if auto_result:
+            if auto_result.get("status") in {"rq_generation_failed", "needs_attention"}:
+                st.warning("자동 사이클 일부가 중단되었습니다. RQ까지 생성된 경우 Thread에는 보존되며, 연구위원 데스크의 Retry에서 후속 단계를 재개할 수 있습니다.")
             else:
-                st.info("검토할 Backlog 연구질문이 없습니다.")
-        elif question_mode == "기존 질문 심화":
-            previous_questions = recent_research_questions(ledger)
-            if previous_questions:
-                question_seed = st.selectbox("심화할 기존 연구질문", previous_questions)
-            else:
-                st.info("아직 저장된 연구질문이 없습니다. 직접 새 질문을 입력하세요.")
+                st.success(f"자동 연구 사이클 완료 · 새 지식 {auto_result.get('source_card_count',0)}건 · RQ 신규 {auto_result.get('new_rq_count',0)} / 보강 {auto_result.get('strengthened_rq_count',0)}")
+    else:
+        st.info("현재 M2가 처리해야 할 새 지식카드가 없습니다.")
 
-        question = st.text_area(
-            "이번 연구 질문·진척", value=question_seed,
-            placeholder="예: 에이전트 명세 우선 설계가 구현 품질과 검토 효율을 높이는가?",
-            key=f"p4-question-{question_mode}-{question_seed}",
-        )
-        st.caption("선택한 연구질문에는 연구자 메모와 해석된 연구 맥락이 함께 기록됩니다. 이 맥락은 승인 지식카드가 아니라, 다음 검토와 M1 탐색의 기준이 되는 질문별 작업 상태입니다.")
-        researcher_note = st.text_area(
-            "연구자 메모 (선택)",
-            value=latest_state.researcher_note if latest_state and latest_state.question == question else "",
-            placeholder="예: 디자인 개념의 참신성만이 아니라 제조 가능성, 사용자 검증 가능성, 비용을 함께 평가해야 한다. 현재는 평가 기준의 비교가 부족하다.",
-            key="p4-researcher-note",
-        )
-        if st.button("메모를 연구 맥락 초안으로 정리", disabled=not (question.strip() and researcher_note.strip()), key="p4-map-context"):
-            mapped_result = llm_draft_result(research_context_mapping_prompt(question, researcher_note), model, use_ollama)
-            if mapped_result.ok:
-                mapped = parse_research_context_mapping(mapped_result.text or "")
-                st.session_state["p4-context-hypothesis"] = str(mapped["hypothesis"])
-                st.session_state["p4-context-constraints"] = "\n".join(mapped["constraints"])
-                st.session_state["p4-context-unresolved"] = "\n".join(mapped["unresolved"])
-                st.session_state["p4-context-changes"] = "\n".join(mapped["changes"])
-                st.success("연구자 확인용 맥락 초안을 만들었습니다. 아래에서 수정한 뒤 검토를 실행하세요.")
-            else:
-                st.warning(f"메모 정리 초안을 만들지 못했습니다: {mapped_result.error}")
-        same_question_as_latest = bool(latest_state and latest_state.question == question)
-        defaults = {
-            "p4-context-hypothesis": latest_state.current_hypothesis if same_question_as_latest else "",
-            "p4-context-constraints": "\n".join(latest_state.constraints) if same_question_as_latest else "",
-            "p4-context-unresolved": "\n".join(latest_state.unresolved_issues) if same_question_as_latest else "",
-            "p4-context-changes": "\n".join(latest_state.recent_evidence_changes) if same_question_as_latest else "",
-            "p4-context-confidence": latest_state.confidence if same_question_as_latest else "medium",
-        }
-        for key, value in defaults.items():
-            st.session_state.setdefault(key, value)
-        with st.expander("연구 맥락 확인·보완", expanded=bool(researcher_note)):
-            st.caption("현재 가설은 잠정적 답의 방향, 제약은 검토 범위, 미결 사항은 추가 확인할 질문, 최근 근거 변화는 이번 검토에 반영할 새 정보를 뜻합니다. 자유 메모를 정리한 값이므로 연구자가 수정·확정합니다.")
-            hypothesis = st.text_area("현재 가설", key="p4-context-hypothesis")
-            constraints = st.text_area("제약 (한 줄에 하나)", key="p4-context-constraints")
-            unresolved = st.text_area("미결 사항 (한 줄에 하나)", key="p4-context-unresolved")
-            changes = st.text_area("연구자가 인지한 최근 근거 변화 (한 줄에 하나)", key="p4-context-changes")
-            confidence = st.select_slider("현재 확신 수준", options=["low", "medium", "high"], key="p4-context-confidence")
-        if st.button("M2 연구 상태 검토", disabled=not question.strip(), type="primary"):
-            state = ResearchState(
-                question=question, current_hypothesis=hypothesis or "아직 명시되지 않았습니다.",
-                constraints=_lines(constraints), unresolved_issues=_lines(unresolved),
-                recent_evidence_changes=_lines(changes), researcher_note=researcher_note, confidence=confidence,
-            )
-            results = search_knowledge(question, semantic, embedding_model)
-            updates = recent_knowledge_updates(ledger)
-            prompt = direction_prompt(state, results, updates)
-            llm_result = llm_draft_result(prompt, model, use_ollama)
-            draft = draft_research_direction(state, results, updates, llm_result.text)
-            _, request_ids = record_research_direction(
-                ledger, state, results, updates, draft, create_intent_requests=False,
-            )
-            st.session_state["p4-results"] = results
-            st.session_state["p4-report"] = draft.report
-            st.session_state["p4-intents"] = []
-            if not llm_result.ok and use_ollama:
-                st.warning(f"Ollama 초안 대신 근거 기반 기본 검토를 만들었습니다: {llm_result.error}")
-            st.success("M2 연구 상태·방향 보고를 저장했습니다. 추가 탐색은 위 Research Question Backlog에서 수동으로 보내거나 자동 모드를 사용하세요.")
-        if "p4-report" in st.session_state:
-            st.subheader("M2 연구 상태·방향 보고")
-            show_retrieval_results(st.session_state.get("p4-results", []))
-            st.markdown(st.session_state["p4-report"])
-            st.caption("이 검토는 연구 상태 보고만 생성합니다. 탐색 실행은 Research Question Backlog의 수동/자동 모드에서 관리합니다.")
-    with external_tab:
-        external_advisory(model, use_ollama, semantic, embedding_model, embedded=True)
-    with updates_tab:
-        updates = recent_knowledge_updates(ledger, limit=500)
-        cards_by_id = {str(card.get("card_id", "")): card for card in memory.all()}
-        st.subheader("M1 새 정보 입력함")
-        st.caption("여기에는 M2 연구상태·방향 검토에서 아직 처리되지 않은 승인 지식카드만 표시됩니다. 수동 또는 자동 연구 사이클이 완료되면 해당 카드는 입력함에서 빠집니다.")
-        st.metric("미처리 새 지식카드", len(updates))
-        if not updates:
-            st.info("현재 M2가 처리해야 할 새 지식카드가 없습니다.")
-        else:
-            for update in updates:
-                payload = update.get("payload") or {}
-                card_id = str(payload.get("card_id", ""))
-                card = cards_by_id.get(card_id, {})
-                with st.expander(f"{card_id} · {card.get('title') or payload.get('title', '새 지식카드')}"):
-                    st.write(card.get("claim", "승인된 지식카드가 M2 연구상태 검토를 기다리고 있습니다."))
-                    if card.get("conditions"):
-                        st.caption(f"조건: {card['conditions']}")
-                    if card.get("limits"):
-                        st.caption(f"한계: {card['limits']}")
-                    pending_ids = update.get("pending_update_ids", [])
-                    if len(pending_ids) > 1:
-                        st.caption(f"이 카드에 대한 미처리 업데이트 이벤트 {len(pending_ids)}건을 함께 처리합니다.")
-            st.info("'연구 상태·방향 검토' 탭에서 수동으로 RQ 후보를 확인하거나, 자동 연구 사이클로 RQ 도출부터 M1 문헌탐색까지 수행하세요.")
+    reviews = ledger.research_state_reviews(limit=6)
+    if reviews:
+        st.markdown("### 최근 연구상태 검토")
+        for review in reviews:
+            st.write(f"- {review['created_at'][:16].replace('T',' ')} · {'자동' if review.get('mode')=='auto' else '수동'} · 새 카드 {review.get('source_card_count',0)}건 → RQ {review.get('generated_rq_count',0)}건")
+            if review.get("summary"):
+                st.caption(review["summary"])
 
-        reviews = ledger.research_state_reviews(limit=8)
-        if reviews:
-            st.divider()
-            st.markdown("**최근 연구상태·방향 검토 이력**")
-            for review in reviews:
-                mode = "자동" if review.get("mode") == "auto" else "수동"
-                status = {"completed": "완료", "processing": "처리중", "failed": "실패"}.get(str(review.get("status")), str(review.get("status", "")))
-                st.write(
-                    f"- `{review['review_id']}` · {mode} · {status} · "
-                    f"새 카드 {review.get('source_card_count', 0)}건 → RQ {review.get('generated_rq_count', 0)}건"
-                    + (f" → Top {review.get('selected_rq_count', 0)}" if review.get("selected_rq_count") else "")
-                )
-                if review.get("summary"):
-                    st.caption(review["summary"])
+    st.divider()
+    _render_thread_list_for_source(
+        "m1_knowledge", model, use_ollama, semantic, embedding_model,
+        session_key="m2-selected-m1-thread-id",
+    )
 
+
+def _render_m2_report_history() -> None:
+    st.subheader("M2 Report History")
+    st.caption("M2의 전체 보고서는 이 화면에서 관리합니다. 연구위원 데스크에는 최신 변화와 요약만 표시됩니다.")
+    reports = ledger.m2_reports(include_archived=True, limit=300)
+    if not reports:
+        st.info("아직 Thread 기반 M2 Report가 없습니다.")
+        return
+    show_archived = st.checkbox("보관된 보고서 포함", value=True, key="m2-history-archived")
+    cards_by_id = {str(card.get("card_id", "")): card for card in memory.all()}
+    for report in reports:
+        if not show_archived and report.get("archived_at"):
+            continue
+        rq = ledger.research_question_thread(str(report["rq_id"])) or {}
+        source = M2_SOURCE_LABELS.get(str(rq.get("source_type", "m1_knowledge")), "M1 새 지식")
+        state = "보관" if report.get("archived_at") else "활성"
+        with st.expander(f"{report['created_at'][:16].replace('T',' ')} · {source} · {state} · {report['question_text']}"):
+            st.caption(f"Report {report['report_id']} · {report['generation_mode']} · 근거 카드 {len(report['evidence_card_ids'])}건")
+            if report.get("context_text"):
+                st.markdown(f"**검토 맥락/코멘트**  \n{report['context_text']}")
+            st.markdown(report["report_text"])
+            if report.get("evidence_card_ids"):
+                with st.expander("사용 지식카드", expanded=False):
+                    for cid in report["evidence_card_ids"]:
+                        card = cards_by_id.get(cid, {})
+                        st.write(f"- `{cid}` · {card.get('claim', card.get('title', ''))}")
+            c1, c2 = st.columns(2)
+            if c1.button("보관 해제" if report.get("archived_at") else "보관", key=f"m2-report-archive-{report['report_id']}"):
+                ledger.archive_m2_report(report["report_id"], archived=not bool(report.get("archived_at"))); st.rerun()
+            if c2.button("보고서 제거", key=f"m2-report-delete-{report['report_id']}"):
+                ledger.delete_m2_report(report["report_id"]); st.rerun()
+
+
+def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    st.header("M2 · 지식 기반 자문 작업실")
+    st.caption("질문 진입점은 별도 페이지로 관리하고, 질문이 정의된 이후의 검토·보고·M1 보강·질문 구체화 흐름은 동일한 Research Question Thread로 수행합니다.")
+    pages = [
+        "M1 새 지식 기반",
+        "연구자 직접 질문",
+        "외부 자문 요청",
+        "M2 Report History",
+    ]
+    page = st.radio("M2 작업", pages, horizontal=True, key="m2-work-page")
+    st.divider()
+    if page == "M1 새 지식 기반":
+        _render_m1_new_information(model, use_ollama, semantic, embedding_model)
+    elif page == "연구자 직접 질문":
+        _render_researcher_question_page(model, use_ollama, semantic, embedding_model)
+    elif page == "외부 자문 요청":
+        _render_external_advisory_page(model, use_ollama, semantic, embedding_model)
+    else:
+        _render_m2_report_history()
 
 def external_advisory(model: str, use_ollama: bool, semantic: bool, embedding_model: str, *, embedded: bool = False) -> None:
     if not embedded:

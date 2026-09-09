@@ -153,6 +153,13 @@ def store_research_question_candidates(
                 ledger.add_research_question_source(
                     str(stored["rq_id"]), review_id, card_id, update_by_card.get(card_id, ""), candidate.rationale,
                 )
+            if stored["_change_kind"] == "new":
+                summary = f"새 지식카드 {len(candidate.source_card_ids)}건을 근거로 새 연구질문이 생성되었습니다."
+                change_type = "created"
+            else:
+                summary = f"새 지식카드 {len(candidate.source_card_ids)}건이 추가 근거로 연결되어 연구질문이 보강되었습니다."
+                change_type = "evidence_added"
+            ledger.add_research_question_change(str(stored["rq_id"]), change_type, summary, review_id=review_id)
         saved.append(stored)
     return saved
 
@@ -341,10 +348,18 @@ def dispatch_top_research_questions(
     selected = ranked[:limit]
     if review_id:
         for item in ranked:
+            rq_id = str(item["rq"].get("rq_id", ""))
+            is_selected = item in selected
             ledger.update_review_question_selection(
-                review_id, str(item["rq"].get("rq_id", "")), score=int(item["score"]),
-                reason=str(item.get("reason", "")), selected=item in selected,
+                review_id, rq_id, score=int(item["score"]),
+                reason=str(item.get("reason", "")), selected=is_selected,
             )
+            if is_selected:
+                reason = str(item.get("reason", "")).strip()
+                suffix = f" 선정 이유: {reason}" if reason else ""
+                ledger.add_research_question_change(
+                    rq_id, "priority_changed", f"이번 연구상태 검토에서 중요도 {int(item['score'])}/5로 평가되어 자동 후속 탐색 대상으로 선정되었습니다.{suffix}", review_id=review_id,
+                )
     dispatched = [
         create_auto_exploration_intent_for_rq(
             ledger, item["rq"], score=int(item["score"]), selection_reason=str(item.get("reason", "")),

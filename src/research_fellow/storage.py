@@ -314,6 +314,103 @@ class Ledger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_research_question_sources_rq
                     ON research_question_sources(rq_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS research_question_changes (
+                    change_id TEXT PRIMARY KEY,
+                    rq_id TEXT NOT NULL,
+                    review_id TEXT NOT NULL DEFAULT '',
+                    change_type TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(rq_id) REFERENCES research_questions(rq_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_question_changes_rq
+                    ON research_question_changes(rq_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS research_question_threads (
+                    rq_id TEXT PRIMARY KEY,
+                    source_type TEXT NOT NULL DEFAULT 'm1_knowledge',
+                    source_payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(rq_id) REFERENCES research_questions(rq_id)
+                );
+                CREATE TABLE IF NOT EXISTS research_question_versions (
+                    version_id TEXT PRIMARY KEY,
+                    rq_id TEXT NOT NULL,
+                    version_no INTEGER NOT NULL,
+                    question TEXT NOT NULL,
+                    change_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(rq_id, version_no),
+                    FOREIGN KEY(rq_id) REFERENCES research_questions(rq_id)
+                );
+                CREATE TABLE IF NOT EXISTS m2_reports (
+                    report_id TEXT PRIMARY KEY,
+                    rq_id TEXT NOT NULL,
+                    case_id TEXT NOT NULL DEFAULT '',
+                    report_type TEXT NOT NULL DEFAULT 'research_review',
+                    generation_mode TEXT NOT NULL DEFAULT 'internal_llm',
+                    question_text TEXT NOT NULL,
+                    context_text TEXT NOT NULL DEFAULT '',
+                    evidence_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                    report_text TEXT NOT NULL,
+                    knowledge_gaps TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    archived_at TEXT,
+                    deleted_at TEXT,
+                    FOREIGN KEY(rq_id) REFERENCES research_questions(rq_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_m2_reports_rq ON m2_reports(rq_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS auto_research_runs (
+                    run_id TEXT PRIMARY KEY,
+                    review_id TEXT NOT NULL DEFAULT '',
+                    intent_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    current_stage TEXT NOT NULL DEFAULT '',
+                    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+                    last_error_type TEXT NOT NULL DEFAULT '',
+                    last_error_message TEXT NOT NULL DEFAULT '',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_auto_research_runs_status
+                    ON auto_research_runs(status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS auto_research_failures (
+                    failure_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    review_id TEXT NOT NULL DEFAULT '',
+                    intent_id TEXT NOT NULL DEFAULT '',
+                    stage TEXT NOT NULL,
+                    item_key TEXT NOT NULL DEFAULT '',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    error_type TEXT NOT NULL,
+                    error_message TEXT NOT NULL DEFAULT '',
+                    recommended_action TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'needs_attention',
+                    context_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_auto_research_failures_status
+                    ON auto_research_failures(status, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS manual_recovery_attempts (
+                    recovery_id TEXT PRIMARY KEY,
+                    failure_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    stage TEXT NOT NULL,
+                    item_key TEXT NOT NULL DEFAULT '',
+                    response_text TEXT NOT NULL,
+                    validation_status TEXT NOT NULL,
+                    validation_message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    applied_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_recovery_attempts_failure
+                    ON manual_recovery_attempts(failure_id, created_at DESC);
                 CREATE TABLE IF NOT EXISTS paper_reading_reviews (
                     review_id TEXT PRIMARY KEY, question_id TEXT NOT NULL, refined_answer TEXT NOT NULL,
                     additional_evidence_json TEXT NOT NULL, remaining_uncertainty TEXT NOT NULL,
@@ -380,7 +477,7 @@ class Ledger:
             ontology_type_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_types)").fetchall()}
             if "facet_id" not in ontology_type_columns:
                 conn.execute("ALTER TABLE ontology_types ADD COLUMN facet_id TEXT")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "11"))
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "14"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()
@@ -598,6 +695,28 @@ class Ledger:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM decisions ORDER BY decided_at DESC").fetchall()]
 
+
+    def prepare_intent_for_retry(self, intent_id: str) -> dict[str, Any] | None:
+        """Reset one failed auto-dispatched M1 intent to a runnable state."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM phenomena WHERE phenomenon_type='curation_intent' AND subject_id=? ORDER BY created_at DESC LIMIT 1",
+                (intent_id,),
+            ).fetchone()
+            if not row:
+                return None
+            event = self._row(row)
+            if event.get("status") == "failed":
+                conn.execute("UPDATE phenomena SET status='ready' WHERE phenomenon_id=?", (event["phenomenon_id"],))
+                event["status"] = "ready"
+            profile = conn.execute("SELECT profile_id FROM search_profiles WHERE intent_id=?", (intent_id,)).fetchone()
+            if profile:
+                conn.execute(
+                    "UPDATE search_profiles SET is_active=1, deleted_at=NULL, deleted_note='', updated_at=? WHERE intent_id=?",
+                    (now(), intent_id),
+                )
+        return event
+
     def create_search_profile(self, intent: dict[str, Any]) -> dict[str, Any]:
         """Create one editable M1 search profile when a researcher approves an Intent."""
         intent_id = str(intent["intent_id"])
@@ -738,6 +857,116 @@ class Ledger:
             return [dict(row) for row in conn.execute(query, values).fetchall()]
 
 
+
+    # --- Auto research retry / failure state ------------------------------
+
+    def create_auto_research_run(self, *, review_id: str = "", intent_id: str = "", stage: str = "") -> str:
+        run_id, timestamp = f"arr-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO auto_research_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, review_id, intent_id, "running", stage, "{}", "", "", 0, timestamp, timestamp, None),
+            )
+        return run_id
+
+    def update_auto_research_run(self, run_id: str, *, status: str | None = None, stage: str | None = None, checkpoint: dict[str, Any] | None = None, error_type: str | None = None, error_message: str | None = None, retry_count: int | None = None) -> None:
+        fields, values = [], []
+        mapping = {
+            "status": status, "current_stage": stage,
+            "checkpoint_json": json.dumps(checkpoint, ensure_ascii=False) if checkpoint is not None else None,
+            "last_error_type": error_type, "last_error_message": error_message,
+            "retry_count": retry_count,
+        }
+        for key, value in mapping.items():
+            if value is not None:
+                fields.append(f"{key}=?"); values.append(value)
+        fields.append("updated_at=?"); values.append(now())
+        if status == "completed":
+            fields.append("completed_at=?"); values.append(now())
+        values.append(run_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE auto_research_runs SET {', '.join(fields)} WHERE run_id=?", values)
+
+    def auto_research_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM auto_research_runs WHERE run_id=?", (run_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row); item["checkpoint"] = json.loads(item.pop("checkpoint_json") or "{}")
+        return item
+
+    def record_auto_research_failure(self, payload: dict[str, Any], *, run_id: str = "", review_id: str = "", intent_id: str = "", item_key: str = "") -> str:
+        failure_id = str(payload.get("failure_id") or f"arf-{uuid.uuid4().hex[:12]}")
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO auto_research_failures VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (failure_id, run_id, review_id, intent_id, str(payload.get("stage", "")), item_key,
+                 int(payload.get("attempt_count", 0)), str(payload.get("error_type", "unexpected_error")),
+                 str(payload.get("error_message", "")), str(payload.get("recommended_action", "")),
+                 "needs_attention", json.dumps(payload.get("context") or {}, ensure_ascii=False), now(), None),
+            )
+        return failure_id
+
+    def auto_research_failures(self, *, status: str = "needs_attention", limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM auto_research_failures WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                (status, max(1, min(int(limit), 200))),
+            ).fetchall()
+        result=[]
+        for row in rows:
+            item=dict(row); item["context"] = json.loads(item.pop("context_json") or "{}"); result.append(item)
+        return result
+
+    def resolve_auto_research_failure(self, failure_id: str, *, status: str = "resolved") -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE auto_research_failures SET status=?, resolved_at=? WHERE failure_id=?", (status, now(), failure_id))
+
+    def set_manual_recovery_override(self, run_id: str, *, stage: str, response: str, item_key: str = "") -> None:
+        run = self.auto_research_run(run_id)
+        if not run:
+            raise ValueError(f"자동 연구 run을 찾지 못했습니다: {run_id}")
+        checkpoint = dict(run.get("checkpoint") or {})
+        overrides = dict(checkpoint.get("manual_recovery_overrides") or {})
+        key = f"{stage}:{item_key}"
+        overrides[key] = response
+        checkpoint["manual_recovery_overrides"] = overrides
+        self.update_auto_research_run(run_id, checkpoint=checkpoint)
+
+    def manual_recovery_override(self, run_id: str, *, stage: str, item_key: str = "") -> str:
+        run = self.auto_research_run(run_id)
+        checkpoint = dict((run or {}).get("checkpoint") or {})
+        overrides = dict(checkpoint.get("manual_recovery_overrides") or {})
+        return str(overrides.get(f"{stage}:{item_key}") or "")
+
+    def clear_manual_recovery_override(self, run_id: str, *, stage: str, item_key: str = "") -> None:
+        run = self.auto_research_run(run_id)
+        if not run:
+            return
+        checkpoint = dict(run.get("checkpoint") or {})
+        overrides = dict(checkpoint.get("manual_recovery_overrides") or {})
+        overrides.pop(f"{stage}:{item_key}", None)
+        checkpoint["manual_recovery_overrides"] = overrides
+        self.update_auto_research_run(run_id, checkpoint=checkpoint)
+
+    def record_manual_recovery_attempt(self, failure_id: str, *, run_id: str, stage: str, item_key: str = "", response_text: str, validation_status: str, validation_message: str = "", applied: bool = False) -> str:
+        recovery_id = f"mra-{uuid.uuid4().hex[:12]}"
+        timestamp = now()
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO manual_recovery_attempts VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (recovery_id, failure_id, run_id, stage, item_key, response_text, validation_status, validation_message, timestamp, timestamp if applied else None),
+            )
+        return recovery_id
+
+    def manual_recovery_attempts(self, failure_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM manual_recovery_attempts WHERE failure_id=? ORDER BY created_at DESC",
+                (failure_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # --- Research-state review batches ------------------------------------
 
     def reviewed_knowledge_update_ids(self) -> set[str]:
@@ -793,6 +1022,14 @@ class Ledger:
                 (summary.strip(), now(), review_id),
             )
 
+    def rollback_research_state_review(self, review_id: str) -> None:
+        """Return a completed review batch to the unreviewed pool without deleting its audit trail."""
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE research_state_reviews SET status='rolled_back', completed_at=? WHERE review_id=?",
+                (now(), review_id),
+            )
+
     def research_state_reviews(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -844,6 +1081,45 @@ class Ledger:
                 (rq_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def add_research_question_change(self, rq_id: str, change_type: str, summary: str, *, review_id: str = "") -> str:
+        change_id = f"rqc-{uuid.uuid4().hex[:12]}"
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO research_question_changes VALUES (?,?,?,?,?,?)",
+                (change_id, rq_id, review_id, change_type.strip() or "updated", summary.strip(), now()),
+            )
+        return change_id
+
+    def research_question_changes(self, rq_id: str | None = None, *, review_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        clauses, values = [], []
+        if rq_id:
+            clauses.append("rq_id=?"); values.append(rq_id)
+        if review_id:
+            clauses.append("review_id=?"); values.append(review_id)
+        query = "SELECT * FROM research_question_changes"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        values.append(max(1, min(int(limit), 500)))
+        with self.connect() as conn:
+            rows = conn.execute(query, values).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_research_question_change(self, rq_id: str) -> dict[str, Any] | None:
+        rows = self.research_question_changes(rq_id, limit=1)
+        return rows[0] if rows else None
+
+    def research_questions_for_intent(self, intent_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT rq.* FROM research_question_intents rqi
+                   JOIN research_questions rq ON rq.rq_id=rqi.rq_id
+                   WHERE rqi.intent_id=? AND rq.deleted_at IS NULL
+                   ORDER BY rq.updated_at DESC""",
+                (intent_id,),
+            ).fetchall()
+        return [self._research_question_row(row) for row in rows]
 
     # --- Research question backlog -----------------------------------------
 
@@ -939,10 +1215,14 @@ class Ledger:
         if status not in {"candidate", "interested", "exploring", "hold", "rejected"}:
             raise ValueError("지원하지 않는 연구질문 상태입니다.")
         with self.connect() as conn:
+            row = conn.execute("SELECT status FROM research_questions WHERE rq_id=? AND deleted_at IS NULL", (rq_id,)).fetchone()
+            previous = str(row[0]) if row else ""
             result = conn.execute(
                 "UPDATE research_questions SET status=?, updated_at=? WHERE rq_id=? AND deleted_at IS NULL",
                 (status, now(), rq_id),
             )
+        if result.rowcount == 1 and previous != status:
+            self.add_research_question_change(rq_id, "status_changed", f"상태가 {previous or '미지정'} → {status}로 변경되었습니다.")
         return result.rowcount == 1
 
     def link_research_question_intent(self, rq_id: str, intent_id: str, request_id: str = "") -> None:
@@ -955,6 +1235,7 @@ class Ledger:
                 "UPDATE research_questions SET status='exploring', updated_at=? WHERE rq_id=? AND deleted_at IS NULL",
                 (now(), rq_id),
             )
+        self.add_research_question_change(rq_id, "intent_created", f"M1 탐색 Intent {intent_id}가 연결되어 후속 탐색을 시작했습니다.")
 
     def research_question_intents(self, rq_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -962,6 +1243,136 @@ class Ledger:
                 "SELECT * FROM research_question_intents WHERE rq_id=? ORDER BY created_at DESC", (rq_id,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # --- Research question threads / M2 reports -------------------------
+
+    def ensure_research_question_thread(self, rq_id: str, *, source_type: str = "m1_knowledge", source_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        timestamp = now()
+        payload = json.dumps(source_payload or {}, ensure_ascii=False)
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO research_question_threads(rq_id,source_type,source_payload_json,created_at,updated_at)
+                   VALUES (?,?,?,?,?) ON CONFLICT(rq_id) DO UPDATE SET
+                   source_type=CASE WHEN excluded.source_type<>'' THEN excluded.source_type ELSE research_question_threads.source_type END,
+                   source_payload_json=CASE WHEN excluded.source_payload_json<>'{}' THEN excluded.source_payload_json ELSE research_question_threads.source_payload_json END,
+                   updated_at=excluded.updated_at""",
+                (rq_id, source_type or "m1_knowledge", payload, timestamp, timestamp),
+            )
+            rq = conn.execute("SELECT question FROM research_questions WHERE rq_id=?", (rq_id,)).fetchone()
+            if rq:
+                exists = conn.execute("SELECT 1 FROM research_question_versions WHERE rq_id=? LIMIT 1", (rq_id,)).fetchone()
+                if not exists:
+                    conn.execute(
+                        "INSERT INTO research_question_versions VALUES (?,?,?,?,?,?)",
+                        (f"rqv-{uuid.uuid4().hex[:12]}", rq_id, 1, str(rq["question"]), "초기 질문", timestamp),
+                    )
+            row = conn.execute("SELECT * FROM research_question_threads WHERE rq_id=?", (rq_id,)).fetchone()
+        item = dict(row) if row else {}
+        if item:
+            item["source_payload"] = json.loads(item.pop("source_payload_json") or "{}")
+        return item
+
+    def create_research_question_thread(self, *, question: str, source_type: str, rationale: str, research_context: str = "", source_payload: dict[str, Any] | None = None, status: str = "interested") -> dict[str, Any]:
+        rq = self.upsert_research_question({
+            "question": question, "rationale": rationale or f"{source_type}에서 시작된 질문",
+            "research_context": research_context, "status": status,
+        })
+        self.ensure_research_question_thread(str(rq["rq_id"]), source_type=source_type, source_payload=source_payload or {})
+        return self.research_question_thread(str(rq["rq_id"])) or rq
+
+    def research_question_thread(self, rq_id: str) -> dict[str, Any] | None:
+        rq = self.research_question(rq_id)
+        if not rq:
+            return None
+        with self.connect() as conn:
+            meta = conn.execute("SELECT * FROM research_question_threads WHERE rq_id=?", (rq_id,)).fetchone()
+            versions = conn.execute("SELECT * FROM research_question_versions WHERE rq_id=? ORDER BY version_no ASC", (rq_id,)).fetchall()
+        result = dict(rq)
+        if meta:
+            result["source_type"] = str(meta["source_type"])
+            result["source_payload"] = json.loads(meta["source_payload_json"] or "{}")
+        else:
+            result["source_type"] = "m1_knowledge"
+            result["source_payload"] = {}
+        result["versions"] = [dict(row) for row in versions]
+        return result
+
+    def refine_research_question(self, rq_id: str, new_question: str, change_reason: str = "") -> bool:
+        new_question = new_question.strip()
+        if not new_question:
+            return False
+        timestamp = now()
+        with self.connect() as conn:
+            current = conn.execute("SELECT question FROM research_questions WHERE rq_id=? AND deleted_at IS NULL", (rq_id,)).fetchone()
+            if not current:
+                return False
+            max_version = conn.execute("SELECT COALESCE(MAX(version_no),0) FROM research_question_versions WHERE rq_id=?", (rq_id,)).fetchone()[0]
+            if max_version == 0:
+                conn.execute("INSERT INTO research_question_versions VALUES (?,?,?,?,?,?)", (f"rqv-{uuid.uuid4().hex[:12]}", rq_id, 1, str(current["question"]), "초기 질문", timestamp))
+                max_version = 1
+            try:
+                conn.execute("UPDATE research_questions SET question=?, updated_at=? WHERE rq_id=?", (new_question, timestamp, rq_id))
+            except sqlite3.IntegrityError:
+                raise ValueError("같은 질문이 다른 활성 Thread에 이미 있습니다.")
+            conn.execute("INSERT INTO research_question_versions VALUES (?,?,?,?,?,?)", (f"rqv-{uuid.uuid4().hex[:12]}", rq_id, int(max_version)+1, new_question, change_reason.strip(), timestamp))
+            conn.execute("UPDATE research_question_threads SET updated_at=? WHERE rq_id=?", (timestamp, rq_id))
+        self.add_research_question_change(rq_id, "question_refined", f"질문이 구체화되었습니다: {new_question}")
+        return True
+
+    def save_m2_report(self, *, rq_id: str, report_text: str, context_text: str, evidence_card_ids: list[str], generation_mode: str, report_type: str = "research_review", case_id: str = "", knowledge_gaps: str = "") -> dict[str, Any]:
+        rq = self.research_question(rq_id)
+        if not rq:
+            raise ValueError("연구질문 Thread를 찾을 수 없습니다.")
+        report_id, timestamp = f"m2r-{uuid.uuid4().hex[:12]}", now()
+        evidence = list(dict.fromkeys(str(item) for item in evidence_card_ids if str(item)))
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO m2_reports VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (report_id, rq_id, case_id, report_type, generation_mode, str(rq["question"]), context_text.strip(),
+                 json.dumps(evidence, ensure_ascii=False), report_text.strip(), knowledge_gaps.strip(), "active", timestamp, None, None),
+            )
+            if knowledge_gaps.strip():
+                conn.execute(
+                    "UPDATE research_questions SET exploration_need=?, updated_at=? WHERE rq_id=? AND deleted_at IS NULL",
+                    (knowledge_gaps.strip(), timestamp, rq_id),
+                )
+        self.add_research_question_change(rq_id, "m2_report_created", f"M2 보고서가 생성되었습니다 ({generation_mode}).")
+        return self.m2_report(report_id) or {}
+
+    @staticmethod
+    def _m2_report_row(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        item = dict(row)
+        item["evidence_card_ids"] = json.loads(item.pop("evidence_card_ids_json") or "[]")
+        return item
+
+    def m2_report(self, report_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM m2_reports WHERE report_id=?", (report_id,)).fetchone()
+        return self._m2_report_row(row) if row else None
+
+    def m2_reports(self, rq_id: str | None = None, *, include_archived: bool = True, limit: int = 200) -> list[dict[str, Any]]:
+        query = "SELECT * FROM m2_reports WHERE deleted_at IS NULL"
+        values: list[Any] = []
+        if rq_id:
+            query += " AND rq_id=?"; values.append(rq_id)
+        if not include_archived:
+            query += " AND archived_at IS NULL"
+        query += " ORDER BY created_at DESC LIMIT ?"; values.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, values).fetchall()
+        return [self._m2_report_row(row) for row in rows]
+
+    def archive_m2_report(self, report_id: str, archived: bool = True) -> bool:
+        with self.connect() as conn:
+            result = conn.execute("UPDATE m2_reports SET archived_at=?, status=? WHERE report_id=? AND deleted_at IS NULL", (now() if archived else None, "archived" if archived else "active", report_id))
+        return result.rowcount == 1
+
+    def delete_m2_report(self, report_id: str) -> bool:
+        with self.connect() as conn:
+            result = conn.execute("UPDATE m2_reports SET deleted_at=?, status='deleted' WHERE report_id=? AND deleted_at IS NULL", (now(), report_id))
+        return result.rowcount == 1
 
     # --- Ontology schema -------------------------------------------------
 
@@ -1215,6 +1626,15 @@ class Ledger:
             values.extend([now(), paper_id])
             conn.execute(f"UPDATE paper_shelf SET {', '.join(sets)}, updated_at=? WHERE paper_id=?", values)
             self._record_paper_event(conn, paper_id, "state_updated", {"importance": shelf_status, "reading_status": reading_status})
+
+    def update_shelf_pdf_path(self, paper_id: str, pdf_path: str) -> None:
+        """Update only the machine-local original path for a shelf paper."""
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE paper_shelf SET pdf_path=?, updated_at=? WHERE paper_id=?",
+                (str(pdf_path or ""), now(), paper_id),
+            )
+            self._record_paper_event(conn, paper_id, "local_pdf_updated", {"pdf_path": str(pdf_path or "")})
 
     def delete_shelf_paper(self, paper_id: str) -> dict[str, int]:
         """Remove one shelf asset and its paper-specific working records.

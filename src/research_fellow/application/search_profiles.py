@@ -257,35 +257,53 @@ def attach_relevance(candidates: list[dict[str, Any]], draft: str | None) -> lis
     } for candidate in candidates]
 
 
+def screen_abstract_batches(
+    profile: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    reviewer: Callable[[str], str | None] | None,
+    *,
+    batch_size: int = 20,
+    existing_reviews: dict[str, dict[str, Any]] | None = None,
+    on_batch_completed: Callable[[int, list[dict[str, Any]]], None] | None = None,
+) -> dict[str, dict[str, Any]]:
+    reviewed_by_id: dict[str, dict[str, Any]] = dict(existing_reviews or {})
+    size = max(5, min(int(batch_size), 25))
+    for offset in range(0, len(candidates), size):
+        batch = candidates[offset : offset + size]
+        missing = [item for item in batch if item.get("source_id") not in reviewed_by_id]
+        if not missing:
+            continue
+        reviewed = attach_relevance(
+            missing, reviewer(abstract_relevance_prompt(profile, missing)) if reviewer else None,
+        )
+        for item in reviewed:
+            reviewed_by_id[item["source_id"]] = item
+        if on_batch_completed:
+            on_batch_completed(offset // size + 1, reviewed)
+    return reviewed_by_id
+
+
 def shortlist_candidates(
     profile: dict[str, Any], candidates: list[dict[str, Any]], reviewer: Callable[[str], str | None] | None,
+    *, batch_size: int = 20, existing_reviews: dict[str, dict[str, Any]] | None = None,
+    on_batch_completed: Callable[[int, list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep the first 100 results as a log, but spend M2 review on only five.
-
-    The deterministic first pass prevents a large, slow LLM prompt.  The approved
-    Intent's question and context are deliberately included, not merely keywords.
-    """
+    """Review up to 100 abstracts in resumable batches and keep the top five."""
     context = " ".join([profile.get("title", ""), profile.get("question", ""), profile.get("context", ""), *profile.get("keywords", [])])
     terms = {term.lower() for term in re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", context)}
 
     def lexical_score(candidate: dict[str, Any]) -> tuple[int, str]:
         text = f"{candidate.get('title', '')} {candidate.get('summary', '')}".lower()
         matched = [term for term in terms if term in text]
-        # Title matches are more discriminative than an incidental abstract token.
         title = candidate.get("title", "").lower()
         return (sum(3 if term in title else 1 for term in matched), ", ".join(matched[:8]))
 
-    # A 100-paper prompt is too large for a local model. Each batch returns only
-    # compact ID/level/rationale lines, while still seeing the complete Intent.
-    reviewed_by_id: dict[str, dict[str, Any]] = {}
-    for offset in range(0, len(candidates), 25):
-        batch = candidates[offset : offset + 25]
-        reviewed_by_id.update({item["source_id"]: item for item in attach_relevance(
-            batch, reviewer(abstract_relevance_prompt(profile, batch)) if reviewer else None,
-        )})
+    reviewed_by_id = screen_abstract_batches(
+        profile, candidates, reviewer, batch_size=batch_size, existing_reviews=existing_reviews,
+        on_batch_completed=on_batch_completed,
+    )
     order = {"high": 0, "medium": 1, "low": 2, "unreviewed": 3}
     def citation_signal(candidate: dict[str, Any]) -> float:
-        # Citation is a supporting importance signal, never a substitute for topical relevance.
         import math
         count = candidate.get("citation_count")
         try:
@@ -304,55 +322,49 @@ def shortlist_candidates(
     enriched = []
     for candidate in candidates:
         score, matched = lexical_score(candidate)
-        if candidate["source_id"] in shortlist_ids:
-            enriched.append({**reviewed_by_id[candidate["source_id"]], "abstract_shortlist": True, "context_match_score": score, "context_match_terms": matched})
-        else:
-            enriched.append({
-                **candidate,
-                "abstract_shortlist": False,
-                "context_match_score": score,
-                "context_match_terms": matched,
-                "relevance": reviewed_by_id[candidate["source_id"]]["relevance"],
-                "evidence_status": "abstract_only_pending",
-            })
+        reviewed = reviewed_by_id[candidate["source_id"]]
+        enriched.append({
+            **reviewed,
+            "abstract_shortlist": candidate["source_id"] in shortlist_ids,
+            "context_match_score": score,
+            "context_match_terms": matched,
+            "evidence_status": "abstract_only_pending",
+        })
     return enriched
+
+
+def search_profile_candidates(profile: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Run only external search + citation enrichment; no LLM triage."""
+    candidates, attempted = [], []
+    for label, expression in query_ladder(profile):
+        found = arxiv_search(expression, max_results=30)
+        attempted.append(f"{label} [{len(found)}건]: {expression}")
+        known_ids = {item["source_id"]: index for index, item in enumerate(candidates)}
+        for candidate in found:
+            if candidate["source_id"] in known_ids:
+                prior = candidates[known_ids[candidate["source_id"]]]
+                scopes = prior.setdefault("query_scopes", [prior.get("query_scope", "")])
+                if label not in scopes:
+                    scopes.append(label)
+                continue
+            candidates.append({**candidate, "query_scope": label, "query_scopes": [label]})
+            known_ids[candidate["source_id"]] = len(candidates) - 1
+    candidates = enrich_citation_counts(candidates[:100])
+    return " → ".join(attempted), candidates
 
 
 def run_profile(ledger: Ledger, profile: dict[str, Any], trigger: str, reviewer: Callable[[str], str | None] | None = None) -> dict[str, Any]:
     query = " AND ".join(profile.get("keywords", []))
     try:
-        candidates, attempted = [], []
-        for label, expression in query_ladder(profile):
-            # Every strategy is independently observable in the execution log.
-            # A per-query cap preserves diversity before the final 100-paper cap.
-            found = arxiv_search(expression, max_results=30)
-            attempted.append(f"{label} [{len(found)}건]: {expression}")
-            known_ids = {item["source_id"]: index for index, item in enumerate(candidates)}
-            for candidate in found:
-                if candidate["source_id"] in known_ids:
-                    prior = candidates[known_ids[candidate["source_id"]]]
-                    scopes = prior.setdefault("query_scopes", [prior.get("query_scope", "")])
-                    if label not in scopes:
-                        scopes.append(label)
-                    continue
-                candidates.append({**candidate, "query_scope": label, "query_scopes": [label]})
-                known_ids[candidate["source_id"]] = len(candidates) - 1
-        candidates = candidates[:100]
-        # Citation count is a secondary ranking signal shown to the researcher.
-        # Search continues even when Semantic Scholar is unavailable.
-        candidates = enrich_citation_counts(candidates)
-        query = " → ".join(attempted)
+        query, candidates = search_profile_candidates(profile)
         candidates = shortlist_candidates(profile, candidates, reviewer)
         status = "completed" if candidates else "completed_no_candidates"
         run_id = ledger.record_search_run(profile["profile_id"], trigger, query, candidates, status)
-        # An Intent represents one discovery task. Keep the profile and its
-        # audit trail, but remove it from both the visible and scheduled queue.
         ledger.complete_search_profile(profile["profile_id"])
         return {"run_id": run_id, "query": query, "candidates": candidates, "status": status, "error": ""}
     except (ArxivError, ValueError) as error:
         run_id = ledger.record_search_run(profile["profile_id"], trigger, query, [], "failed", str(error))
         return {"run_id": run_id, "query": query, "candidates": [], "status": "failed", "error": str(error)}
-
 
 def scheduled_profiles(ledger: Ledger) -> list[dict[str, Any]]:
     """The nightly runner consumes active daily profiles; weekly profiles wait seven days."""

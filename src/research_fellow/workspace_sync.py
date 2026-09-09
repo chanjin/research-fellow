@@ -36,6 +36,13 @@ SYNC_TABLES = (
     "research_state_review_cards",
     "research_state_review_questions",
     "research_question_sources",
+    "research_question_changes",
+    "research_question_threads",
+    "research_question_versions",
+    "m2_reports",
+    "auto_research_runs",
+    "auto_research_failures",
+    "manual_recovery_attempts",
 )
 
 # These values describe a machine-local artifact. They are deliberately excluded

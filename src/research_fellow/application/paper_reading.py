@@ -43,6 +43,9 @@ Use these exact Korean field labels in every question block. Do not omit a field
 핵심 개념: 이후 관계 작업에 쓸 도메인 개념, 쉼표 구분
 적용 대상: Claim이 다루는 객체·상황·과업, 쉼표 구분
 적용 조건: 원문에 근거한 전제·관찰 범위·설계 제약
+카드 맥락: 이 주장이 어떤 과업·비교·문제 설정에서 나온 것인지 1~2문장
+설계 함의: 이 결과가 연구·설계·메모리/검색 선택 또는 의사결정에 주는 의미를 1~2문장
+주변 원문: 위 주장을 해석하는 데 필요한 짧은 원문 주변 문맥. 가능하면 p.N 표시 포함
 
 Paper: {paper['title']}
 Research context: {context or 'not supplied'}
@@ -53,7 +56,7 @@ Output check before responding:
 - Use Korean only.
 - First write Research summary beginning with 대상 문제, 해결 접근, 핵심 결과; then M1 research-context interpretation, Suggested shelf labels, then the question blocks. Do not write content outside these sections.
 - Return one to five complete question blocks by default, and never more than ten, separated by ---.
-- Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건.
+- Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건, 카드 맥락, 설계 함의, 주변 원문.
 - Every Evidence value must include p.N and a short source hint.
 - Prefer fewer complete blocks to an incomplete response. Keep every non-evidence field concise (one or two sentences); give exactly two evidence locations unless one is genuinely unavailable.
 """
@@ -72,6 +75,9 @@ _READING_FIELD_ALIASES = {
         "suggested applies to": "suggested_applies_to", "추천 적용 대상": "suggested_applies_to", "제안 적용 대상": "suggested_applies_to", "applies to": "suggested_applies_to", "적용 대상": "suggested_applies_to",
         "suggested conditions": "suggested_conditions", "추천 적용 조건": "suggested_conditions", "제안 조건": "suggested_conditions", "conditions": "suggested_conditions", "적용 조건": "suggested_conditions",
         "suggested limits": "suggested_limits", "추천 한계": "suggested_limits", "제한": "suggested_limits", "limits": "suggested_limits",
+        "card context": "suggested_context", "context": "suggested_context", "카드 맥락": "suggested_context", "맥락": "suggested_context",
+        "design implication": "suggested_implication", "implication": "suggested_implication", "설계 함의": "suggested_implication", "함의": "suggested_implication",
+        "source excerpt": "suggested_source_excerpt", "nearby source text": "suggested_source_excerpt", "주변 원문": "suggested_source_excerpt", "원문 맥락": "suggested_source_excerpt",
 }
 
 
@@ -158,6 +164,9 @@ def parse_reading_questions(text: str) -> list[dict[str, Any]]:
                 "suggested_applies_to": values.get("suggested_applies_to", ""),
                 "suggested_conditions": values.get("suggested_conditions", ""),
                 "suggested_limits": values.get("suggested_limits", ""),
+                "suggested_context": values.get("suggested_context", ""),
+                "suggested_implication": values.get("suggested_implication", ""),
+                "suggested_source_excerpt": values.get("suggested_source_excerpt", ""),
             })
 
     for line in text.splitlines():
@@ -264,7 +273,11 @@ def promote_question(ledger: Ledger, paper: dict[str, Any], item: dict[str, Any]
     """Turn a reviewed reading interpretation into a claim candidate, not a question card."""
     card = KnowledgeCard(
         card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}", title=item["question"][:72], source_kind="external_paper",
-        claim=item["tentative_answer"], explanation=comment, labels=[], evidence_excerpt="\n".join(item["evidence"])[:1600],
+        claim=item["tentative_answer"], explanation=comment,
+        context=str(item.get("suggested_context") or item.get("question") or ""),
+        implication=str(item.get("suggested_implication") or item.get("research_relevance") or ""),
+        source_excerpt=str(item.get("suggested_source_excerpt") or "\n".join(item.get("evidence", [])))[:3200],
+        labels=[], evidence_excerpt="\n".join(item["evidence"])[:1600],
         evidence_pages=[], citation_markers=[], conditions="not_assessed", limits=item["uncertainty"],
         provenance={
             "source_name": paper["title"], "paper_id": paper["paper_id"], "grounding": "paper_reading_review",

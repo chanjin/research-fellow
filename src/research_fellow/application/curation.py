@@ -62,6 +62,22 @@ def _evidence_is_grounded(excerpt: str, source_text: str) -> bool:
     return len(excerpt_terms) >= 4 and (sum(term in source_terms for term in excerpt_terms) / len(excerpt_terms)) >= 0.85
 
 
+
+def _surrounding_excerpt(source_text: str, evidence_excerpt: str, radius: int = 500) -> str:
+    """Return bounded source context around the evidence when a literal match is available."""
+    source = source_text or ""
+    evidence = (evidence_excerpt or "").strip()
+    if not source:
+        return ""
+    if evidence:
+        pos = source.find(evidence)
+        if pos >= 0:
+            start = max(0, pos - radius)
+            end = min(len(source), pos + len(evidence) + radius)
+            return source[start:end].strip()[:3200]
+    return source[: min(len(source), 1800)].strip()
+
+
 def normalize_candidate_draft(
     *, title: str, source_kind: str, page: ExtractedPage, labels: list[str], index: int, text_draft: str = "", source_text: str | None = None,
 ) -> CandidateDraftResult:
@@ -89,6 +105,9 @@ def normalize_candidate_draft(
         title=fields.get("title", "").strip() or _compact_title(claim),
         source_kind=SOURCE_KINDS.get(source_kind, source_kind),
         claim=claim,
+        context=fields.get("context", "").strip(),
+        implication=fields.get("implication", "").strip(),
+        source_excerpt=(fields.get("source_excerpt", "").strip() or _surrounding_excerpt(evidence_source, excerpt)),
         labels=[part.strip() for part in fields.get("labels", ",".join(labels)).split(",") if part.strip()],
         evidence_excerpt=excerpt,
         evidence_pages=[],

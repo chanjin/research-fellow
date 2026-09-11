@@ -36,6 +36,8 @@ PROMPT_CATALOG = (
     PromptTemplate("m1_lineage_overview.j2", "M1 · 계보 종합 의견", "승인 관계 그래프의 중심 주제·흐름·공백 해석"),
     PromptTemplate("m1_literature_review_synthesis.j2", "M1 · 자동 문헌탐색 종합 보고", "초록 100편 선별과 상위 5편 본문 비교를 연구자용 보고서로 종합"),
     PromptTemplate("m1_auto_search_strategy.j2", "M1 · 자동 영문 Boolean 검색전략", "자동 Intent를 영어 개념 그룹과 OR/AND Boolean query 3~5개로 변환"),
+    PromptTemplate("m1_ontology_type_suggestion.j2", "M1 · 온톨로지 타입 후보", "미분류 지식카드에 기존 타입 재사용 또는 신규 Facet-Type 후보 제안"),
+    PromptTemplate("m1_ontology_relation_suggestion.j2", "M1 · 온톨로지 관계 후보", "승인된 카드 타입을 기준으로 Type 간 관계 후보 제안"),
     PromptTemplate("m1_revalidation_review.j2", "M1 · 재검증", "상충·출처 재확인 후보 검토"),
     PromptTemplate("m2_research_review.j2", "M2 · 연구 검토", "연구 질문의 근거 기반 검토"),
     PromptTemplate("m2_research_direction.j2", "M2 · 연구 상태·방향", "ResearchState 기반 검토와 M1 Intent 후보"),

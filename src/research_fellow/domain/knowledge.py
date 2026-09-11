@@ -40,6 +40,10 @@ class KnowledgeCard(BaseModel):
     claim: str = Field(min_length=8)
     # Optional so existing approved JSONL cards remain valid.
     explanation: str = ""
+    # Research-useful context around the claim. These fields are optional so legacy cards remain valid.
+    context: str = ""
+    implication: str = ""
+    source_excerpt: str = Field(default="", max_length=3200)
     labels: list[str] = Field(default_factory=list)
     # These fields make approved cards retrievable as knowledge records rather
     # than as unstructured notes. Defaults preserve every existing JSONL card.
@@ -93,6 +97,9 @@ FIELD_ALIASES = {
     "pages": "evidence_pages", "쪽수": "evidence_pages", "citation": "citation_markers", "인용": "citation_markers",
     "labels": "labels", "레이블": "labels", "conditions": "conditions", "조건": "conditions",
     "limits": "limits", "한계": "limits",
+    "context": "context", "맥락": "context", "카드 맥락": "context",
+    "implication": "implication", "함의": "implication", "설계 함의": "implication",
+    "source excerpt": "source_excerpt", "source_excerpt": "source_excerpt", "주변 원문": "source_excerpt", "원문 맥락": "source_excerpt",
 }
 
 

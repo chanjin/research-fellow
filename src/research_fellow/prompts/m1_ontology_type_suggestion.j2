@@ -1,0 +1,82 @@
+You are assisting a domain researcher with human-in-the-loop ontology curation.
+You MUST NOT finalize the ontology. Propose candidates for researcher approval.
+
+Ontology model:
+- Facet is an optional stereotype / key that classifies Types.
+- Type is the value assigned to a knowledge card.
+- One card may have multiple Facet-Type assignments.
+- Prefer reusing an existing Type when it adequately captures the card.
+- Propose a new Type only when existing Types lose an important semantic distinction.
+- If the Facet is uncertain, set "facet" to "" rather than inventing one.
+
+TARGET KNOWLEDGE CARD
+ID: {{ card.card_id }}
+Title: {{ card.title }}
+Claim: {{ card.claim }}
+{% if card.get('context') %}Card Context: {{ card.context }}{% endif %}
+{% if card.get('implication') %}Research/Design Implication: {{ card.implication }}{% endif %}
+{% if card.get('source_excerpt') %}Nearby Source Excerpt: {{ card.source_excerpt }}{% endif %}
+{% if card.get('conditions') %}Conditions: {{ card.conditions }}{% endif %}
+{% if source_paper %}
+SOURCE PAPER
+Title: {{ source_paper.title }}
+{% if source_paper.labels %}Paper Labels: {{ source_paper.labels|join(', ') }}
+Note: Paper Labels are source-level research context only. Do NOT convert them directly into ontology Types without card-level semantic evidence.
+{% endif %}
+{% if source_paper.abstract %}Abstract: {{ source_paper.abstract }}{% elif source_analysis and source_analysis.summary %}Paper analysis summary (abstract unavailable): {{ source_analysis.summary }}{% endif %}
+{% endif %}
+{% if card.get('limits') %}Limits: {{ card.limits }}{% endif %}
+{% if card.get('labels') %}Labels: {{ card.labels|join(', ') }}{% endif %}
+
+SIMILAR KNOWLEDGE CARDS
+{% for c in similar_cards %}
+- [{{ c.card_id }}] {{ c.title }}
+  Claim: {{ c.claim }}
+  Similarity: {{ c.similarity_score }} / {{ c.selection_reason }}
+  {% if c.source_paper_title %}Source paper: {{ c.source_paper_title }}{% endif %}
+  {% if c.source_paper_labels %}Paper Labels: {{ c.source_paper_labels|join(', ') }}{% endif %}
+  Existing types:
+  {% if c.ontology_types %}{% for t in c.ontology_types %}  - {{ t.facet_name or '(no facet)' }} = {{ t.name }}
+  {% endfor %}{% else %}  - none
+  {% endif %}
+{% endfor %}
+
+EXISTING FACETS
+{% for f in facets %}- {{ f.name }}{% if f.description %}: {{ f.description }}{% endif %}
+{% endfor %}
+
+EXISTING TYPES
+{% for t in types %}- type_id={{ t.type_id }} | {{ t.facet_name or '(no facet)' }} = {{ t.name }}{% if t.description %} | {{ t.description }}{% endif %}
+{% endfor %}
+
+TASK
+1. First decide whether one or more EXISTING types fit this card.
+2. If an existing type fits, use action="assign_existing" and copy its exact type_id and name.
+3. Only if a meaningful distinction is missing, use action="create_new".
+4. For every new Type, compare it with up to 5 most similar existing Types. Give one concise line describing the difference from each.
+5. Facet-Type should be represented as key-value when the Facet is clear. When Facet inference is weak, leave facet empty and still propose the Type.
+6. Do not create near-duplicate names or merely lexical variants of existing Types.
+
+Return ONLY valid JSON:
+{
+  "summary": "one or two sentence interpretation of the card for ontology curation",
+  "recommendations": [
+    {
+      "action": "assign_existing|create_new|needs_review",
+      "facet": "existing facet name or empty string",
+      "type_id": "required only for assign_existing",
+      "type": "type name",
+      "description": "optional concise type definition",
+      "confidence": 0.0,
+      "reason": "why this assignment/type is useful",
+      "similar_types": [
+        {
+          "type_id": "existing type id",
+          "type": "existing type name",
+          "similarity": "high|medium|low",
+          "difference": "one-line distinction"
+        }
+      ]
+    }
+  ]
+}

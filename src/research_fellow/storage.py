@@ -161,6 +161,12 @@ class Ledger:
                     ON paper_shelf(source_id) WHERE source_id <> '';
                 CREATE INDEX IF NOT EXISTS idx_paper_shelf_status
                     ON paper_shelf(shelf_status, reading_status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS paper_abstracts (
+                    paper_id TEXT PRIMARY KEY,
+                    abstract TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
+                );
                 CREATE TABLE IF NOT EXISTS paper_analyses (
                     paper_id TEXT PRIMARY KEY,
                     research_question TEXT NOT NULL DEFAULT '',
@@ -184,7 +190,8 @@ class Ledger:
                     research_relevance TEXT NOT NULL DEFAULT '', suggested_ontology TEXT NOT NULL DEFAULT '',
                     suggested_labels TEXT NOT NULL DEFAULT '', suggested_title TEXT NOT NULL DEFAULT '', suggested_concepts TEXT NOT NULL DEFAULT '',
                     suggested_applies_to TEXT NOT NULL DEFAULT '', suggested_conditions TEXT NOT NULL DEFAULT '',
-                    suggested_limits TEXT NOT NULL DEFAULT '',
+                    suggested_limits TEXT NOT NULL DEFAULT '', suggested_context TEXT NOT NULL DEFAULT '',
+                    suggested_implication TEXT NOT NULL DEFAULT '', suggested_source_excerpt TEXT NOT NULL DEFAULT '',
                     researcher_comment TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'proposed',
                     promotion_request_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
@@ -362,6 +369,54 @@ class Ledger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_m2_reports_rq ON m2_reports(rq_id, created_at DESC);
 
+                CREATE TABLE IF NOT EXISTS sensemaking_threads (
+                    thread_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    linked_rq_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_sensemaking_threads_status
+                    ON sensemaking_threads(status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS sensemaking_turns (
+                    turn_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    evidence_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                    quick_papers_json TEXT NOT NULL DEFAULT '[]',
+                    generation_mode TEXT NOT NULL DEFAULT 'internal_llm',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(thread_id) REFERENCES sensemaking_threads(thread_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_sensemaking_turns_thread
+                    ON sensemaking_turns(thread_id, created_at ASC);
+
+                CREATE TABLE IF NOT EXISTS thread_current_states (
+                    thread_kind TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    current_question TEXT NOT NULL DEFAULT '',
+                    body_text TEXT NOT NULL,
+                    generation_mode TEXT NOT NULL DEFAULT 'internal_llm',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(thread_kind, thread_id)
+                );
+                CREATE TABLE IF NOT EXISTS thread_report_snapshots (
+                    report_id TEXT PRIMARY KEY,
+                    thread_kind TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body_text TEXT NOT NULL,
+                    generation_mode TEXT NOT NULL DEFAULT 'internal_llm',
+                    created_at TEXT NOT NULL,
+                    archived_at TEXT,
+                    deleted_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_thread_report_snapshots_thread
+                    ON thread_report_snapshots(thread_kind, thread_id, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS auto_research_runs (
                     run_id TEXT PRIMARY KEY,
                     review_id TEXT NOT NULL DEFAULT '',
@@ -471,13 +526,13 @@ class Ledger:
                 conn.execute("ALTER TABLE paper_reading_questions ADD COLUMN research_relevance TEXT NOT NULL DEFAULT ''")
             if "suggested_ontology" not in reading_question_columns:
                 conn.execute("ALTER TABLE paper_reading_questions ADD COLUMN suggested_ontology TEXT NOT NULL DEFAULT ''")
-            for column in ("suggested_labels", "suggested_title", "suggested_concepts", "suggested_applies_to", "suggested_conditions", "suggested_limits"):
+            for column in ("suggested_labels", "suggested_title", "suggested_concepts", "suggested_applies_to", "suggested_conditions", "suggested_limits", "suggested_context", "suggested_implication", "suggested_source_excerpt"):
                 if column not in reading_question_columns:
                     conn.execute(f"ALTER TABLE paper_reading_questions ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             ontology_type_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_types)").fetchall()}
             if "facet_id" not in ontology_type_columns:
                 conn.execute("ALTER TABLE ontology_types ADD COLUMN facet_id TEXT")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "14"))
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "16"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()
@@ -1374,6 +1429,136 @@ class Ledger:
             result = conn.execute("UPDATE m2_reports SET deleted_at=?, status='deleted' WHERE report_id=? AND deleted_at IS NULL", (now(), report_id))
         return result.rowcount == 1
 
+    # --- Research Sensemaking ---------------------------------------------
+
+    def create_sensemaking_thread(self, title: str, first_message: str = "") -> dict[str, Any]:
+        thread_id, timestamp = f"sm-{uuid.uuid4().hex[:12]}", now()
+        title = title.strip() or (first_message.strip()[:90] if first_message.strip() else "새 Sensemaking Thread")
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO sensemaking_threads VALUES (?,?,?,?,?,?,NULL)",
+                (thread_id, title, "active", "", timestamp, timestamp),
+            )
+        if first_message.strip():
+            self.add_sensemaking_turn(thread_id, "user", first_message)
+        return self.sensemaking_thread(thread_id) or {}
+
+    def sensemaking_threads(self, *, include_archived: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM sensemaking_threads"
+        values: list[Any] = []
+        if not include_archived:
+            query += " WHERE archived_at IS NULL"
+        query += " ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC LIMIT ?"
+        values.append(max(1, min(int(limit), 500)))
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, values).fetchall()]
+
+    def sensemaking_thread(self, thread_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM sensemaking_threads WHERE thread_id=?", (thread_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_sensemaking_turn(self, thread_id: str, role: str, content: str, *, evidence_card_ids: list[str] | None = None, quick_papers: list[dict[str, Any]] | None = None, generation_mode: str = "internal_llm") -> dict[str, Any]:
+        if role not in {"user", "assistant"}:
+            raise ValueError("Sensemaking turn role은 user 또는 assistant여야 합니다.")
+        turn_id, timestamp = f"smt-{uuid.uuid4().hex[:12]}", now()
+        evidence = list(dict.fromkeys(str(x) for x in (evidence_card_ids or []) if str(x)))
+        papers = list(quick_papers or [])[:20]
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO sensemaking_turns VALUES (?,?,?,?,?,?,?,?)",
+                (turn_id, thread_id, role, content.strip(), json.dumps(evidence, ensure_ascii=False), json.dumps(papers, ensure_ascii=False), generation_mode, timestamp),
+            )
+            conn.execute("UPDATE sensemaking_threads SET updated_at=? WHERE thread_id=?", (timestamp, thread_id))
+        return self.sensemaking_turn(turn_id) or {}
+
+    def sensemaking_turn(self, turn_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM sensemaking_turns WHERE turn_id=?", (turn_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["evidence_card_ids"] = json.loads(item.pop("evidence_card_ids_json") or "[]")
+        item["quick_papers"] = json.loads(item.pop("quick_papers_json") or "[]")
+        return item
+
+    def sensemaking_turns(self, thread_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM sensemaking_turns WHERE thread_id=? ORDER BY created_at ASC", (thread_id,)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["evidence_card_ids"] = json.loads(item.pop("evidence_card_ids_json") or "[]")
+            item["quick_papers"] = json.loads(item.pop("quick_papers_json") or "[]")
+            result.append(item)
+        return result
+
+    def link_sensemaking_to_rq(self, thread_id: str, rq_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE sensemaking_threads SET linked_rq_id=?, updated_at=? WHERE thread_id=?", (rq_id, now(), thread_id))
+
+    def archive_sensemaking_thread(self, thread_id: str, archived: bool = True) -> bool:
+        timestamp = now()
+        with self.connect() as conn:
+            result = conn.execute(
+                "UPDATE sensemaking_threads SET archived_at=?, status=?, updated_at=? WHERE thread_id=?",
+                (timestamp if archived else None, "archived" if archived else "active", timestamp, thread_id),
+            )
+        return result.rowcount == 1
+
+    # --- Shared thread current state / report snapshots -------------------
+
+    def save_thread_current_state(self, *, thread_kind: str, thread_id: str, current_question: str, body_text: str, generation_mode: str = "internal_llm") -> dict[str, Any]:
+        if thread_kind not in {"sensemaking", "research_question"}:
+            raise ValueError("지원하지 않는 thread_kind입니다.")
+        timestamp = now()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO thread_current_states(thread_kind,thread_id,current_question,body_text,generation_mode,updated_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(thread_kind,thread_id) DO UPDATE SET
+                   current_question=excluded.current_question, body_text=excluded.body_text,
+                   generation_mode=excluded.generation_mode, updated_at=excluded.updated_at""",
+                (thread_kind, thread_id, current_question.strip(), body_text.strip(), generation_mode, timestamp),
+            )
+            row = conn.execute("SELECT * FROM thread_current_states WHERE thread_kind=? AND thread_id=?", (thread_kind, thread_id)).fetchone()
+        return dict(row) if row else {}
+
+    def thread_current_state(self, thread_kind: str, thread_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM thread_current_states WHERE thread_kind=? AND thread_id=?", (thread_kind, thread_id)).fetchone()
+        return dict(row) if row else None
+
+    def create_thread_report_snapshot(self, *, thread_kind: str, thread_id: str, title: str, body_text: str, generation_mode: str = "internal_llm") -> dict[str, Any]:
+        report_id, timestamp = f"trp-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO thread_report_snapshots VALUES (?,?,?,?,?,?,?,?,NULL)",
+                (report_id, thread_kind, thread_id, title.strip(), body_text.strip(), generation_mode, timestamp, None),
+            )
+            row = conn.execute("SELECT * FROM thread_report_snapshots WHERE report_id=?", (report_id,)).fetchone()
+        return dict(row) if row else {}
+
+    def thread_report_snapshots(self, thread_kind: str, thread_id: str, *, include_archived: bool = True, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM thread_report_snapshots WHERE thread_kind=? AND thread_id=? AND deleted_at IS NULL"
+        values: list[Any] = [thread_kind, thread_id]
+        if not include_archived:
+            query += " AND archived_at IS NULL"
+        query += " ORDER BY created_at DESC LIMIT ?"
+        values.append(max(1, min(int(limit), 500)))
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, values).fetchall()]
+
+    def archive_thread_report_snapshot(self, report_id: str, archived: bool = True) -> bool:
+        with self.connect() as conn:
+            result = conn.execute("UPDATE thread_report_snapshots SET archived_at=? WHERE report_id=? AND deleted_at IS NULL", (now() if archived else None, report_id))
+        return result.rowcount == 1
+
+    def delete_thread_report_snapshot(self, report_id: str) -> bool:
+        with self.connect() as conn:
+            result = conn.execute("UPDATE thread_report_snapshots SET deleted_at=? WHERE report_id=? AND deleted_at IS NULL", (now(), report_id))
+        return result.rowcount == 1
+
     # --- Ontology schema -------------------------------------------------
 
     def create_ontology_facet(self, name: str, description: str = "") -> dict[str, Any]:
@@ -1580,17 +1765,30 @@ class Ledger:
                  str(paper.get("shelf_status", "reference")), str(paper.get("reading_status", "unread")),
                  str(paper.get("asset_type", "paper")), str(paper.get("intake_source", "manual")), timestamp, timestamp),
             )
+            abstract = str(paper.get("abstract") or paper.get("summary") or "").strip()
+            if abstract:
+                conn.execute(
+                    "INSERT INTO paper_abstracts (paper_id, abstract, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(paper_id) DO UPDATE SET abstract=excluded.abstract, updated_at=excluded.updated_at",
+                    (paper_id, abstract, timestamp),
+                )
             self._record_paper_event(conn, paper_id, "intake", {"source": paper.get("intake_source", "manual")})
         return self.shelf_paper(paper_id) or {}
 
     def shelf_papers(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM paper_shelf ORDER BY updated_at DESC").fetchall()
+            rows = conn.execute(
+                "SELECT p.*, COALESCE(a.abstract, '') AS abstract FROM paper_shelf p "
+                "LEFT JOIN paper_abstracts a ON a.paper_id=p.paper_id ORDER BY p.updated_at DESC"
+            ).fetchall()
         return [self._paper_shelf_row(row) for row in rows]
 
     def shelf_paper(self, paper_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM paper_shelf WHERE paper_id=?", (paper_id,)).fetchone()
+            row = conn.execute(
+                "SELECT p.*, COALESCE(a.abstract, '') AS abstract FROM paper_shelf p "
+                "LEFT JOIN paper_abstracts a ON a.paper_id=p.paper_id WHERE p.paper_id=?", (paper_id,)
+            ).fetchone()
         return self._paper_shelf_row(row) if row else None
 
     def _paper_shelf_row(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -1667,6 +1865,7 @@ class Ledger:
             deleted["questions"] = conn.execute(
                 "DELETE FROM paper_reading_questions WHERE paper_id=?", (paper_id,)
             ).rowcount
+            conn.execute("DELETE FROM paper_abstracts WHERE paper_id=?", (paper_id,))
             deleted["analysis"] = conn.execute(
                 "DELETE FROM paper_analyses WHERE paper_id=?", (paper_id,)
             ).rowcount
@@ -1761,6 +1960,9 @@ class Ledger:
                     "suggested_applies_to": str(question.get("suggested_applies_to", "")),
                     "suggested_conditions": str(question.get("suggested_conditions", "")),
                     "suggested_limits": str(question.get("suggested_limits", "")),
+                    "suggested_context": str(question.get("suggested_context", "")),
+                    "suggested_implication": str(question.get("suggested_implication", "")),
+                    "suggested_source_excerpt": str(question.get("suggested_source_excerpt", "")),
                     "researcher_comment": "",
                     "status": "proposed",
                     "promotion_request_id": None,

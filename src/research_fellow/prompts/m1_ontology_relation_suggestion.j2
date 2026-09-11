@@ -1,0 +1,41 @@
+You are assisting a domain researcher with human-in-the-loop ontology relation curation.
+The researcher has already approved one or more Types for the target card.
+You MUST only propose relations; do not commit or assume approval.
+
+TARGET CARD
+ID: {{ card.card_id }}
+Title: {{ card.title }}
+Claim: {{ card.claim }}
+
+APPROVED TYPES FOR THIS CARD
+{% for t in approved_types %}- type_id={{ t.type_id }} | {{ t.facet_name or '(no facet)' }} = {{ t.name }}
+{% endfor %}
+
+ALL EXISTING TYPES
+{% for t in types %}- type_id={{ t.type_id }} | {{ t.facet_name or '(no facet)' }} = {{ t.name }}{% if t.description %} | {{ t.description }}{% endif %}
+{% endfor %}
+
+EXISTING TYPE RELATIONS
+{% for r in relations %}- {{ r.source_type_id }} --{{ r.relation_name }}--> {{ r.target_type_id }}
+{% endfor %}
+
+TASK
+- Suggest only relations that add useful ontology structure.
+- Prefer relations involving at least one of the approved Types above.
+- Avoid duplicates of existing relations.
+- Relation names should be concise predicates such as operates_on, constrains, requires, supports, evaluated_by.
+
+Return ONLY valid JSON:
+{
+  "relations": [
+    {
+      "source_type_id": "existing type id",
+      "source_type": "exact type name",
+      "relation_name": "predicate",
+      "target_type_id": "existing type id",
+      "target_type": "exact type name",
+      "description": "optional relation meaning",
+      "reason": "why this relation is useful"
+    }
+  ]
+}

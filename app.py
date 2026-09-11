@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable
 
@@ -38,9 +39,37 @@ from research_fellow.application.auto_literature import execute_auto_literature_
 from research_fellow.application.research_cycle import execute_auto_research_cycle
 from research_fellow.application.manual_recovery import external_recovery_prompt, validate_external_response
 from research_fellow.application.m2_threads import build_m2_thread_review_prompt, extract_knowledge_gaps, extract_refined_question, validate_manual_m2_report
+
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
+
+def _fmt_local_time(value: Any, *, with_seconds: bool = False) -> str:
+    """Render stored UTC/ISO timestamps in the UI using Asia/Seoul time."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            # Existing Research Fellow timestamps were historically stored as UTC-like naive ISO strings.
+            dt = dt.replace(tzinfo=UTC)
+        local = dt.astimezone(SEOUL_TZ)
+        return local.strftime("%Y-%m-%d %H:%M:%S" if with_seconds else "%Y-%m-%d %H:%M")
+    except Exception:
+        return raw[:19].replace("T", " ") if with_seconds else raw[:16].replace("T", " ")
+
+from research_fellow.application.thread_documents import current_state_prompt, report_snapshot_prompt
+from research_fellow.application.sensemaking import (
+    sensemaking_answer_prompt, quick_search_plan_prompt, quick_literature_search,
+    knowledge_card_candidate_prompt, parse_sensemaking_card_candidate,
+)
 from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, ensure_shelf_pdf, store_paper_upload, suggested_paper_labels
 from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, reading_prompt, unconsumed_reading_sections
 from research_fellow.application.ontology import ontology_context_dot, ontology_dot, search_cards_for_ontology
+from research_fellow.application.ontology_curation import (
+    build_curation_context, parse_relation_suggestions, parse_type_suggestions,
+    relation_suggestion_prompt, type_suggestion_prompt,
+)
 from research_fellow.application.duplicate_review import similar_approved_cards
 from research_fellow.application.management import delete_knowledge_card, delete_knowledge_relation
 from research_fellow.application.relations import (
@@ -320,7 +349,7 @@ def show_auto_literature_reports() -> None:
     for item in reports[:20]:
         payload = item.get("payload") or {}
         status = "완료" if item.get("status") == "completed" else "실패"
-        with st.expander(f"{status} · {item['created_at'][:16].replace('T', ' ')} · {payload.get('title', 'M1 자동 문헌탐색 보고')}"):
+        with st.expander(f"{status} · {_fmt_local_time(item.get('created_at'))} · {payload.get('title', 'M1 자동 문헌탐색 보고')}"):
             st.caption(
                 f"초록 검토 {payload.get('abstract_review_count', 0)}편 · 본문 비교 {payload.get('fulltext_review_count', 0)}편 · Intent {payload.get('intent_id', '')}"
             )
@@ -338,7 +367,7 @@ def show_auto_literature_reports() -> None:
                         saved = ledger.upsert_shelf_paper({
                             "title": paper.get("title", ""), "authors": [],
                             "publication_year": str(paper.get("published", ""))[:4], "source_url": paper.get("url", ""),
-                            "source_id": paper.get("source_id", ""), "pdf_path": paper.get("pdf_path", ""),
+                            "source_id": paper.get("source_id", ""), "abstract": paper.get("abstract", ""), "pdf_path": paper.get("pdf_path", ""),
                             "shelf_status": "reference", "reading_status": "unread", "asset_type": "paper", "intake_source": "auto_search",
                         })
                         st.success(f"서재함에 추가했습니다: {saved['title']}")
@@ -390,7 +419,7 @@ def show_auto_retry_tasks(model: str, use_ollama: bool) -> None:
         context = failure.get("context") or {}
         stage = failure.get("stage", "")
         title = stage_labels.get(stage, stage or "자동 연구 작업")
-        with st.expander(f"주의 필요 · {title} · {failure.get('created_at', '')[:16].replace('T', ' ')}"):
+        with st.expander(f"주의 필요 · {title} · {_fmt_local_time(failure.get('created_at'))}"):
             left, right = st.columns(2)
             left.write(f"**실패 원인:** `{failure.get('error_type', 'unknown')}`")
             right.write(f"**자동 Retry:** {failure.get('attempt_count', 0)} / 3")
@@ -686,7 +715,7 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
     cols[2].metric("새 M2 보고서", len(delta["delta"]["report_ids"]))
     cols[3].metric("현재 사실 묶음", len(groups))
     if previous:
-        st.caption(f"기준선: {previous['created_at'][:16].replace('T', ' ')} 저장 요약 이후의 변화")
+        st.caption(f"기준선: {_fmt_local_time(previous.get('created_at'))} 저장 요약 이후의 변화")
     else:
         st.info("저장된 요약이 없어 이번 실행은 현재 승인 지식을 초기 기준선으로 기록합니다.")
     if not any(delta["delta"].values()):
@@ -713,7 +742,7 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
     for item in history[:20]:
         payload = item["payload"]
         change = payload.get("delta", {})
-        with st.expander(f"{item['created_at'][:16].replace('T', ' ')} · 지식 {len(change.get('card_ids', []))} · 관계 {len(change.get('relation_ids', []))} · M2 보고서 {len(change.get('report_ids', []))}"):
+        with st.expander(f"{_fmt_local_time(item.get('created_at'))} · 지식 {len(change.get('card_ids', []))} · 관계 {len(change.get('relation_ids', []))} · M2 보고서 {len(change.get('report_ids', []))}"):
             if payload.get("is_initial_baseline"):
                 st.caption("초기 기준선")
             st.markdown(payload.get("summary", "저장된 요약 본문이 없습니다."))
@@ -903,23 +932,493 @@ def render_knowledge_card(card: dict[str, object], *, key_prefix: str = "card") 
                 st.write(f"- {item.get('source_name', '출처 미상')} · {item.get('evidence_excerpt', '')}")
 
 
-def render_ontology_workspace(semantic: bool, embedding_model: str) -> None:
+def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     """Facet-aware, multi-type ontology builder with contextual graph feedback."""
     st.subheader("온톨로지")
     st.caption("승인 지식카드에 여러 타입을 부여하고, Facet으로 타입을 묶습니다. 타입 간 관계는 Type↔Type 사이에 정의합니다.")
+    if flash := st.session_state.pop("ontology-flash", None):
+        st.success(flash)
     cards = memory.all()
     cards_by_id = {card["card_id"]: card for card in cards}
     approved_relations = ledger.active_knowledge_relations()
-    builder_tab, map_tab = st.tabs(["Ontology Builder", "Ontology Map"])
+    ai_tab, builder_tab, map_tab = st.tabs(["AI Curation", "Manual Builder", "Ontology Map"])
+
+    def _card_display_name(card_id: str) -> str:
+        card = cards_by_id.get(str(card_id), {})
+        return str(card.get("title") or card.get("claim") or card_id).strip()[:90]
+
+    def _type_display_name(type_row: dict) -> str:
+        return f"{type_row.get('facet_name') or 'Facet 미지정'} = {type_row.get('name') or type_row.get('type_id')}"
+
+    def _assignment_flash(card_id: str, type_row: dict) -> str:
+        return (
+            f"지식카드 ‘{_card_display_name(card_id)}’에 타입 "
+            f"‘{_type_display_name(type_row)}’이 지정되었고 Ontology에 반영되었습니다."
+        )
 
     def _sync_card_types(card_id: str, widget_key: str) -> None:
-        ledger.set_card_ontology_types(card_id, list(st.session_state.get(widget_key, [])))
+        selected_ids = list(st.session_state.get(widget_key, []))
+        ledger.set_card_ontology_types(card_id, selected_ids)
         st.session_state["ontology-focus-card-id"] = card_id
-        st.session_state["ontology-flash"] = "타입 지정을 반영했습니다."
+        current_type_rows = {str(t["type_id"]): t for t in ledger.ontology_types()}
+        selected_labels = [
+            _type_display_name(current_type_rows[type_id])
+            for type_id in selected_ids
+            if type_id in current_type_rows
+        ]
+        if selected_labels:
+            st.session_state["ontology-flash"] = (
+                f"지식카드 ‘{_card_display_name(card_id)}’의 타입이 "
+                f"‘{' / '.join(selected_labels)}’로 지정되었고 Ontology에 반영되었습니다."
+            )
+        else:
+            st.session_state["ontology-flash"] = (
+                f"지식카드 ‘{_card_display_name(card_id)}’의 타입 지정이 해제되었고 Ontology에 반영되었습니다."
+            )
+
+    with ai_tab:
+        st.markdown("### AI Ontology Curation")
+        st.caption("LLM은 온톨로지를 확정하지 않습니다. 미분류 카드 주변의 유사 카드와 기존 타입을 바탕으로 후보만 제안하고, 연구자가 승인한 항목만 반영합니다.")
+
+        def _clear_ai_card_work_state(card_id: str) -> None:
+            """Clear temporary curation state only when the researcher finishes this card."""
+            st.session_state.pop("ontology-ai-target-card", None)
+            for prefix in (
+                "ontology-ai-type-result-",
+                "ontology-ai-type-error-",
+                "ontology-ai-external-type-response-",
+                "ontology-ai-rel-result-",
+                "ontology-ai-rel-error-",
+                "ontology-ai-external-rel-response-",
+            ):
+                st.session_state.pop(f"{prefix}{card_id}", None)
+
+        facets = ledger.ontology_facets()
+        types = ledger.ontology_types()
+        relations_now = ledger.ontology_type_relations()
+        # Treat a card as classified only when it currently has at least one active Type.
+        # Query card assignments directly so the metric/list reflects an approval immediately
+        # after Streamlit reruns, including assignments created from AI Curation.
+        current_types_by_card_ai = {
+            str(card.get("card_id")): ledger.ontology_types_for_card(str(card.get("card_id")))
+            for card in cards
+        }
+        untyped_cards = [
+            card for card in cards
+            if not current_types_by_card_ai.get(str(card.get("card_id")))
+        ]
+        a, b = st.columns(2)
+        a.metric("미분류 지식카드", len(untyped_cards))
+        b.metric("현재 Ontology Type", len(types))
+        # A card should stay open after its first Type is assigned so the researcher can
+        # add secondary Facet=Type assignments without searching for the card again.
+        # "Untyped" is therefore a queue condition, not a curation-complete condition.
+        untyped_ids = [str(card["card_id"]) for card in untyped_cards]
+        current_ai_target = str(st.session_state.get("ontology-ai-target-card") or "")
+        target_ids = list(untyped_ids)
+        if current_ai_target in cards_by_id and current_ai_target not in target_ids:
+            target_ids.insert(0, current_ai_target)
+
+        if not untyped_cards and not target_ids:
+            st.success("현재 승인 지식카드는 모두 하나 이상의 타입이 지정되어 있습니다.")
+            st.caption("추가 타입 지정이 필요하면 Manual Builder에서 카드를 찾거나, AI Curation에서 작업 중이던 카드는 완료하기 전까지 계속 열어둘 수 있습니다.")
+        else:
+            target_id = st.selectbox(
+                "온톨로지 작업 카드",
+                target_ids,
+                format_func=lambda cid: (
+                    ("[미분류] " if cid in untyped_ids else "[추가 타입 지정] ")
+                    + f"{cards_by_id[cid].get('title') or cards_by_id[cid].get('claim','')[:70]}"
+                ),
+                key="ontology-ai-target-card",
+                help="타입을 하나 승인해도 현재 카드는 계속 열려 있습니다. 필요한 추가 타입을 모두 지정한 뒤 '이 카드 타입 지정 완료'를 누르세요.",
+            )
+            target = cards_by_id[target_id]
+            assigned_now = ledger.ontology_types_for_card(target_id)
+            if assigned_now:
+                status_cols = st.columns([3, 1])
+                status_cols[0].success(
+                    f"미분류 해소 · 현재 {len(assigned_now)}개 Type 지정됨 · 추가 Type을 계속 지정할 수 있습니다."
+                )
+                if status_cols[1].button(
+                    "이 카드 타입 지정 완료",
+                    key=f"ontology-ai-complete-card-{target_id}",
+                    help="현재 카드 작업을 닫고 다음 미분류 카드로 이동합니다. Type assignment는 그대로 유지됩니다.",
+                ):
+                    _clear_ai_card_work_state(target_id)
+                    st.rerun()
+            st.markdown(f"#### {target.get('title') or '제목 없음'}")
+            st.write(target.get("claim") or "")
+            if target.get("context"):
+                st.caption("맥락 · " + str(target.get("context")))
+            if target.get("implication"):
+                st.info("연구/설계 함의 · " + str(target.get("implication")))
+
+            provenance = target.get("provenance") or {}
+            source_paper = None
+            paper_id = str(provenance.get("paper_id") or "").strip()
+            if paper_id:
+                source_paper = ledger.shelf_paper(paper_id)
+            if source_paper is None:
+                source_name = str(provenance.get("source_name") or "").strip().casefold()
+                if source_name:
+                    source_paper = next((p for p in ledger.shelf_papers() if str(p.get("title", "")).strip().casefold() == source_name), None)
+            source_analysis = ledger.paper_analysis(source_paper["paper_id"]) if source_paper else None
+            paper_labels = list((source_paper or {}).get("labels") or [])
+            with st.expander("논문 · 원문 맥락 보기", expanded=False):
+                st.markdown(f"**논문 제목**  \n{(source_paper or {}).get('title') or provenance.get('source_name') or '출처 제목 정보 없음'}")
+                abstract = str((source_paper or {}).get("abstract") or "").strip()
+                if abstract:
+                    st.markdown("**초록**")
+                    st.write(abstract)
+                elif source_analysis and str(source_analysis.get("summary") or "").strip():
+                    st.markdown("**초록 미보존 · 논문 분석 요약**")
+                    st.write(source_analysis.get("summary"))
+                else:
+                    st.caption("초록이 저장되어 있지 않습니다. 앞으로 arXiv/문헌탐색에서 서재함에 등록하는 논문은 초록도 함께 보존합니다.")
+                if target.get("source_excerpt"):
+                    st.markdown("**카드 주변 원문**")
+                    st.text_area(
+                        "주변 원문", value=str(target.get("source_excerpt")), height=180,
+                        key=f"ontology-source-excerpt-{target_id}", disabled=True, label_visibility="collapsed",
+                    )
+                elif target.get("evidence_excerpt"):
+                    st.markdown("**근거 원문**")
+                    st.write(target.get("evidence_excerpt"))
+                if target.get("evidence_excerpt") and target.get("source_excerpt"):
+                    st.markdown("**직접 근거**")
+                    st.write(target.get("evidence_excerpt"))
+
+            # Human correction path: AI Curation must not become read-only after
+            # suggestions are generated. Researchers can add/remove any existing
+            # Types directly on the current card, before or after AI approval.
+            with st.container(border=True):
+                st.markdown("##### 현재 카드 타입 · 연구자 직접 보정")
+                live_facets = ledger.ontology_facets()
+                live_types = ledger.ontology_types()
+                live_assigned = ledger.ontology_types_for_card(target_id)
+                live_ids = [str(t["type_id"]) for t in live_assigned]
+                type_options = [str(t["type_id"]) for t in live_types]
+                type_label = {
+                    str(t["type_id"]): f"{t.get('facet_name') or 'Facet 미지정'} = {t['name']}"
+                    for t in live_types
+                }
+                selected_live_ids = st.multiselect(
+                    "현재 카드에 지정할 Type",
+                    options=type_options,
+                    default=[type_id for type_id in live_ids if type_id in type_options],
+                    format_func=lambda type_id: type_label.get(type_id, type_id),
+                    key=f"ontology-ai-manual-types-{target_id}-{'-'.join(sorted(live_ids)) or 'none'}",
+                    help="여러 Type을 동시에 지정할 수 있습니다. 기존 Type을 제거하면 카드에서 해당 Type assignment가 해제됩니다.",
+                )
+                mc1, mc2 = st.columns([1, 2])
+                if mc1.button("타입 변경 반영", key=f"ontology-ai-manual-apply-{target_id}"):
+                    before_ids = set(live_ids)
+                    after_ids = set(selected_live_ids)
+                    added_ids = after_ids - before_ids
+                    removed_ids = before_ids - after_ids
+                    ledger.set_card_ontology_types(target_id, selected_live_ids)
+                    st.session_state["ontology-focus-card-id"] = target_id
+                    type_by_id = {str(t["type_id"]): t for t in live_types}
+                    changes = []
+                    if added_ids:
+                        changes.append("추가: " + ", ".join(_type_display_name(type_by_id[x]) for x in added_ids if x in type_by_id))
+                    if removed_ids:
+                        changes.append("제거: " + ", ".join(_type_display_name(type_by_id[x]) for x in removed_ids if x in type_by_id))
+                    detail = " / ".join(changes) if changes else "변경 없음"
+                    st.session_state["ontology-flash"] = (
+                        f"지식카드 ‘{_card_display_name(target_id)}’의 타입 지정이 반영되었습니다. {detail}"
+                    )
+                    st.rerun()
+                mc2.caption("AI 후보와 무관하게 기존 Type을 직접 추가·삭제할 수 있습니다.")
+
+                with st.expander("+ 새 Type을 직접 만들어 현재 카드에 추가"):
+                    if paper_labels:
+                        st.caption("출처 논문 Labels · " + " · ".join(paper_labels))
+                    else:
+                        st.caption("출처 논문 Labels · 없음")
+                    facet_options_manual = [None, *[str(f["facet_id"]) for f in live_facets], "__new__"]
+                    manual_facet = st.selectbox(
+                        "Facet (선택 사항)",
+                        facet_options_manual,
+                        format_func=lambda value: (
+                            "Facet 미지정" if value is None else
+                            "+ 새 Facet" if value == "__new__" else
+                            next((f["name"] for f in live_facets if str(f["facet_id"]) == value), value)
+                        ),
+                        key=f"ontology-ai-manual-new-facet-{target_id}",
+                    )
+                    manual_new_facet_name = ""
+                    if manual_facet == "__new__":
+                        manual_new_facet_name = st.text_input(
+                            "새 Facet 이름", key=f"ontology-ai-manual-new-facet-name-{target_id}"
+                        )
+                    manual_type_name = st.text_input(
+                        "새 Type 이름", key=f"ontology-ai-manual-new-type-name-{target_id}"
+                    )
+                    manual_type_desc = st.text_area(
+                        "Type 설명 (선택)", height=90, key=f"ontology-ai-manual-new-type-desc-{target_id}"
+                    )
+                    if st.button(
+                        "새 Type 생성 · 현재 카드에 추가",
+                        key=f"ontology-ai-manual-create-type-{target_id}",
+                        disabled=not manual_type_name.strip(),
+                    ):
+                        try:
+                            facet_id = manual_facet
+                            if manual_facet == "__new__":
+                                if not manual_new_facet_name.strip():
+                                    raise ValueError("새 Facet 이름을 입력하거나 Facet 미지정을 선택하세요.")
+                                existing_facet = next(
+                                    (f for f in live_facets if str(f["name"]).casefold() == manual_new_facet_name.strip().casefold()),
+                                    None,
+                                )
+                                facet_id = (
+                                    existing_facet["facet_id"] if existing_facet
+                                    else ledger.create_ontology_facet(manual_new_facet_name.strip())["facet_id"]
+                                )
+                            created = ledger.create_ontology_type(
+                                manual_type_name.strip(), manual_type_desc.strip(), facet_id
+                            )
+                            current_ids = [str(t["type_id"]) for t in ledger.ontology_types_for_card(target_id)]
+                            ledger.set_card_ontology_types(target_id, [*current_ids, str(created["type_id"])])
+                            st.session_state["ontology-focus-card-id"] = target_id
+                            created_row = {**created, "facet_name": next((f["name"] for f in ledger.ontology_facets() if str(f["facet_id"]) == str(created.get("facet_id"))), None)}
+                            st.session_state["ontology-flash"] = _assignment_flash(target_id, created_row)
+                            st.rerun()
+                        except ValueError as error:
+                            st.error(str(error))
+
+            context = build_curation_context(
+                retriever, target, cards, approved_relations, ledger,
+                embedding_model=embedding_model, semantic=semantic, limit=10,
+            )
+            left, right = st.columns([1.05, 1.35], gap="large")
+            with left:
+                st.markdown("##### 유사 카드와 기존 타입")
+                if not context.similar_cards:
+                    st.info("유사 카드가 아직 충분히 검색되지 않았습니다. LLM은 기존 전체 타입도 함께 비교합니다.")
+                for similar in context.similar_cards[:8]:
+                    label = similar.get("title") or similar.get("claim", "")[:80]
+                    with st.expander(f"{label} · {similar.get('similarity_score', 0):.2f}"):
+                        st.write(similar.get("claim") or "")
+                        similar_paper_labels = list(similar.get("source_paper_labels") or [])
+                        if similar_paper_labels:
+                            st.caption("출처 논문 레이블 · " + " · ".join(similar_paper_labels))
+                        if similar.get("source_paper_title"):
+                            st.caption("출처 논문 · " + str(similar.get("source_paper_title")))
+                        assigned = similar.get("ontology_types") or []
+                        if assigned:
+                            st.caption("현재 타입 · 이 카드에 바로 적용 가능")
+                            for type_idx, t in enumerate(assigned):
+                                tc1, tc2 = st.columns([3, 1])
+                                tc1.markdown(f"**{t.get('facet_name') or 'Facet 미지정'}** = {t['name']}")
+                                if tc2.button(
+                                    "이 타입 적용",
+                                    key=f"ontology-ai-use-similar-type-{target_id}-{similar.get('card_id')}-{t['type_id']}-{type_idx}",
+                                ):
+                                    ledger.assign_cards_to_ontology_type(t["type_id"], [target_id])
+                                    st.session_state["ontology-focus-card-id"] = target_id
+                                    st.session_state["ontology-flash"] = _assignment_flash(target_id, t)
+                                    st.rerun()
+                        else:
+                            st.caption("타입 미지정")
+
+            with right:
+                prompt = type_suggestion_prompt(context)
+                st.session_state[f"ontology-ai-type-prompt-{target_id}"] = prompt
+                c1, c2 = st.columns(2)
+                if c1.button("AI 타입 후보 생성", type="primary", key=f"ontology-ai-generate-{target_id}"):
+                    result = llm_draft_result(prompt, model, use_ollama)
+                    if result.text:
+                        try:
+                            st.session_state[f"ontology-ai-type-result-{target_id}"] = parse_type_suggestions(
+                                result.text, existing_facets=facets, existing_types=types
+                            )
+                            st.session_state.pop(f"ontology-ai-type-error-{target_id}", None)
+                        except ValueError as error:
+                            st.session_state[f"ontology-ai-type-error-{target_id}"] = str(error)
+                    else:
+                        st.session_state[f"ontology-ai-type-error-{target_id}"] = result.error or "LLM 응답이 없습니다."
+                c2.caption("긴 프롬프트이거나 로컬/무료 LLM이 불안정하면 아래 외부 LLM 경로를 사용하세요.")
+
+                with st.expander("외부 LLM으로 타입 후보 만들기", expanded=bool(st.session_state.get(f"ontology-ai-type-error-{target_id}"))):
+                    external_prompt = st.text_area(
+                        "외부 LLM용 프롬프트",
+                        value=prompt,
+                        height=360,
+                        key=f"ontology-ai-external-type-prompt-{target_id}",
+                        help="고정 높이 영역입니다. 내용이 길면 내부 스크롤로 확인한 뒤 전체를 복사해 외부 LLM에 전달하세요.",
+                    )
+                    external_response = st.text_area(
+                        "외부 LLM 응답 붙여넣기",
+                        height=280,
+                        key=f"ontology-ai-external-type-response-{target_id}",
+                        placeholder="외부 LLM의 JSON 응답을 여기에 붙여넣으세요.",
+                    )
+                    if st.button("외부 응답 검증 · 후보로 반영", key=f"ontology-ai-apply-external-type-{target_id}", disabled=not external_response.strip()):
+                        try:
+                            st.session_state[f"ontology-ai-type-result-{target_id}"] = parse_type_suggestions(
+                                external_response, existing_facets=facets, existing_types=types
+                            )
+                            st.session_state.pop(f"ontology-ai-type-error-{target_id}", None)
+                            st.success("외부 응답을 검증해 타입 후보로 반영했습니다.")
+                        except ValueError as error:
+                            st.error(str(error))
+
+                if error := st.session_state.get(f"ontology-ai-type-error-{target_id}"):
+                    st.warning(f"타입 후보 생성 실패: {error}")
+
+                suggestion = st.session_state.get(f"ontology-ai-type-result-{target_id}")
+                if suggestion:
+                    if suggestion.get("summary"):
+                        st.info(suggestion["summary"])
+                    for warning in suggestion.get("warnings", []):
+                        st.warning(warning)
+                    st.markdown("##### 타입 후보 · 연구자 승인")
+                    facet_by_name = {str(f["name"]).casefold(): f for f in facets}
+                    for idx, rec in enumerate(suggestion.get("recommendations", []), start=1):
+                        action = rec.get("action")
+                        candidate_name = rec.get("type") or "이름 미정"
+                        facet_name = rec.get("facet") or "Facet 미지정"
+                        with st.container(border=True):
+                            st.markdown(f"**{idx}. {facet_name} = {candidate_name}**")
+                            st.caption(f"제안: {action} · confidence {float(rec.get('confidence') or 0):.2f}")
+                            if rec.get("reason"):
+                                st.write(rec["reason"])
+                            if action == "assign_existing" and rec.get("type_id"):
+                                if st.button("기존 타입으로 승인", key=f"ontology-ai-approve-existing-{target_id}-{idx}"):
+                                    ledger.assign_cards_to_ontology_type(rec["type_id"], [target_id])
+                                    st.session_state["ontology-focus-card-id"] = target_id
+                                    approved_type = next((t for t in ledger.ontology_types() if str(t["type_id"]) == str(rec["type_id"])), {"type_id": rec["type_id"], "name": candidate_name, "facet_name": facet_name})
+                                    st.session_state["ontology-flash"] = _assignment_flash(target_id, approved_type)
+                                    st.rerun()
+                            else:
+                                similar_types = rec.get("similar_types") or []
+                                if similar_types:
+                                    st.markdown("**유사 기존 타입 Top 5 · 차별점**")
+                                    for comparison in similar_types[:5]:
+                                        st.caption(
+                                            f"{comparison.get('type','?')} · {comparison.get('similarity','')} — {comparison.get('difference','차이 설명 없음')}"
+                                        )
+                                facet_options = [None, *[f["facet_id"] for f in facets], "__new__"]
+                                proposed_facet = facet_by_name.get(str(rec.get("facet") or "").casefold())
+                                default_facet = proposed_facet["facet_id"] if proposed_facet else ("__new__" if rec.get("facet") else None)
+                                selected_facet = st.selectbox(
+                                    "Facet (선택 사항)", facet_options,
+                                    index=facet_options.index(default_facet) if default_facet in facet_options else 0,
+                                    format_func=lambda v: "Facet 미지정" if v is None else ("+ 새 Facet" if v == "__new__" else next((f["name"] for f in facets if f["facet_id"] == v), v)),
+                                    key=f"ontology-ai-new-facet-select-{target_id}-{idx}",
+                                )
+                                new_facet_name = ""
+                                if selected_facet == "__new__":
+                                    new_facet_name = st.text_input(
+                                        "새 Facet 이름", value=str(rec.get("facet") or ""),
+                                        key=f"ontology-ai-new-facet-name-{target_id}-{idx}",
+                                    )
+                                edited_name = st.text_input(
+                                    "Type 이름", value=str(candidate_name), key=f"ontology-ai-new-type-name-{target_id}-{idx}"
+                                )
+                                edited_desc = st.text_area(
+                                    "Type 설명 (선택)", value=str(rec.get("description") or ""), height=90,
+                                    key=f"ontology-ai-new-type-desc-{target_id}-{idx}",
+                                )
+                                if st.button("이 이름으로 신규 Type 승인", key=f"ontology-ai-create-type-{target_id}-{idx}", disabled=not edited_name.strip()):
+                                    try:
+                                        facet_id = selected_facet
+                                        if selected_facet == "__new__":
+                                            if not new_facet_name.strip():
+                                                raise ValueError("새 Facet 이름을 입력하거나 Facet 미지정을 선택하세요.")
+                                            existing_facet = facet_by_name.get(new_facet_name.strip().casefold())
+                                            facet_id = existing_facet["facet_id"] if existing_facet else ledger.create_ontology_facet(new_facet_name.strip())["facet_id"]
+                                        created = ledger.create_ontology_type(edited_name, edited_desc, facet_id)
+                                        ledger.assign_cards_to_ontology_type(created["type_id"], [target_id])
+                                        st.session_state["ontology-focus-card-id"] = target_id
+                                        created_row = {**created, "facet_name": next((f["name"] for f in ledger.ontology_facets() if str(f["facet_id"]) == str(created.get("facet_id"))), None)}
+                                        st.session_state["ontology-flash"] = _assignment_flash(target_id, created_row)
+                                        st.rerun()
+                                    except ValueError as error:
+                                        st.error(str(error))
+
+            # Relation proposal is a second LLM step and only becomes available
+            # after the researcher has approved at least one Type for the card.
+            approved_for_target = ledger.ontology_types_for_card(target_id)
+            if approved_for_target:
+                st.divider()
+                st.markdown("### 승인된 Type을 기준으로 관계 후보 검토")
+                st.caption("타입 승인과 관계 승인을 분리합니다. 여기서도 LLM은 후보만 제안하며 승인된 관계만 Ontology에 반영됩니다.")
+                relation_prompt = relation_suggestion_prompt(
+                    approved_for_target, ledger.ontology_types(), ledger.ontology_type_relations(), target
+                )
+                r1, r2 = st.columns(2)
+                if r1.button("AI 관계 후보 생성", key=f"ontology-ai-rel-generate-{target_id}"):
+                    result = llm_draft_result(relation_prompt, model, use_ollama)
+                    if result.text:
+                        try:
+                            st.session_state[f"ontology-ai-rel-result-{target_id}"] = parse_relation_suggestions(
+                                result.text, existing_types=ledger.ontology_types()
+                            )
+                            st.session_state.pop(f"ontology-ai-rel-error-{target_id}", None)
+                        except ValueError as error:
+                            st.session_state[f"ontology-ai-rel-error-{target_id}"] = str(error)
+                    else:
+                        st.session_state[f"ontology-ai-rel-error-{target_id}"] = result.error or "LLM 응답이 없습니다."
+                r2.caption("관계 후보도 외부 LLM 수동 경로를 사용할 수 있습니다.")
+                with st.expander("외부 LLM으로 관계 후보 만들기", expanded=bool(st.session_state.get(f"ontology-ai-rel-error-{target_id}"))):
+                    st.text_area(
+                        "외부 LLM용 관계 프롬프트", value=relation_prompt, height=360,
+                        key=f"ontology-ai-external-rel-prompt-{target_id}",
+                    )
+                    relation_response = st.text_area(
+                        "외부 LLM 관계 응답 붙여넣기", height=280,
+                        key=f"ontology-ai-external-rel-response-{target_id}",
+                    )
+                    if st.button("외부 관계 응답 검증 · 후보로 반영", key=f"ontology-ai-external-rel-apply-{target_id}", disabled=not relation_response.strip()):
+                        try:
+                            st.session_state[f"ontology-ai-rel-result-{target_id}"] = parse_relation_suggestions(
+                                relation_response, existing_types=ledger.ontology_types()
+                            )
+                            st.session_state.pop(f"ontology-ai-rel-error-{target_id}", None)
+                            st.success("외부 응답을 관계 후보로 반영했습니다.")
+                        except ValueError as error:
+                            st.error(str(error))
+                if error := st.session_state.get(f"ontology-ai-rel-error-{target_id}"):
+                    st.warning(f"관계 후보 생성 실패: {error}")
+                rel_result = st.session_state.get(f"ontology-ai-rel-result-{target_id}")
+                if rel_result:
+                    for warning in rel_result.get("warnings", []):
+                        st.warning(warning)
+                    current_relation_keys = {
+                        (r["source_type_id"], r["target_type_id"], str(r["relation_name"]).casefold())
+                        for r in ledger.ontology_type_relations()
+                    }
+                    for idx, rel in enumerate(rel_result.get("relations", []), start=1):
+                        duplicate = (rel["source_type_id"], rel["target_type_id"], rel["relation_name"].casefold()) in current_relation_keys
+                        with st.container(border=True):
+                            st.markdown(f"**{rel['source_type']} → `{rel['relation_name']}` → {rel['target_type']}**")
+                            if rel.get("reason"):
+                                st.caption(rel["reason"])
+                            if duplicate:
+                                st.info("이미 동일한 Type 관계가 존재합니다.")
+                            else:
+                                edited_rel_name = st.text_input(
+                                    "관계명", value=rel["relation_name"], key=f"ontology-ai-rel-name-{target_id}-{idx}"
+                                )
+                                edited_rel_desc = st.text_area(
+                                    "관계 설명 (선택)", value=str(rel.get("description") or ""), height=80,
+                                    key=f"ontology-ai-rel-desc-{target_id}-{idx}",
+                                )
+                                if st.button("관계 승인", key=f"ontology-ai-rel-approve-{target_id}-{idx}"):
+                                    try:
+                                        ledger.create_ontology_type_relation(
+                                            rel["source_type_id"], rel["target_type_id"], edited_rel_name, edited_rel_desc
+                                        )
+                                        st.success("관계를 승인해 Ontology에 반영했습니다.")
+                                        st.rerun()
+                                    except ValueError as error:
+                                        st.error(str(error))
 
     with builder_tab:
-        if flash := st.session_state.pop("ontology-flash", None):
-            st.success(flash)
         search_col, graph_col = st.columns([1.45, 1], gap="large")
         with search_col:
             st.markdown("### 지식카드 탐색 · 타입 부여")
@@ -979,7 +1478,8 @@ def render_ontology_workspace(semantic: bool, embedding_model: str) -> None:
                                     new_type = ledger.create_ontology_type(new_name, new_desc, facet_id)
                                     ledger.set_card_ontology_types(card["card_id"], [*current_ids, new_type["type_id"]])
                                     st.session_state["ontology-focus-card-id"] = card["card_id"]
-                                    st.session_state["ontology-flash"] = f"{new_type['name']} 타입을 만들고 카드에 추가했습니다."
+                                    created_row = {**new_type, "facet_name": next((f["name"] for f in ledger.ontology_facets() if str(f["facet_id"]) == str(new_type.get("facet_id"))), None)}
+                                    st.session_state["ontology-flash"] = _assignment_flash(card["card_id"], created_row)
                                     st.rerun()
                                 except ValueError as error: st.error(str(error))
                     with c2:
@@ -1375,7 +1875,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
             if events:
                 with st.expander(f"이 논문의 이력 · {len(events)}건"):
                     for event in events:
-                        st.caption(f"{event['created_at'][:16].replace('T', ' ')} · {event['event_type']}")
+                        st.caption(f"{_fmt_local_time(event.get('created_at'))} · {event['event_type']}")
             with st.form(f"paper-shelf-note-{paper['paper_id']}"):
                 labels = st.text_input("연구자 서재 레이블 (쉼표로 구분 · 최대 5개)", value=", ".join(paper.get("labels", [])), key=f"shelf-labels-{paper['paper_id']}")
                 note = st.text_area("연구자 메모", value=analysis.get("researcher_note", ""), key=f"shelf-note-{paper['paper_id']}")
@@ -1574,7 +2074,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             except Exception as error:
                 st.error(f"점진적 지식화에 실패했습니다: {error}")
     with ontology_tab:
-        render_ontology_workspace(semantic, embedding_model)
+        render_ontology_workspace(model, use_ollama, semantic, embedding_model)
     with relation_tab:
         cards = memory.all()
         cards_by_id = {card["card_id"]: card for card in cards}
@@ -1982,7 +2482,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 if runs:
                     st.markdown("**탐색·논문 관련성 로그**")
                     for run in runs:
-                        with st.expander(f"{run['created_at'][:16].replace('T', ' ')} · {run['trigger']} · {run['status']} · 후보 {len(run['candidates'])}"):
+                        with st.expander(f"{_fmt_local_time(run.get('created_at'))} · {run['trigger']} · {run['status']} · 후보 {len(run['candidates'])}"):
                             st.caption(f"검색 전략: {run['query']}")
                             if run["error"]:
                                 st.error(run["error"])
@@ -2007,7 +2507,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                     saved = ledger.upsert_shelf_paper({
                                         "title": candidate["title"], "authors": candidate.get("authors", []),
                                         "publication_year": candidate.get("published", "")[:4], "source_url": candidate.get("url", ""),
-                                        "source_id": candidate.get("source_id", ""), "pdf_path": candidate.get("pdf_path", ""),
+                                        "source_id": candidate.get("source_id", ""), "abstract": candidate.get("summary", ""), "pdf_path": candidate.get("pdf_path", ""),
                                         "shelf_status": "reference", "reading_status": "unread", "asset_type": "paper", "intake_source": "search",
                                     })
                                     st.success(f"서재함에 추가했습니다: {saved['title']}")
@@ -2236,7 +2736,7 @@ def render_research_question_backlog() -> None:
                     for link in source_links:
                         grouped.setdefault(str(link.get("review_id", "")), []).append(link)
                     for review_id, links in grouped.items():
-                        completed_at = str(links[0].get("review_completed_at", ""))[:19].replace("T", " ")
+                        completed_at = _fmt_local_time(links[0].get("review_completed_at"), with_seconds=True)
                         mode_label = "자동" if links[0].get("review_mode") == "auto" else "수동"
                         st.caption(f"{review_id} · {mode_label} 검토 · {completed_at or '진행 중'} · 근거 카드 {len(links)}건")
                         for link in links:
@@ -2250,7 +2750,7 @@ def render_research_question_backlog() -> None:
                         st.write(f"- `{card_id}` · {card.get('claim', card.get('title', '')) if card else ''}")
             latest_change = ledger.latest_research_question_change(rq_id)
             if latest_change:
-                st.caption(f"최근 변화 · {str(latest_change.get('created_at', ''))[:16].replace('T', ' ')} · {latest_change.get('summary', '')}")
+                st.caption(f"최근 변화 · {_fmt_local_time(latest_change.get('created_at'))} · {latest_change.get('summary', '')}")
             if linked_intents:
                 st.caption(f"연결된 M1 탐색 Intent {len(linked_intents)}건")
 
@@ -2277,10 +2777,102 @@ def render_research_question_backlog() -> None:
         st.success("선택한 연구질문에서 M1 탐색 Intent 승인 안건을 만들었습니다. 연구자 홈 승인함에서 승인하면 M1 실행함으로 전달됩니다.")
 
 
+def _update_thread_current_state(
+    *, thread_kind: str, thread_id: str, title: str, current_question: str, model: str, use_ollama: bool,
+    conversation: list[dict[str, Any]] | None = None, reports: list[dict[str, Any]] | None = None, generation_mode: str = "internal_llm",
+) -> dict[str, Any] | None:
+    prior = ledger.thread_current_state(thread_kind, thread_id) or {}
+    prompt = current_state_prompt(
+        thread_kind=thread_kind, title=title, current_question=current_question,
+        prior_state=str(prior.get("body_text", "")), conversation=conversation or [], reports=reports or [],
+    )
+    result = llm_draft_result(prompt, model, use_ollama, profile="m2_report")
+    if not result.text:
+        return None
+    return ledger.save_thread_current_state(
+        thread_kind=thread_kind, thread_id=thread_id, current_question=current_question,
+        body_text=result.text, generation_mode=generation_mode,
+    )
+
+
+def _update_rq_current_state(rq_id: str, model: str, use_ollama: bool) -> dict[str, Any] | None:
+    rq = ledger.research_question_thread(rq_id) or {}
+    if not rq:
+        return None
+    versions = list(rq.get("versions") or [])
+    version_turns = [
+        {"role": "question_version", "content": f"v{v.get('version_no')}: {v.get('question','')} / {v.get('change_reason','')}"}
+        for v in versions[-6:]
+    ]
+    return _update_thread_current_state(
+        thread_kind="research_question", thread_id=rq_id,
+        title=str(rq.get("question", "Research Question")), current_question=str(rq.get("question", "")),
+        model=model, use_ollama=use_ollama, conversation=version_turns,
+        reports=ledger.m2_reports(rq_id, include_archived=False, limit=3),
+    )
+
+
+def _render_current_state_and_reports(
+    *, thread_kind: str, thread_id: str, title: str, current_question: str, model: str, use_ollama: bool,
+    refresh_callback: Callable[[], dict[str, Any] | None],
+) -> None:
+    st.markdown("### Current State")
+    state = ledger.thread_current_state(thread_kind, thread_id)
+    if state:
+        st.caption(f"마지막 업데이트 · {_fmt_local_time(state.get('updated_at'))} · {state.get('generation_mode','')}")
+        with st.container(border=True):
+            st.markdown(str(state.get("body_text", "")))
+    else:
+        st.info("아직 Current State 문서가 없습니다. 첫 답변/검토 이후 자동 생성되며 수동으로도 만들 수 있습니다.")
+
+    c1, c2 = st.columns(2)
+    if c1.button("현재 상태 다시 정리", key=f"state-refresh-{thread_kind}-{thread_id}"):
+        updated = refresh_callback()
+        if updated:
+            st.success("Current State를 최신 상태로 갱신했습니다.")
+            st.rerun()
+        else:
+            st.warning("Current State 갱신용 LLM 응답을 얻지 못했습니다.")
+    if c2.button("현재 결론 보고서 만들기", key=f"state-report-{thread_kind}-{thread_id}", disabled=not bool(state)):
+        current = ledger.thread_current_state(thread_kind, thread_id) or {}
+        prompt = report_snapshot_prompt(
+            thread_kind=thread_kind, title=title, current_state=str(current.get("body_text", "")),
+            current_question=current_question,
+        )
+        result = llm_draft_result(prompt, model, use_ollama, profile="m2_report")
+        if result.text:
+            ledger.create_thread_report_snapshot(
+                thread_kind=thread_kind, thread_id=thread_id, title=title,
+                body_text=result.text, generation_mode="internal_llm",
+            )
+            st.success("현재 시점의 결론 보고서를 Snapshot으로 저장했습니다.")
+            st.rerun()
+        else:
+            st.warning(f"보고서 생성에 실패했습니다: {result.error}")
+
+    snapshots = ledger.thread_report_snapshots(thread_kind, thread_id, include_archived=True, limit=30)
+    if snapshots:
+        with st.expander(f"결론 보고서 이력 {len(snapshots)}건", expanded=False):
+            for item in snapshots:
+                state_label = "보관" if item.get("archived_at") else "활성"
+                with st.container(border=True):
+                    st.markdown(f"**{item.get('title','')}**")
+                    st.caption(f"{_fmt_local_time(item.get('created_at'))} · {state_label} · {item.get('generation_mode','')}")
+                    st.markdown(str(item.get("body_text", "")))
+                    a, d = st.columns(2)
+                    if a.button("보관 해제" if item.get("archived_at") else "보관", key=f"snapshot-archive-{item['report_id']}"):
+                        ledger.archive_thread_report_snapshot(str(item["report_id"]), archived=not bool(item.get("archived_at")))
+                        st.rerun()
+                    if d.button("보고서 제거", key=f"snapshot-delete-{item['report_id']}"):
+                        ledger.delete_thread_report_snapshot(str(item["report_id"]))
+                        st.rerun()
+
+
 M2_SOURCE_LABELS = {
     "m1_knowledge": "M1 새 지식",
     "researcher": "연구자 질문",
     "external_advisory": "외부 자문",
+    "sensemaking": "Research Sensemaking",
 }
 
 
@@ -2401,7 +2993,13 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
         st.markdown(f"**도출 이유**  \n{rq['rationale']}")
     latest_change = ledger.latest_research_question_change(rq_id)
     if latest_change:
-        st.info(f"최근 변화 · {str(latest_change.get('created_at', ''))[:16].replace('T', ' ')} · {latest_change.get('summary', '')}")
+        st.info(f"최근 변화 · {_fmt_local_time(latest_change.get('created_at'))} · {latest_change.get('summary', '')}")
+
+    _render_current_state_and_reports(
+        thread_kind="research_question", thread_id=rq_id, title=str(rq.get("question", "")),
+        current_question=str(rq.get("question", "")), model=model, use_ollama=use_ollama,
+        refresh_callback=lambda: _update_rq_current_state(rq_id, model, use_ollama),
+    )
 
     status_cols = st.columns(4)
     for col, status, label in zip(status_cols, ["interested", "exploring", "hold", "rejected"], ["관심", "탐색중", "보류", "제외"]):
@@ -2415,7 +3013,10 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
             for card_id in source_ids:
                 card = cards_by_id.get(card_id)
                 if card:
-                    st.write(f"- `{card_id}` · {card.get('claim', card.get('title', ''))}")
+                    st.markdown(f"**`{card_id}` · {card.get('claim', card.get('title', ''))}**")
+                    paper_title = _card_source_paper_title(card)
+                    if paper_title:
+                        st.caption(f"참고논문 · {paper_title}")
 
     st.divider()
     st.markdown("### M2 Knowledge Review")
@@ -2441,6 +3042,9 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
     for cid in selected_ids[:8]:
         card = cards_by_id[cid]
         st.caption(f"`{cid}` · {card.get('claim', '')[:220]}")
+        paper_title = _card_source_paper_title(card)
+        if paper_title:
+            st.caption(f"참고논문 · {paper_title}")
 
     selected_cards = [cards_by_id[cid] for cid in selected_ids if cid in cards_by_id]
     prompt = build_m2_thread_review_prompt(
@@ -2453,8 +3057,9 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
             result = llm_draft_result(prompt, model, use_ollama)
             if result.text:
                 report = _save_m2_thread_report(rq, context, selected_ids, result.text, "internal_llm")
+                _update_rq_current_state(rq_id, model, use_ollama)
                 st.session_state[f"thread-latest-report-{rq_id}"] = report["report_id"]
-                st.success("M2 Report를 저장했습니다.")
+                st.success("M2 Report를 저장하고 Current State를 갱신했습니다.")
                 st.rerun()
             else:
                 st.warning(f"M2 Report 생성에 실패했습니다: {result.error}")
@@ -2477,7 +3082,8 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
                 st.error(message)
             else:
                 report = _save_m2_thread_report(rq, context, selected_ids, manual_response, "manual_external_llm")
-                st.success(message + " M2 Report로 저장했습니다.")
+                _update_rq_current_state(rq_id, model, use_ollama)
+                st.success(message + " M2 Report로 저장하고 Current State를 갱신했습니다.")
                 st.session_state[f"thread-latest-report-{rq_id}"] = report["report_id"]
                 st.rerun()
 
@@ -2485,7 +3091,7 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
     if reports:
         latest = reports[0]
         st.divider(); st.markdown("### 최신 M2 Report")
-        st.caption(f"{latest['created_at'][:16].replace('T',' ')} · {latest['generation_mode']} · 근거 카드 {len(latest['evidence_card_ids'])}건")
+        st.caption(f"{_fmt_local_time(latest.get('created_at'))} · {latest['generation_mode']} · 근거 카드 {len(latest['evidence_card_ids'])}건")
         st.markdown(latest["report_text"])
         if latest.get("knowledge_gaps"):
             st.warning("**지식 보강 필요**  \n" + latest["knowledge_gaps"])
@@ -2500,6 +3106,7 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
             reason = st.text_input("변경 이유", value="M2 Report와 보강된 지식을 반영한 질문 구체화", key=f"thread-refine-reason-{rq_id}")
             if st.button("질문 새 버전으로 반영", key=f"thread-refine-apply-{rq_id}", disabled=not new_question.strip() or new_question.strip() == str(rq.get("question", "")).strip()):
                 ledger.refine_research_question(rq_id, new_question, reason)
+                _update_rq_current_state(rq_id, model, use_ollama)
                 st.rerun()
 
     versions = rq.get("versions", [])
@@ -2511,7 +3118,7 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
                 st.caption(version["change_reason"])
         for report in reports:
             archive = "보관" if report.get("archived_at") else "활성"
-            st.write(f"- Report `{report['report_id']}` · {archive} · {report['created_at'][:16].replace('T',' ')}")
+            st.write(f"- Report `{report['report_id']}` · {archive} · {_fmt_local_time(report.get('created_at'))}")
         for intent in linked_intents:
             st.write(f"- M1 Intent `{intent['intent_id']}`")
 
@@ -2706,7 +3313,7 @@ def _render_m1_new_information(model: str, use_ollama: bool, semantic: bool, emb
     if reviews:
         st.markdown("### 최근 연구상태 검토")
         for review in reviews:
-            st.write(f"- {review['created_at'][:16].replace('T',' ')} · {'자동' if review.get('mode')=='auto' else '수동'} · 새 카드 {review.get('source_card_count',0)}건 → RQ {review.get('generated_rq_count',0)}건")
+            st.write(f"- {_fmt_local_time(review.get('created_at'))} · {'자동' if review.get('mode')=='auto' else '수동'} · 새 카드 {review.get('source_card_count',0)}건 → RQ {review.get('generated_rq_count',0)}건")
             if review.get("summary"):
                 st.caption(review["summary"])
 
@@ -2732,7 +3339,7 @@ def _render_m2_report_history() -> None:
         rq = ledger.research_question_thread(str(report["rq_id"])) or {}
         source = M2_SOURCE_LABELS.get(str(rq.get("source_type", "m1_knowledge")), "M1 새 지식")
         state = "보관" if report.get("archived_at") else "활성"
-        with st.expander(f"{report['created_at'][:16].replace('T',' ')} · {source} · {state} · {report['question_text']}"):
+        with st.expander(f"{_fmt_local_time(report.get('created_at'))} · {source} · {state} · {report['question_text']}"):
             st.caption(f"Report {report['report_id']} · {report['generation_mode']} · 근거 카드 {len(report['evidence_card_ids'])}건")
             if report.get("context_text"):
                 st.markdown(f"**검토 맥락/코멘트**  \n{report['context_text']}")
@@ -2747,6 +3354,385 @@ def _render_m2_report_history() -> None:
                 ledger.archive_m2_report(report["report_id"], archived=not bool(report.get("archived_at"))); st.rerun()
             if c2.button("보고서 제거", key=f"m2-report-delete-{report['report_id']}"):
                 ledger.delete_m2_report(report["report_id"]); st.rerun()
+
+
+
+def _card_source_paper_title(card: dict[str, Any]) -> str:
+    """Best-effort source-paper label for a knowledge card."""
+    provenance = card.get("provenance") or {}
+    paper_id = str(provenance.get("paper_id") or "").strip()
+    if paper_id:
+        paper = ledger.shelf_paper(paper_id)
+        if paper and str(paper.get("title") or "").strip():
+            return str(paper["title"]).strip()
+    source_name = str(provenance.get("source_name") or "").strip()
+    if source_name and not source_name.lower().startswith("sensemaking:"):
+        return source_name
+    return ""
+
+
+def _render_knowledge_card_candidate_preview(card: dict[str, Any]) -> None:
+    st.markdown("#### 생성된 지식카드 후보")
+    with st.container(border=True):
+        st.markdown(f"**{card.get('title', '제목 없음')}**")
+        if card.get("claim"):
+            st.markdown(f"**Claim**  \n{card.get('claim', '')}")
+        if card.get("context"):
+            st.markdown(f"**Context**  \n{card.get('context', '')}")
+        if card.get("implication"):
+            st.markdown(f"**Implication**  \n{card.get('implication', '')}")
+        if card.get("evidence_excerpt"):
+            st.markdown(f"**Evidence**  \n{card.get('evidence_excerpt', '')}")
+        if card.get("conditions"):
+            st.markdown(f"**Conditions**  \n{card.get('conditions', '')}")
+        if card.get("limits"):
+            st.markdown(f"**Limits**  \n{card.get('limits', '')}")
+        labels = list(card.get("labels") or [])
+        if labels:
+            st.caption("Labels · " + " · ".join(str(x) for x in labels))
+
+
+
+def _sensemaking_quick_preview(text: str, limit: int = 360) -> str:
+    """Compact default preview for a long Research Fellow answer."""
+    value = " ".join(str(text or "").strip().split())
+    if not value:
+        return ""
+    # Prefer the first 2-3 sentences, then hard-cap for predictable UI density.
+    import re
+    parts = re.split(r"(?<=[.!?。！？])\s+", value)
+    preview = " ".join(parts[:3]).strip()
+    if not preview or len(preview) > limit:
+        preview = value[:limit].rstrip()
+    if len(value) > len(preview):
+        preview = preview.rstrip(" .") + "…"
+    return preview
+
+
+def _render_sensemaking_evidence(turn: dict[str, Any], cards_by_id: dict[str, dict[str, Any]], *, key_suffix: str) -> None:
+    evidence_ids = list(turn.get("evidence_card_ids") or [])
+    papers = list(turn.get("quick_papers") or [])
+    if evidence_ids:
+        with st.expander(f"기존 지식 연결 {len(evidence_ids)}건", expanded=False):
+            for cid in evidence_ids:
+                card = cards_by_id.get(str(cid), {})
+                st.markdown(f"**`{cid}` · {card.get('claim', card.get('title', ''))}**")
+                paper_title = _card_source_paper_title(card)
+                if paper_title:
+                    st.caption(f"참고논문 · {paper_title}")
+    if papers:
+        with st.expander(f"외부 문헌 맥락 {len(papers)}편", expanded=False):
+            for paper in papers[:20]:
+                cites = paper.get("citation_count")
+                cite_text = "확인 불가" if cites is None else f"{int(cites):,}회"
+                st.markdown(f"**{paper.get('title','')}** · {str(paper.get('published',''))[:4]} · 인용 {cite_text}")
+                st.caption(str(paper.get("summary", ""))[:600])
+
+
+def _render_sensemaking_thread(thread_id: str, model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    thread = ledger.sensemaking_thread(thread_id)
+    if not thread:
+        st.warning("Sensemaking Thread를 찾을 수 없습니다.")
+        return
+    turns = ledger.sensemaking_turns(thread_id)
+    latest_user = next((t for t in reversed(turns) if t.get("role") == "user"), None)
+    latest_assistant = next((t for t in reversed(turns) if t.get("role") == "assistant"), None)
+    # A newly created thread already contains its first user turn.  Treat a trailing
+    # user turn with no following assistant turn as the question waiting for
+    # interpretation instead of asking the researcher to type it again.
+    pending_user = turns[-1] if turns and turns[-1].get("role") == "user" else None
+    current_question = str(latest_user.get("content", "")) if latest_user else str(thread.get("title", ""))
+    st.markdown(f"## {thread['title']}")
+    if thread.get("linked_rq_id"):
+        rq = ledger.research_question(str(thread["linked_rq_id"]))
+        st.success(f"Research Question Thread로 연결됨 · {rq.get('question','') if rq else thread['linked_rq_id']}")
+
+    _render_current_state_and_reports(
+        thread_kind="sensemaking", thread_id=thread_id, title=str(thread.get("title", "")),
+        current_question=current_question, model=model, use_ollama=use_ollama,
+        refresh_callback=lambda: _update_thread_current_state(
+            thread_kind="sensemaking", thread_id=thread_id, title=str(thread.get("title", "")),
+            current_question=current_question, model=model, use_ollama=use_ollama,
+            conversation=ledger.sensemaking_turns(thread_id), reports=[],
+        ),
+    )
+
+    cards_by_id = {str(card.get("card_id", "")): card for card in memory.all()}
+
+    # Latest exchange first: this is the working surface immediately below Current State.
+    if latest_user or latest_assistant:
+        st.markdown("### 최신 대화")
+        with st.container(border=True):
+            if latest_user:
+                st.markdown("**연구자**")
+                st.markdown(str(latest_user.get("content", "")))
+            if latest_assistant:
+                # Keep the working surface dense: show only the quick interpretation content.
+                st.caption(_sensemaking_quick_preview(str(latest_assistant.get("content", ""))))
+                with st.expander("연구위원 전체 답변 보기", expanded=False):
+                    st.markdown(str(latest_assistant.get("content", "")))
+                _render_sensemaking_evidence(latest_assistant, cards_by_id, key_suffix="latest")
+
+    # Previous exchanges are compact and reverse-chronological.
+    previous_turns = list(turns)
+    if latest_assistant in previous_turns:
+        previous_turns.remove(latest_assistant)
+    if latest_user in previous_turns:
+        previous_turns.remove(latest_user)
+    if previous_turns:
+        st.markdown("### 이전 질의응답")
+        # Pair adjacent user/assistant turns, then show newest pairs first.
+        pairs: list[tuple[dict[str, Any] | None, dict[str, Any] | None]] = []
+        pending_user: dict[str, Any] | None = None
+        for turn in previous_turns:
+            if turn.get("role") == "user":
+                if pending_user is not None:
+                    pairs.append((pending_user, None))
+                pending_user = turn
+            else:
+                pairs.append((pending_user, turn))
+                pending_user = None
+        if pending_user is not None:
+            pairs.append((pending_user, None))
+        for idx, (user_turn, assistant_turn) in enumerate(reversed(pairs), start=1):
+            q = str((user_turn or {}).get("content", ""))
+            label = _sensemaking_quick_preview(q, 110) or "이전 대화"
+            with st.expander(f"{idx}. {label}", expanded=False):
+                if user_turn:
+                    st.markdown("**연구자**")
+                    st.markdown(q)
+                if assistant_turn:
+                    st.caption(_sensemaking_quick_preview(str(assistant_turn.get("content", ""))))
+                    with st.expander("전체 답변", expanded=False):
+                        st.markdown(str(assistant_turn.get("content", "")))
+                    _render_sensemaking_evidence(assistant_turn, cards_by_id, key_suffix=f"prev-{idx}")
+
+    st.divider()
+    if pending_user:
+        pending_question = str(pending_user.get("content", "")).strip()
+        st.markdown("### 처음 질문")
+        with st.container(border=True):
+            st.markdown(pending_question)
+            st.caption("이 질문은 아직 연구위원이 해석하지 않았습니다.")
+
+        quick_lit = st.checkbox("Quick Literature 10~20편 포함", value=False, key=f"sm-pending-quick-{thread_id}")
+        if st.button("빠르게 해석하기", key=f"sm-pending-answer-{thread_id}", type="primary", disabled=not pending_question):
+            hits = search_knowledge(pending_question, semantic, embedding_model, limit=8)
+            cards = [item.card for item in hits]
+            papers: list[dict[str, Any]] = []
+            # Exclude the unanswered user turn from conversation history because
+            # it is supplied separately as the current question.
+            prior_turns = turns[:-1]
+            if quick_lit:
+                plan_text = llm_draft(quick_search_plan_prompt(pending_question, prior_turns), model, use_ollama) or ""
+                result = quick_literature_search(plan_text, max_papers=20)
+                papers = result["papers"]
+            prompt = sensemaking_answer_prompt(
+                thread_title=str(thread["title"]), conversation=prior_turns,
+                question=pending_question, cards=cards, papers=papers,
+            )
+            answer = llm_draft(prompt, model, use_ollama) or "현재 LLM 응답을 얻지 못했습니다. 외부 LLM 수동 응답 경로를 사용해 주세요."
+            ledger.add_sensemaking_turn(
+                thread_id, "assistant", answer,
+                evidence_card_ids=[str(c.get("card_id", "")) for c in cards],
+                quick_papers=papers,
+            )
+            _update_thread_current_state(
+                thread_kind="sensemaking", thread_id=thread_id, title=str(thread.get("title", "")),
+                current_question=pending_question, model=model, use_ollama=use_ollama,
+                conversation=ledger.sensemaking_turns(thread_id), reports=[],
+            )
+            st.rerun()
+
+        with st.expander("외부 LLM으로 첫 질문 빠르게 해석", expanded=False):
+            hits = search_knowledge(pending_question, semantic, embedding_model, limit=8)
+            cards = [item.card for item in hits]
+            prior_turns = turns[:-1]
+            prompt = sensemaking_answer_prompt(
+                thread_title=str(thread["title"]), conversation=prior_turns,
+                question=pending_question, cards=cards, papers=[],
+            )
+            st.text_area("외부 LLM용 프롬프트", value=prompt, key=f"sm-pending-ext-prompt-{thread_id}", height=360)
+            manual = st.text_area("외부 LLM 응답 붙여넣기", key=f"sm-pending-ext-response-{thread_id}", height=280)
+            if st.button("수동 응답을 Thread에 반영", key=f"sm-pending-ext-apply-{thread_id}", disabled=not manual.strip()):
+                ledger.add_sensemaking_turn(
+                    thread_id, "assistant", manual.strip(),
+                    evidence_card_ids=[str(c.get("card_id", "")) for c in cards],
+                    generation_mode="manual_external_llm",
+                )
+                _update_thread_current_state(
+                    thread_kind="sensemaking", thread_id=thread_id, title=str(thread.get("title", "")),
+                    current_question=pending_question, model=model, use_ollama=use_ollama,
+                    conversation=ledger.sensemaking_turns(thread_id), reports=[],
+                    generation_mode="manual_external_llm",
+                )
+                st.rerun()
+    else:
+        st.markdown("### 이어서 물어보기")
+        question = st.text_area(
+            "추가 질문·주장·사례", key=f"sm-follow-{thread_id}", height=110,
+            placeholder="짧게 물어보세요. 기존 지식으로 먼저 답하고, 필요하면 10~20편만 빠르게 확인합니다.",
+        )
+        quick_lit = st.checkbox("Quick Literature 10~20편 포함", value=False, key=f"sm-quick-{thread_id}")
+        if st.button("빠르게 해석하기", key=f"sm-answer-{thread_id}", type="primary", disabled=not question.strip()):
+            ledger.add_sensemaking_turn(thread_id, "user", question.strip())
+            hits = search_knowledge(question, semantic, embedding_model, limit=8)
+            cards = [item.card for item in hits]
+            papers: list[dict[str, Any]] = []
+            if quick_lit:
+                plan_text = llm_draft(quick_search_plan_prompt(question, turns), model, use_ollama) or ""
+                result = quick_literature_search(plan_text, max_papers=20)
+                papers = result["papers"]
+            prompt = sensemaking_answer_prompt(
+                thread_title=str(thread["title"]), conversation=turns,
+                question=question, cards=cards, papers=papers,
+            )
+            answer = llm_draft(prompt, model, use_ollama) or "현재 LLM 응답을 얻지 못했습니다. 외부 LLM 수동 응답 경로를 사용해 주세요."
+            ledger.add_sensemaking_turn(
+                thread_id, "assistant", answer,
+                evidence_card_ids=[str(c.get("card_id", "")) for c in cards],
+                quick_papers=papers,
+            )
+            _update_thread_current_state(
+                thread_kind="sensemaking", thread_id=thread_id, title=str(thread.get("title", "")),
+                current_question=question.strip(), model=model, use_ollama=use_ollama,
+                conversation=ledger.sensemaking_turns(thread_id), reports=[],
+            )
+            st.rerun()
+
+        with st.expander("외부 LLM으로 이번 질문 빠르게 해석", expanded=False):
+            if question.strip():
+                hits = search_knowledge(question, semantic, embedding_model, limit=8)
+                cards = [item.card for item in hits]
+                prompt = sensemaking_answer_prompt(thread_title=str(thread["title"]), conversation=turns, question=question, cards=cards, papers=[])
+                st.text_area("외부 LLM용 프롬프트", value=prompt, key=f"sm-ext-prompt-{thread_id}", height=360)
+                manual = st.text_area("외부 LLM 응답 붙여넣기", key=f"sm-ext-response-{thread_id}", height=280)
+                if st.button("수동 응답을 Thread에 반영", key=f"sm-ext-apply-{thread_id}", disabled=not manual.strip()):
+                    ledger.add_sensemaking_turn(thread_id, "user", question.strip())
+                    ledger.add_sensemaking_turn(
+                        thread_id, "assistant", manual.strip(),
+                        evidence_card_ids=[str(c.get("card_id", "")) for c in cards],
+                        generation_mode="manual_external_llm",
+                    )
+                    _update_thread_current_state(
+                        thread_kind="sensemaking", thread_id=thread_id, title=str(thread.get("title", "")),
+                        current_question=question.strip(), model=model, use_ollama=use_ollama,
+                        conversation=ledger.sensemaking_turns(thread_id), reports=[], generation_mode="manual_external_llm",
+                    )
+                    st.rerun()
+            else:
+                st.caption("먼저 추가 질문·주장을 입력하면 현재 Thread와 관련 지식카드를 포함한 프롬프트를 만듭니다.")
+
+    st.divider()
+    st.markdown("### 이 대화에서 발전시키기")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Research Question으로 승격", key=f"sm-rq-{thread_id}", disabled=not latest_user):
+        rq = ledger.create_research_question_thread(
+            question=str(latest_user.get("content", "")), source_type="sensemaking",
+            rationale=f"Sensemaking Thread '{thread['title']}'에서 연구적으로 더 검토할 질문으로 승격됨",
+            research_context=str(latest_assistant.get("content", ""))[:1800] if latest_assistant else "",
+            source_payload={"sensemaking_thread_id": thread_id}, status="interested",
+        )
+        ledger.link_sensemaking_to_rq(thread_id, str(rq["rq_id"]))
+        inherited = ledger.thread_current_state("sensemaking", thread_id)
+        if inherited:
+            ledger.save_thread_current_state(
+                thread_kind="research_question", thread_id=str(rq["rq_id"]),
+                current_question=str(rq.get("question", "")), body_text=str(inherited.get("body_text", "")),
+                generation_mode="inherited_from_sensemaking",
+            )
+        st.session_state[f"sm-promoted-rq-{thread_id}"] = {"rq_id": str(rq["rq_id"]), "question": str(rq.get("question", ""))}
+        st.rerun()
+    if c2.button("지식카드 후보 만들기", key=f"sm-card-{thread_id}", disabled=not (latest_user and latest_assistant)):
+        draft = llm_draft(knowledge_card_candidate_prompt(thread_title=str(thread["title"]), latest_question=str(latest_user.get("content", "")), latest_answer=str(latest_assistant.get("content", ""))), model, use_ollama) or ""
+        card = parse_sensemaking_card_candidate(draft, thread_title=str(thread["title"]))
+        if not card:
+            st.warning("지식카드 후보를 만들지 못했습니다.")
+        else:
+            case_id = ledger.create_case("research", f"Sensemaking card: {thread['title']}")
+            ledger.record(case_id, "decision_request", "m2", ["researcher"], "knowledge_card", {
+                "title": f"Sensemaking 지식카드 후보: {card['title']}", "card": card,
+                "normalization": "sensemaking_candidate", "warnings": ["외부 주장/대화에서 생성된 후보입니다. 출처와 근거를 확인한 뒤 승인하세요."],
+                "next_action": "승인 시 semantic memory에 저장하고 M2 새 정보로 통지",
+            }, subject_id=str(card["card_id"]))
+            st.session_state[f"sm-last-card-candidate-{thread_id}"] = card
+            st.success("지식카드 후보를 만들고 연구자 검토·승인함에 보냈습니다. 아래에서 후보 내용을 확인하세요.")
+    candidate_preview = st.session_state.get(f"sm-last-card-candidate-{thread_id}")
+    if candidate_preview:
+        _render_knowledge_card_candidate_preview(candidate_preview)
+        st.info(
+            "다음 단계 · ① 연구위원 데스크의 연구자 검토·승인함에서 이 후보를 확인·승인하세요. "
+            "② 승인되면 새 승인 지식카드가 M2의 ‘M1 새 지식 기반’ 입력으로 들어가며, 그곳에서 연구질문 생성·보강에 사용할 수 있습니다."
+        )
+        nav1, clear1 = st.columns([1.4, 1])
+        if nav1.button("연구위원 데스크 승인함으로 이동", key=f"sm-go-approval-{thread_id}"):
+            st.session_state["_navigate_workspace"] = "연구위원 데스크"
+            st.rerun()
+        if clear1.button("후보 미리보기 닫기", key=f"sm-clear-candidate-{thread_id}"):
+            st.session_state.pop(f"sm-last-card-candidate-{thread_id}", None)
+            st.rerun()
+
+    promoted = st.session_state.get(f"sm-promoted-rq-{thread_id}")
+    if promoted:
+        st.success(f"Research Question Thread로 승격했습니다 · {promoted.get('question','')}")
+        st.info(
+            "다음 단계 · M2의 ‘연구자 직접 질문’ 페이지에서 이 질문 Thread를 열어 현재 지식으로 M2 Review를 만들고, "
+            "필요하면 M1 문헌 보강 Intent로 이어가세요."
+        )
+        nav2, clear2 = st.columns([1.4, 1])
+        if nav2.button("M2 연구자 질문으로 이동", key=f"sm-go-rq-{thread_id}"):
+            st.session_state["m2-work-page"] = "연구자 직접 질문"
+            st.session_state["m2-selected-researcher-thread-id"] = str(promoted.get("rq_id", ""))
+            st.session_state["_navigate_workspace"] = "M2 · 지식 기반 자문"
+            st.rerun()
+        if clear2.button("안내 닫기", key=f"sm-clear-rq-guide-{thread_id}"):
+            st.session_state.pop(f"sm-promoted-rq-{thread_id}", None)
+            st.rerun()
+
+    if c3.button("Thread 보관", key=f"sm-archive-{thread_id}"):
+        ledger.archive_sensemaking_thread(thread_id, True)
+        st.session_state.pop("sensemaking-selected-thread", None)
+        st.rerun()
+
+
+def sensemaking_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    st.header("Research Sensemaking")
+    st.caption("외부에서 접한 주장·사례·궁금증을 기존 지식과 빠르게 대조하고, 필요할 때만 10~20편의 문헌을 확인하며 대화를 이어갑니다. 충분히 중요한 질문은 정식 Research Question Thread로 승격할 수 있습니다.")
+    left, right = st.columns([0.32, 0.68])
+    with left:
+        st.markdown("### Sensemaking Threads")
+        with st.expander("+ 새 Thread", expanded=not bool(ledger.sensemaking_threads())):
+            # A form with clear_on_submit prevents the creation inputs from
+            # lingering after the new thread has been opened on the right.
+            with st.form("sm-new-thread-form", clear_on_submit=True):
+                title = st.text_input("제목", placeholder="예: Upstream Quality와 Shift-left의 유사성")
+                first = st.text_area("처음 궁금한 주장·사실·사례", height=130)
+                create = st.form_submit_button("Thread 시작", type="primary", disabled=not first.strip())
+                if create:
+                    item = ledger.create_sensemaking_thread(title, first)
+                    st.session_state["sensemaking-selected-thread"] = item["thread_id"]
+                    st.rerun()
+        threads = ledger.sensemaking_threads(limit=100)
+        for idx, item in enumerate(threads, start=1):
+            selected = st.session_state.get("sensemaking-selected-thread") == item["thread_id"]
+            with st.container(border=True):
+                st.caption(f"THREAD {idx:02d}" + (" · 현재 열림" if selected else ""))
+                st.markdown(f"**{item['title']}**")
+                turns = ledger.sensemaking_turns(str(item["thread_id"]))
+                latest = next((t for t in reversed(turns) if t.get("role") == "assistant"), None)
+                if latest:
+                    # Thread list shows only the latest quick-interpretation content, in compact text.
+                    st.caption(_sensemaking_quick_preview(str(latest.get("content", "")), 150))
+                st.caption(f"대화 {len(turns)}턴 · {_fmt_local_time(item.get('updated_at'))}" + (" · RQ 연결" if item.get("linked_rq_id") else ""))
+                if st.button("Thread 열기" if not selected else "현재 Thread", key=f"sm-open-{item['thread_id']}", disabled=selected, use_container_width=True):
+                    st.session_state["sensemaking-selected-thread"] = item["thread_id"]
+                    st.rerun()
+    with right:
+        selected_id = st.session_state.get("sensemaking-selected-thread")
+        if selected_id:
+            _render_sensemaking_thread(str(selected_id), model, use_ollama, semantic, embedding_model)
+        else:
+            st.info("왼쪽에서 기존 Thread를 열거나 새 Sensemaking Thread를 시작하세요.")
 
 
 def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
@@ -2978,11 +3964,20 @@ def main() -> None:
             st.sidebar.warning("초안 없이도 P1·P2 흐름은 동작합니다.")
     if paper_provider == "gemini":
         st.sidebar.caption("본문 원문은 Gemini 외부 API로 전송됩니다.")
-    screen = st.sidebar.radio("작업공간", ["연구위원 데스크", "M1 · 문헌조사·지식화", "M2 · 지식 기반 자문", "지식 베이스·운영", "개발·프롬프트"])
+    pending_workspace = st.session_state.pop("_navigate_workspace", None)
+    if pending_workspace:
+        st.session_state["main-workspace"] = pending_workspace
+    screen = st.sidebar.radio(
+        "작업공간",
+        ["연구위원 데스크", "Research Sensemaking", "M1 · 문헌조사·지식화", "M2 · 지식 기반 자문", "지식 베이스·운영", "개발·프롬프트"],
+        key="main-workspace",
+    )
     if screen == "연구위원 데스크":
         home(model, use_ollama, semantic, embedding_model)
     elif screen == "M1 · 문헌조사·지식화":
         m1_screen(model, use_ollama, semantic, embedding_model)
+    elif screen == "Research Sensemaking":
+        sensemaking_screen(model, use_ollama, semantic, embedding_model)
     elif screen == "M2 · 지식 기반 자문":
         m2_screen(model, use_ollama, semantic, embedding_model)
     elif screen == "지식 베이스·운영":

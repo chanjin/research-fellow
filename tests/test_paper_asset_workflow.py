@@ -115,3 +115,22 @@ LLM 제공자 계층과 컨텍스트 관리가 고위험 영역인 이유는 무
     assert len(questions) == 2
     assert questions[0]["evidence"] == ['p.5; "absence of Agentic Quality Assurance"']
     assert "코딩 에이전트의 품질" in parse_reading_summary(output)
+
+
+def test_shelf_pdf_can_be_recovered_from_arxiv_when_local_file_is_missing(tmp_path: Path, monkeypatch) -> None:
+    from research_fellow.application import paper_shelf
+
+    class _Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b"%PDF-1.4 fake"
+
+    monkeypatch.setattr(paper_shelf, "urlopen", lambda *args, **kwargs: _Response())
+    paper = {
+        "source_id": "2401.01234",
+        "source_url": "https://arxiv.org/abs/2401.01234",
+        "pdf_path": "",
+    }
+    path = paper_shelf.ensure_shelf_pdf(paper, tmp_path / "papers")
+    assert Path(path).exists()
+    assert Path(path).name == "2401.01234.pdf"

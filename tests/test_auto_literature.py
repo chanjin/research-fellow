@@ -22,19 +22,23 @@ def test_auto_literature_runs_to_researcher_report(tmp_path: Path, monkeypatch):
         "authors": ["A"], "summary": "abstract", "citation_count": 42,
         "relevance": {"level": "high", "rationale": "direct"}, "abstract_shortlist": True,
     }]
-    monkeypatch.setattr("research_fellow.application.auto_literature.run_profile", lambda *args, **kwargs: {
-        "run_id": "sr-1", "query": "q", "candidates": candidates, "status": "completed", "error": "",
-    })
+    monkeypatch.setattr("research_fellow.application.auto_literature.search_profile_candidates", lambda *args, **kwargs: ("q", candidates))
+    monkeypatch.setattr("research_fellow.application.auto_literature.shortlist_candidates", lambda *args, **kwargs: candidates)
     monkeypatch.setattr("research_fellow.application.auto_literature.process_top_papers", lambda *args, **kwargs: [{
         **candidates[0], "full_text_status": "completed", "full_text_review": "SIMILARITY: 90\n- direct",
-        "full_text_similarity": 90, "influential_citation_count": 3,
+        "full_text_similarity": 90, "influential_citation_count": 3, "pdf_path": str(tmp_path / "papers" / "1234.5678.pdf"),
     }])
-    # The mocked search run was not inserted into SQLite, so make the update a no-op for this application-level test.
-    monkeypatch.setattr(ledger, "update_search_run_candidates", lambda *args, **kwargs: None)
-
     result = execute_auto_literature_review(
         ledger, event, tmp_path / "cache",
-        keyword_drafter=lambda prompt: "architect agent",
+        keyword_drafter=lambda prompt: """CONCEPT_GROUPS:
+Agent | architect agent ; software architect agent
+Constraint | non-functional requirements ; quality attributes
+CORE_TERMS:
+architect
+requirements
+QUERY_VARIANTS:
+(all:"architect agent" OR all:"software architect agent") AND (all:"non-functional requirements" OR all:"quality attributes")
+""",
         abstract_reviewer=lambda prompt: "",
         fulltext_drafter=lambda prompt: "",
         synthesis_drafter=lambda prompt: "## 탐색 요약\n초록 1편, 본문 1편을 비교했다.",
@@ -46,5 +50,8 @@ def test_auto_literature_runs_to_researcher_report(tmp_path: Path, monkeypatch):
     assert len(reports) == 1
     assert reports[0]["payload"]["abstract_review_count"] == 1
     assert reports[0]["payload"]["top_papers"][0]["citation_count"] == 42
+    assert reports[0]["payload"]["top_papers"][0]["pdf_path"].endswith("1234.5678.pdf")
+    assert reports[0]["payload"]["search_strategy"]["boolean_queries"]
+    assert " OR " in reports[0]["payload"]["search_strategy"]["boolean_queries"][0]
     updates = ledger.phenomena(type_="knowledge_update")
     assert len(updates) == 1

@@ -3,13 +3,104 @@ from __future__ import annotations
 import os
 import re
 from datetime import UTC, datetime
+from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable
 
 import streamlit as st
 
-from research_fellow.llm import OllamaDraftResult, gemini_api_available, gemini_draft_result, ollama_draft, ollama_draft_result, ollama_status, set_llm_audit_log_path, set_llm_audit_logger
+import research_fellow.llm as llm_backend
+
+
+@dataclass(frozen=True)
+class _CompatDraftResult:
+    """Compatibility result for older research_fellow.llm modules."""
+    text: str | None
+    error: str | None = None
+    status_code: int | None = None
+    diagnostics: dict[str, object] | None = None
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.text) and not self.error
+
+
+# Do not couple the UI to one exact llm.py revision. Older project snapshots
+# expose ollama_draft() but not OllamaDraftResult / ollama_draft_result().
+OllamaDraftResult = getattr(llm_backend, "OllamaDraftResult", _CompatDraftResult)
+ollama_draft = getattr(llm_backend, "ollama_draft", None)
+
+def ollama_status(model: str) -> tuple[bool, str]:
+    fn = getattr(llm_backend, "ollama_status", None)
+    if callable(fn):
+        return fn(model)
+    return False, "현재 llm.py에는 ollama_status()가 없습니다."
+gemini_api_available = getattr(llm_backend, "gemini_api_available", lambda: False)
+
+
+def ui_text(ko: str, en: str) -> str:
+    """Return a UI label in the currently selected presentation language.
+
+    Internal IDs, DB values, and workflow keys stay unchanged; only visible UI copy
+    should pass through this helper.
+    """
+    return en if st.session_state.get("response-language", "English") == "English" else ko
+
+set_llm_audit_logger = getattr(llm_backend, "set_llm_audit_logger", lambda _logger: None)
+set_llm_audit_log_path = getattr(llm_backend, "set_llm_audit_log_path", lambda _path: None)
+
+
+def _coerce_draft_result(value: object, *, fallback_error: str | None = None) -> OllamaDraftResult:
+    if hasattr(value, "text"):
+        return value  # type: ignore[return-value]
+    if isinstance(value, str):
+        return OllamaDraftResult(value)
+    if value is None:
+        return OllamaDraftResult(None, fallback_error or "LLM returned no response.")
+    return OllamaDraftResult(str(value))
+
+
+def _backend_ollama_draft_result(
+    prompt: str, model: str, enabled: bool, profile: str | None = None,
+    overrides: dict[str, object] | None = None, on_chunk: Callable[[str], None] | None = None,
+) -> OllamaDraftResult:
+    fn = getattr(llm_backend, "ollama_draft_result", None)
+    if callable(fn):
+        try:
+            return _coerce_draft_result(
+                fn(prompt, model, enabled, profile=profile, overrides=overrides, on_chunk=on_chunk),
+                fallback_error="Ollama returned no response.",
+            )
+        except TypeError:
+            # Compatibility with intermediate revisions with fewer keyword arguments.
+            try:
+                return _coerce_draft_result(fn(prompt, model, enabled, profile=profile), fallback_error="Ollama returned no response.")
+            except TypeError:
+                return _coerce_draft_result(fn(prompt, model, enabled), fallback_error="Ollama returned no response.")
+    try:
+        draft_fn = getattr(llm_backend, "ollama_draft", None)
+        if not callable(draft_fn):
+            return OllamaDraftResult(None, "현재 llm.py에는 ollama_draft()가 없습니다.")
+        text = draft_fn(prompt, model, enabled, profile=profile)
+    except TypeError:
+        draft_fn = getattr(llm_backend, "ollama_draft", None)
+        if not callable(draft_fn):
+            return OllamaDraftResult(None, "현재 llm.py에는 ollama_draft()가 없습니다.")
+        text = draft_fn(prompt, model, enabled)
+    if text and on_chunk:
+        on_chunk(str(text))
+    return _coerce_draft_result(text, fallback_error="Ollama returned no response.")
+
+
+def _backend_gemini_draft_result(prompt: str, profile: str | None = None) -> OllamaDraftResult:
+    fn = getattr(llm_backend, "gemini_draft_result", None)
+    if not callable(fn):
+        return OllamaDraftResult(None, "This llm.py revision does not provide Gemini API support.")
+    try:
+        return _coerce_draft_result(fn(prompt, profile=profile), fallback_error="Gemini returned no response.")
+    except TypeError:
+        return _coerce_draft_result(fn(prompt), fallback_error="Gemini returned no response.")
 from research_fellow.application.claim_curation import (
     build_simple_claim_cards, discovery_prompt, parse_candidate_claims, submit_claim_cards,
 )
@@ -90,25 +181,53 @@ from research_fellow.services import (
     request_curation_intent,
 )
 from research_fellow.storage import Ledger
+from research_fellow.prompt_profiles import apply_prompt_profile
+from research_fellow.workspace_profiles import WORKSPACE_PROFILES, get_workspace_profile
 from research_fellow.workspace_sync import WorkspaceSync
 from research_fellow.ui.developer import render_developer_screen
 from research_fellow.domain.research import ResearchState
 
 
 ROOT = Path(__file__).parent
+
+
+def _requested_workspace_key() -> str:
+    env_key = os.environ.get("RESEARCH_FELLOW_WORKSPACE", "").strip()
+    if env_key:
+        return env_key
+    try:
+        value = st.query_params.get("workspace", "general")
+        if isinstance(value, list):
+            value = value[0] if value else "general"
+        return str(value or "general")
+    except Exception:
+        return "general"
+
+
+WORKSPACE_PROFILE = get_workspace_profile(_requested_workspace_key())
+WORKSPACE_KEY = WORKSPACE_PROFILE.key
 DATA = Path(os.environ.get("RESEARCH_FELLOW_DATA_DIR", ROOT / "data")).expanduser()
-CACHE = Path(os.environ.get("RESEARCH_FELLOW_CACHE_DIR", ROOT / ".cache" / "research-fellow")).expanduser()
+_default_cache = ROOT / ".cache" / WORKSPACE_PROFILE.cache_name
+_workspace_env_suffix = WORKSPACE_KEY.upper()
+_cache_override = os.environ.get(f"RESEARCH_FELLOW_CACHE_DIR_{_workspace_env_suffix}", "").strip()
+if not _cache_override and WORKSPACE_KEY == "general":
+    _cache_override = os.environ.get("RESEARCH_FELLOW_CACHE_DIR", "").strip()
+CACHE = Path(_cache_override or _default_cache).expanduser()
 DATA.mkdir(parents=True, exist_ok=True)
 CACHE.mkdir(parents=True, exist_ok=True)
 EXTRACTION_CACHE = CACHE / "extracted_documents"
-LOCAL_DB = DATA / "research_fellow.db"
+_db_override = os.environ.get(f"RESEARCH_FELLOW_DB_FILENAME_{_workspace_env_suffix}", "").strip()
+if not _db_override and WORKSPACE_KEY == "general":
+    _db_override = os.environ.get("RESEARCH_FELLOW_DB_FILENAME", "").strip()
+LOCAL_DB = DATA / (_db_override or WORKSPACE_PROFILE.db_filename)
 ledger = Ledger(LOCAL_DB)
 set_llm_audit_logger(ledger.record_llm_call)
 set_llm_audit_log_path(CACHE / "logs" / "llm_calls.jsonl")
-# SQLite is now the canonical durable store. Existing JSONL files are imported
-# once when the corresponding SQLite table is empty, then left untouched as legacy backup.
-memory = KnowledgeMemory(LOCAL_DB, legacy_path=DATA / "knowledge_cards.jsonl")
-relations = RelationMemory(LOCAL_DB, legacy_path=DATA / "knowledge_relations.jsonl")
+# SQLite is the canonical durable store. Only the general workspace imports the
+# historical JSONL files; specialized workspaces start with an intentionally separate memory.
+_general_legacy = WORKSPACE_KEY == "general"
+memory = KnowledgeMemory(LOCAL_DB, legacy_path=(DATA / "knowledge_cards.jsonl") if _general_legacy else None)
+relations = RelationMemory(LOCAL_DB, legacy_path=(DATA / "knowledge_relations.jsonl") if _general_legacy else None)
 retriever = KnowledgeRetriever(CACHE / "retrieval_index.json")
 episodic_retriever = EpisodicRetriever(CACHE / "episodic_retrieval_index.json")
 
@@ -153,9 +272,15 @@ def llm_draft_result(
 ) -> OllamaDraftResult:
     """Route paper source work and internal knowledge work independently."""
     workload = "paper" if profile in {"paper_reading", "full_text_similarity"} else "internal"
+    prompt = apply_prompt_profile(
+        prompt,
+        st.session_state.get("response-language", "English"),
+        requested_profile=profile,
+        workspace_key=WORKSPACE_KEY,
+    )
     if selected_llm_provider(workload) == "gemini":
-        return gemini_draft_result(prompt, profile=profile)
-    return ollama_draft_result(prompt, model, use_ollama, profile=profile, overrides=overrides, on_chunk=on_chunk)
+        return _backend_gemini_draft_result(prompt, profile=profile)
+    return _backend_ollama_draft_result(prompt, model, use_ollama, profile=profile, overrides=overrides, on_chunk=on_chunk)
 
 
 def llm_draft(prompt: str, model: str, use_ollama: bool, profile: str | None = None) -> str | None:
@@ -777,8 +902,8 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
 
 
 def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
-    st.header("연구위원 홈")
-    st.caption("연구자에게 필요한 판단과 M1·M2의 최근 공유현상을 한곳에서 봅니다.")
+    st.header(ui_text("연구위원 홈", "Research Fellow Home"))
+    st.caption(ui_text("연구자에게 필요한 판단과 M1·M2의 최근 공유현상을 한곳에서 봅니다.", "Review researcher decisions and recent M1/M2 shared phenomena in one place."))
     # Paper reading already includes the researcher's evidence review and card
     # authoring. It therefore creates knowledge directly, not another approval
     # task. Legacy card requests remain in the ledger but are not work items.
@@ -789,17 +914,17 @@ def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> 
     updates = ledger.phenomena(recipient="researcher", type_="knowledge_update")
     active_relations = relations.active_for_cards({card["card_id"] for card in memory.all()})
     cols = st.columns(4)
-    cols[0].metric("승인 대기", len(pending))
-    cols[1].metric("승인 지식", len(memory.all()))
-    cols[2].metric("최근 지식 업데이트", len(updates))
-    cols[3].metric("승인 관계", len(active_relations))
+    cols[0].metric(ui_text("승인 대기", "Pending approval"), len(pending))
+    cols[1].metric(ui_text("승인 지식", "Approved knowledge"), len(memory.all()))
+    cols[2].metric(ui_text("최근 지식 업데이트", "Recent knowledge updates"), len(updates))
+    cols[3].metric(ui_text("승인 관계", "Approved relations"), len(active_relations))
 
-    st.subheader("연구자 검토·승인함")
+    st.subheader(ui_text("연구자 검토·승인함", "Researcher Review & Approval"))
     if not pending:
-        st.success("현재 연구자 판단이 필요한 안건이 없습니다.")
+        st.success(ui_text("현재 연구자 판단이 필요한 안건이 없습니다.", "No items currently require researcher review."))
     else:
         selected = []
-        select_all = st.checkbox("대기 안건 전체 선택", key="select-all-pending")
+        select_all = st.checkbox(ui_text("대기 안건 전체 선택", "Select all pending items"), key="select-all-pending")
         for item in pending:
             label = item["payload"].get("title", item["subject_type"])
             checked = select_all or st.checkbox(label, key=f"pick-{item['phenomenon_id']}")
@@ -934,14 +1059,14 @@ def render_knowledge_card(card: dict[str, object], *, key_prefix: str = "card") 
 
 def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     """Facet-aware, multi-type ontology builder with contextual graph feedback."""
-    st.subheader("온톨로지")
-    st.caption("승인 지식카드에 여러 타입을 부여하고, Facet으로 타입을 묶습니다. 타입 간 관계는 Type↔Type 사이에 정의합니다.")
+    st.subheader(ui_text("온톨로지", "Ontology"))
+    st.caption(ui_text("승인 지식카드에 여러 타입을 부여하고, Facet으로 타입을 묶습니다. 타입 간 관계는 Type↔Type 사이에 정의합니다.", "Assign multiple Types to approved knowledge cards, group Types with Facets, and define relations between Types."))
     if flash := st.session_state.pop("ontology-flash", None):
         st.success(flash)
     cards = memory.all()
     cards_by_id = {card["card_id"]: card for card in cards}
     approved_relations = ledger.active_knowledge_relations()
-    ai_tab, builder_tab, map_tab = st.tabs(["AI Curation", "Manual Builder", "Ontology Map"])
+    ai_tab, builder_tab, map_tab = st.tabs([ui_text("AI Curation", "AI Curation"), ui_text("Manual Builder", "Manual Builder"), ui_text("Ontology Map", "Ontology Map")])
 
     def _card_display_name(card_id: str) -> str:
         card = cards_by_id.get(str(card_id), {})
@@ -1229,7 +1354,7 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
                 st.session_state[f"ontology-ai-type-prompt-{target_id}"] = prompt
                 c1, c2 = st.columns(2)
                 if c1.button("AI 타입 후보 생성", type="primary", key=f"ontology-ai-generate-{target_id}"):
-                    result = llm_draft_result(prompt, model, use_ollama)
+                    result = llm_draft_result(prompt, model, use_ollama, profile="ontology")
                     if result.text:
                         try:
                             st.session_state[f"ontology-ai-type-result-{target_id}"] = parse_type_suggestions(
@@ -1890,15 +2015,15 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
 
 
 def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
-    st.header("M1 · 문헌조사·지식화 작업실")
-    st.caption("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.")
-    upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs(["서재함", "온톨로지", "관계·계보 정리", "승인 지식 조회", "문헌 탐색 작업", "승인 지식 목록"])
+    st.header(ui_text("M1 · 문헌조사·지식화 작업실", "M1 · Literature & Knowledge Workspace"))
+    st.caption(ui_text("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.", "M1 explores and structures literature and research notes to prepare candidate knowledge and relations. It does not answer researcher questions directly; validated knowledge is passed to M2."))
+    upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs([ui_text("서재함", "Paper Shelf"), ui_text("온톨로지", "Ontology"), ui_text("관계·계보 정리", "Relations & Lineage"), ui_text("승인 지식 조회", "Approved Knowledge Search"), ui_text("문헌 탐색 작업", "Literature Search Tasks"), ui_text("승인 지식 목록", "Approved Knowledge List")])
     with upload_tab:
-        st.caption("논문·연구 노트·웹페이지를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 등록 자체는 지식카드 생성이 아닙니다.")
-        uploaded = st.file_uploader("논문 PDF·연구 노트", type=["pdf", "txt", "md"])
-        source_kind = st.selectbox("자료 성격", ["외부 논문", "연구자의 확정 문서", "연구자의 아이디어 노트"])
-        core_paper = st.checkbox("핵심 문헌으로 표시", key="asset-intake-core")
-        if uploaded and st.button("서재함에 추가", key="claim-first-add-shelf"):
+        st.caption(ui_text("논문·연구 노트·웹페이지를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 등록 자체는 지식카드 생성이 아닙니다.", "Add papers, research notes, and web pages here. Papers selected from search are managed in the same shelf. Adding an item does not create a knowledge card by itself."))
+        uploaded = st.file_uploader(ui_text("논문 PDF·연구 노트", "Paper PDF or research note"), type=["pdf", "txt", "md"])
+        source_kind = st.selectbox(ui_text("자료 성격", "Source type"), ["외부 논문", "연구자의 확정 문서", "연구자의 아이디어 노트"], format_func=lambda v: {"외부 논문": ui_text("외부 논문", "External paper"), "연구자의 확정 문서": ui_text("연구자의 확정 문서", "Confirmed researcher document"), "연구자의 아이디어 노트": ui_text("연구자의 아이디어 노트", "Researcher idea note")}.get(v, v))
+        core_paper = st.checkbox(ui_text("핵심 문헌으로 표시", "Mark as core paper"), key="asset-intake-core")
+        if uploaded and st.button(ui_text("서재함에 추가", "Add to Paper Shelf"), key="claim-first-add-shelf"):
             try:
                 document = extract_document(uploaded, cache_dir=EXTRACTION_CACHE)
                 bibliography = infer_bibliographic_metadata(document)
@@ -2786,7 +2911,7 @@ def _update_thread_current_state(
         thread_kind=thread_kind, title=title, current_question=current_question,
         prior_state=str(prior.get("body_text", "")), conversation=conversation or [], reports=reports or [],
     )
-    result = llm_draft_result(prompt, model, use_ollama, profile="m2_report")
+    result = llm_draft_result(prompt, model, use_ollama, profile="thread_state")
     if not result.text:
         return None
     return ledger.save_thread_current_state(
@@ -2839,7 +2964,7 @@ def _render_current_state_and_reports(
             thread_kind=thread_kind, title=title, current_state=str(current.get("body_text", "")),
             current_question=current_question,
         )
-        result = llm_draft_result(prompt, model, use_ollama, profile="m2_report")
+        result = llm_draft_result(prompt, model, use_ollama, profile="report_snapshot")
         if result.text:
             ledger.create_thread_report_snapshot(
                 thread_kind=thread_kind, thread_id=thread_id, title=title,
@@ -3524,14 +3649,14 @@ def _render_sensemaking_thread(thread_id: str, model: str, use_ollama: bool, sem
             # it is supplied separately as the current question.
             prior_turns = turns[:-1]
             if quick_lit:
-                plan_text = llm_draft(quick_search_plan_prompt(pending_question, prior_turns), model, use_ollama) or ""
+                plan_text = llm_draft(quick_search_plan_prompt(pending_question, prior_turns), model, use_ollama, profile="search_strategy") or ""
                 result = quick_literature_search(plan_text, max_papers=20)
                 papers = result["papers"]
             prompt = sensemaking_answer_prompt(
                 thread_title=str(thread["title"]), conversation=prior_turns,
                 question=pending_question, cards=cards, papers=papers,
             )
-            answer = llm_draft(prompt, model, use_ollama) or "현재 LLM 응답을 얻지 못했습니다. 외부 LLM 수동 응답 경로를 사용해 주세요."
+            answer = llm_draft(prompt, model, use_ollama, profile="sensemaking") or "현재 LLM 응답을 얻지 못했습니다. 외부 LLM 수동 응답 경로를 사용해 주세요."
             ledger.add_sensemaking_turn(
                 thread_id, "assistant", answer,
                 evidence_card_ids=[str(c.get("card_id", "")) for c in cards],
@@ -3580,14 +3705,14 @@ def _render_sensemaking_thread(thread_id: str, model: str, use_ollama: bool, sem
             cards = [item.card for item in hits]
             papers: list[dict[str, Any]] = []
             if quick_lit:
-                plan_text = llm_draft(quick_search_plan_prompt(question, turns), model, use_ollama) or ""
+                plan_text = llm_draft(quick_search_plan_prompt(question, turns), model, use_ollama, profile="search_strategy") or ""
                 result = quick_literature_search(plan_text, max_papers=20)
                 papers = result["papers"]
             prompt = sensemaking_answer_prompt(
                 thread_title=str(thread["title"]), conversation=turns,
                 question=question, cards=cards, papers=papers,
             )
-            answer = llm_draft(prompt, model, use_ollama) or "현재 LLM 응답을 얻지 못했습니다. 외부 LLM 수동 응답 경로를 사용해 주세요."
+            answer = llm_draft(prompt, model, use_ollama, profile="sensemaking") or "현재 LLM 응답을 얻지 못했습니다. 외부 LLM 수동 응답 경로를 사용해 주세요."
             ledger.add_sensemaking_turn(
                 thread_id, "assistant", answer,
                 evidence_card_ids=[str(c.get("card_id", "")) for c in cards],
@@ -3644,7 +3769,7 @@ def _render_sensemaking_thread(thread_id: str, model: str, use_ollama: bool, sem
         st.session_state[f"sm-promoted-rq-{thread_id}"] = {"rq_id": str(rq["rq_id"]), "question": str(rq.get("question", ""))}
         st.rerun()
     if c2.button("지식카드 후보 만들기", key=f"sm-card-{thread_id}", disabled=not (latest_user and latest_assistant)):
-        draft = llm_draft(knowledge_card_candidate_prompt(thread_title=str(thread["title"]), latest_question=str(latest_user.get("content", "")), latest_answer=str(latest_assistant.get("content", ""))), model, use_ollama) or ""
+        draft = llm_draft(knowledge_card_candidate_prompt(thread_title=str(thread["title"]), latest_question=str(latest_user.get("content", "")), latest_answer=str(latest_assistant.get("content", ""))), model, use_ollama, profile="knowledge_card") or ""
         card = parse_sensemaking_card_candidate(draft, thread_title=str(thread["title"]))
         if not card:
             st.warning("지식카드 후보를 만들지 못했습니다.")
@@ -3697,17 +3822,17 @@ def _render_sensemaking_thread(thread_id: str, model: str, use_ollama: bool, sem
 
 def sensemaking_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     st.header("Research Sensemaking")
-    st.caption("외부에서 접한 주장·사례·궁금증을 기존 지식과 빠르게 대조하고, 필요할 때만 10~20편의 문헌을 확인하며 대화를 이어갑니다. 충분히 중요한 질문은 정식 Research Question Thread로 승격할 수 있습니다.")
+    st.caption(ui_text("외부에서 접한 주장·사례·궁금증을 기존 지식과 빠르게 대조하고, 필요할 때만 10~20편의 문헌을 확인하며 대화를 이어갑니다. 충분히 중요한 질문은 정식 Research Question Thread로 승격할 수 있습니다.", "Quickly compare external claims, cases, and questions against accumulated knowledge, optionally check 10–20 papers, and continue the dialogue. Promote sufficiently important questions to a formal Research Question Thread."))
     left, right = st.columns([0.32, 0.68])
     with left:
-        st.markdown("### Sensemaking Threads")
-        with st.expander("+ 새 Thread", expanded=not bool(ledger.sensemaking_threads())):
+        st.markdown(ui_text("### Sensemaking Threads", "### Sensemaking Threads"))
+        with st.expander(ui_text("+ 새 Thread", "+ New Thread"), expanded=not bool(ledger.sensemaking_threads())):
             # A form with clear_on_submit prevents the creation inputs from
             # lingering after the new thread has been opened on the right.
             with st.form("sm-new-thread-form", clear_on_submit=True):
-                title = st.text_input("제목", placeholder="예: Upstream Quality와 Shift-left의 유사성")
-                first = st.text_area("처음 궁금한 주장·사실·사례", height=130)
-                create = st.form_submit_button("Thread 시작", type="primary", disabled=not first.strip())
+                title = st.text_input(ui_text("제목", "Title"), placeholder=ui_text("예: Upstream Quality와 Shift-left의 유사성", "e.g., Similarities between Upstream Quality and Shift-left"))
+                first = st.text_area(ui_text("처음 궁금한 주장·사실·사례", "Initial claim, fact, case, or question"), height=130)
+                create = st.form_submit_button(ui_text("Thread 시작", "Start Thread"), type="primary", disabled=not first.strip())
                 if create:
                     item = ledger.create_sensemaking_thread(title, first)
                     st.session_state["sensemaking-selected-thread"] = item["thread_id"]
@@ -3716,15 +3841,15 @@ def sensemaking_screen(model: str, use_ollama: bool, semantic: bool, embedding_m
         for idx, item in enumerate(threads, start=1):
             selected = st.session_state.get("sensemaking-selected-thread") == item["thread_id"]
             with st.container(border=True):
-                st.caption(f"THREAD {idx:02d}" + (" · 현재 열림" if selected else ""))
+                st.caption(f"THREAD {idx:02d}" + (ui_text(" · 현재 열림", " · Open") if selected else ""))
                 st.markdown(f"**{item['title']}**")
                 turns = ledger.sensemaking_turns(str(item["thread_id"]))
                 latest = next((t for t in reversed(turns) if t.get("role") == "assistant"), None)
                 if latest:
                     # Thread list shows only the latest quick-interpretation content, in compact text.
                     st.caption(_sensemaking_quick_preview(str(latest.get("content", "")), 150))
-                st.caption(f"대화 {len(turns)}턴 · {_fmt_local_time(item.get('updated_at'))}" + (" · RQ 연결" if item.get("linked_rq_id") else ""))
-                if st.button("Thread 열기" if not selected else "현재 Thread", key=f"sm-open-{item['thread_id']}", disabled=selected, use_container_width=True):
+                st.caption(f"대화 {len(turns)}턴 · {_fmt_local_time(item.get('updated_at'))}" + (ui_text(" · RQ 연결", " · Linked to RQ") if item.get("linked_rq_id") else ""))
+                if st.button(ui_text("Thread 열기", "Open Thread") if not selected else ui_text("현재 Thread", "Current Thread"), key=f"sm-open-{item['thread_id']}", disabled=selected, use_container_width=True):
                     st.session_state["sensemaking-selected-thread"] = item["thread_id"]
                     st.rerun()
     with right:
@@ -3732,19 +3857,19 @@ def sensemaking_screen(model: str, use_ollama: bool, semantic: bool, embedding_m
         if selected_id:
             _render_sensemaking_thread(str(selected_id), model, use_ollama, semantic, embedding_model)
         else:
-            st.info("왼쪽에서 기존 Thread를 열거나 새 Sensemaking Thread를 시작하세요.")
+            st.info(ui_text("왼쪽에서 기존 Thread를 열거나 새 Sensemaking Thread를 시작하세요.", "Open an existing thread on the left or start a new Sensemaking Thread."))
 
 
 def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
-    st.header("M2 · 지식 기반 자문 작업실")
-    st.caption("질문 진입점은 별도 페이지로 관리하고, 질문이 정의된 이후의 검토·보고·M1 보강·질문 구체화 흐름은 동일한 Research Question Thread로 수행합니다.")
+    st.header(ui_text("M2 · 지식 기반 자문 작업실", "M2 · Knowledge-based Advisory Workspace"))
+    st.caption(ui_text("질문 진입점은 별도 페이지로 관리하고, 질문이 정의된 이후의 검토·보고·M1 보강·질문 구체화 흐름은 동일한 Research Question Thread로 수행합니다.", "Question entry points are managed separately. Once a question is defined, review, reporting, M1 supplementation, and refinement continue in the same Research Question Thread."))
     pages = [
         "M1 새 지식 기반",
         "연구자 직접 질문",
         "외부 자문 요청",
         "M2 Report History",
     ]
-    page = st.radio("M2 작업", pages, horizontal=True, key="m2-work-page")
+    page = st.radio(ui_text("M2 작업", "M2 Work"), pages, horizontal=True, key="m2-work-page", format_func=lambda v: {"M1 새 지식 기반": ui_text("M1 새 지식 기반", "M1 New Knowledge"), "연구자 직접 질문": ui_text("연구자 직접 질문", "Researcher Questions"), "외부 자문 요청": ui_text("외부 자문 요청", "External Advisory"), "M2 Report History": ui_text("M2 Report History", "M2 Report History")}.get(v, v))
     st.divider()
     if page == "M1 새 지식 기반":
         _render_m1_new_information(model, use_ollama, semantic, embedding_model)
@@ -3844,12 +3969,14 @@ def external_advisory(model: str, use_ollama: bool, semantic: bool, embedding_mo
 
 def render_workspace_sync() -> None:
     """Sidebar control for explicit local ↔ integrated-server database merge."""
-    with st.sidebar.expander("작업공간 동기화", expanded=False):
-        st.caption("집/학교에서는 로컬 DB로 작업하고, 필요할 때 서버 Workspace와 통합합니다.")
+    with st.sidebar.expander(ui_text("작업공간 동기화", "Workspace Sync"), expanded=False):
+        st.caption(ui_text("집/학교에서는 로컬 DB로 작업하고, 필요할 때 서버 Workspace와 통합합니다.", "Work locally at home or office, then explicitly merge with the server workspace when needed."))
         st.caption(f"Local · {LOCAL_DB}")
-        default_server = os.environ.get("RESEARCH_FELLOW_SERVER_DIR", "")
+        default_server = os.environ.get(f"RESEARCH_FELLOW_SERVER_DIR_{WORKSPACE_KEY.upper()}", "")
+        if not default_server and WORKSPACE_KEY == "general":
+            default_server = os.environ.get("RESEARCH_FELLOW_SERVER_DIR", "")
         if not default_server:
-            legacy = os.environ.get("RESEARCH_FELLOW_SERVER_DB", "")
+            legacy = os.environ.get("RESEARCH_FELLOW_SERVER_DB", "") if WORKSPACE_KEY == "general" else ""
             if legacy:
                 legacy_path = Path(legacy).expanduser()
                 default_server = str(legacy_path.parent if legacy_path.suffix.lower() == ".db" else legacy_path)
@@ -3858,13 +3985,15 @@ def render_workspace_sync() -> None:
             value=default_server,
             placeholder="예: ~/Library/Mobile Documents/com~apple~CloudDocs/ResearchFellow",
             key="workspace-sync-server-dir",
-            help="Google Drive/iCloud Drive/NAS의 폴더를 지정하세요. 앱이 이 안의 research_fellow.db를 자동으로 사용합니다.",
+            help=f"Google Drive/iCloud Drive/NAS의 폴더를 지정하세요. 현재 Workspace는 이 안의 {WORKSPACE_PROFILE.server_db_filename}를 사용합니다.",
         ).strip()
         if not server_value:
             st.info("서버 Workspace 디렉터리를 지정하면 초기화 또는 통합 기능이 활성화됩니다.")
             return
         try:
-            sync = WorkspaceSync(LOCAL_DB, server_value)
+            server_workspace = Path(server_value).expanduser()
+            server_db = server_workspace / WORKSPACE_PROFILE.server_db_filename
+            sync = WorkspaceSync(LOCAL_DB, server_db)
             st.caption(f"Server · {sync.server_db}")
 
             if not sync.server_exists:
@@ -3934,15 +4063,39 @@ def main() -> None:
     [data-testid="stStatusWidget"] *, [data-testid="stToolbar"] [aria-label*="Running"] * { color:#1f1300 !important; }
     .rf-running { position: fixed; top: 0.55rem; right: 5.9rem; z-index: 999999; max-width: 30rem; padding: 0.42rem 0.75rem; border: 1px solid #b54708; border-radius: 0.45rem; background: #f79009; color: #1f1300; font-weight: 700; box-shadow: 0 2px 7px rgba(0,0,0,.22); }
     </style>""", unsafe_allow_html=True)
-    st.sidebar.title("도메인 전문 연구위원")
+    st.sidebar.title("Research Fellow")
+    workspace_keys = list(WORKSPACE_PROFILES)
+    selected_workspace = st.sidebar.selectbox(
+        ui_text("연구 작업공간", "Research workspace"),
+        workspace_keys,
+        index=workspace_keys.index(WORKSPACE_KEY) if WORKSPACE_KEY in workspace_keys else 0,
+        format_func=lambda key: ({"general": ui_text("전체 관심사 · General Research Fellow", "General · General Research Fellow"), "agent_development": ui_text("에이전트 개발 전문 · Agent Development Research Fellow", "Agent Development · Agent Development Research Fellow")}.get(key, WORKSPACE_PROFILES[key].label)),
+        key="research-workspace-selector",
+        help=ui_text("기능과 코드는 공유하고, DB·검색 인덱스·전문성 컨텍스트만 분리합니다. 두 브라우저 탭에서 서로 다른 ?workspace= 값을 사용하면 동시에 작업할 수 있습니다.", "The code and workflows are shared; only the DB, retrieval index, and expertise context are separated. Open different ?workspace= values in separate browser tabs to work with both at once."),
+    )
+    if selected_workspace != WORKSPACE_KEY:
+        st.query_params["workspace"] = selected_workspace
+        st.rerun()
+    st.sidebar.caption(f"{WORKSPACE_PROFILE.label} · DB · {LOCAL_DB}")
+    st.sidebar.caption(ui_text(WORKSPACE_PROFILE.purpose, {"general": "Broad, long-term research memory across the researcher’s interests", "agent_development": "Specialized workspace for AI agent development, specification, workflows, memory, and evaluation"}.get(WORKSPACE_KEY, WORKSPACE_PROFILE.purpose)))
+    st.sidebar.markdown(
+        ui_text("새 탭으로 열기 · ", "Open in new tab · ")
+        + ui_text("[전체 관심사](?workspace=general) · ", "[General](?workspace=general) · ")
+        + ui_text("[에이전트 개발 전문](?workspace=agent_development)", "[Agent Development](?workspace=agent_development)")
+    )
+    response_language = st.sidebar.radio(
+        ui_text("응답 언어", "Response language"), ["English", "한국어"], horizontal=True,
+        key="response-language", help=ui_text("영어가 기본입니다. 한국어 선택 시 같은 DB·프롬프트·워크플로우를 유지하면서 표현 언어만 한국어로 바꿉니다.", "English is the default. Korean changes only the presentation language while keeping the same DB, prompts, and workflows.")
+    )
+    st.sidebar.caption(ui_text("하나의 코드베이스 · 작업공간별 연구 메모리/전문성 분리 · 언어는 출력 Injection", "One codebase · research memory/expertise separated by workspace · language via output injection"))
     render_workspace_sync()
     paper_provider = st.sidebar.radio(
-        "본문 읽기·비교", ["gemini", "ollama"], horizontal=True,
+        ui_text("본문 읽기·비교", "Paper reading & comparison"), ["gemini", "ollama"], horizontal=True,
         format_func={"ollama": "Ollama 로컬", "gemini": "Gemini 외부 API"}.get,
         key="llm-provider-paper-choice",
     )
     internal_provider = st.sidebar.radio(
-        "내부 지식·M2 해석", ["ollama", "gemini"], horizontal=True,
+        ui_text("내부 지식·M2 해석", "Internal knowledge & M2 interpretation"), ["ollama", "gemini"], horizontal=True,
         format_func={"ollama": "Ollama 로컬", "gemini": "Gemini 외부 API"}.get,
         key="llm-provider-internal-choice",
     )
@@ -3952,10 +4105,10 @@ def main() -> None:
         internal_provider = "ollama" if internal_provider == "gemini" else internal_provider
     st.session_state["llm-provider-paper"] = paper_provider
     st.session_state["llm-provider-internal"] = internal_provider
-    model = st.sidebar.text_input("Ollama 모델", value="gpt-oss:20b", disabled="ollama" not in {paper_provider, internal_provider})
+    model = st.sidebar.text_input(ui_text("Ollama 모델", "Ollama model"), value="gpt-oss:20b", disabled="ollama" not in {paper_provider, internal_provider})
     use_ollama = "ollama" in {paper_provider, internal_provider}
-    semantic = st.sidebar.checkbox("시드카드 임베딩 검색", value=True, help="질문과 표현이 다른 카드도 시드 후보로 찾습니다. 사용할 수 없으면 lexical 검색으로 자동 전환됩니다.")
-    embedding_model = st.sidebar.text_input("임베딩 모델", value="nomic-embed-text", disabled=not semantic)
+    semantic = st.sidebar.checkbox(ui_text("시드카드 임베딩 검색", "Semantic seed-card search"), value=True, help=ui_text("질문과 표현이 다른 카드도 시드 후보로 찾습니다. 사용할 수 없으면 lexical 검색으로 자동 전환됩니다.", "Finds seed cards even when their wording differs from the question. Falls back to lexical search if unavailable."))
+    embedding_model = st.sidebar.text_input(ui_text("임베딩 모델", "Embedding model"), value="nomic-embed-text", disabled=not semantic)
     if use_ollama:
         connected, status = ollama_status(model)
         st.sidebar.caption(f"Ollama · {status}")
@@ -3967,9 +4120,19 @@ def main() -> None:
     pending_workspace = st.session_state.pop("_navigate_workspace", None)
     if pending_workspace:
         st.session_state["main-workspace"] = pending_workspace
+    workspace_items = [
+        ("연구위원 데스크", ui_text("연구위원 데스크", "Research Fellow Desk")),
+        ("Research Sensemaking", ui_text("Research Sensemaking", "Research Sensemaking")),
+        ("M1 · 문헌조사·지식화", ui_text("M1 · 문헌조사·지식화", "M1 · Literature & Knowledge")),
+        ("M2 · 지식 기반 자문", ui_text("M2 · 지식 기반 자문", "M2 · Knowledge-based Advisory")),
+        ("지식 베이스·운영", ui_text("지식 베이스·운영", "Knowledge Base & Operations")),
+        ("개발·프롬프트", ui_text("개발·프롬프트", "Development & Prompts")),
+    ]
+    workspace_labels = {key: label for key, label in workspace_items}
     screen = st.sidebar.radio(
-        "작업공간",
-        ["연구위원 데스크", "Research Sensemaking", "M1 · 문헌조사·지식화", "M2 · 지식 기반 자문", "지식 베이스·운영", "개발·프롬프트"],
+        ui_text("작업공간", "Workspace"),
+        [key for key, _ in workspace_items],
+        format_func=lambda value: workspace_labels[value],
         key="main-workspace",
     )
     if screen == "연구위원 데스크":
@@ -3981,15 +4144,15 @@ def main() -> None:
     elif screen == "M2 · 지식 기반 자문":
         m2_screen(model, use_ollama, semantic, embedding_model)
     elif screen == "지식 베이스·운영":
-        overview_tab, delta_tab, manage_tab = st.tabs(["승인 지식·관계", "연구 활동 Delta", "지식 관리"])
+        overview_tab, delta_tab, manage_tab = st.tabs([ui_text("승인 지식·관계", "Approved Knowledge & Relations"), ui_text("연구 활동 Delta", "Research Activity Delta"), ui_text("지식 관리", "Knowledge Management")])
         with overview_tab:
-            st.header("지식 베이스")
-            st.caption("이 화면은 M1·M2가 함께 참조하는 승인 지식과 승인 관계의 읽기·관리 투영입니다.")
+            st.header(ui_text("지식 베이스", "Knowledge Base"))
+            st.caption(ui_text("이 화면은 M1·M2가 함께 참조하는 승인 지식과 승인 관계의 읽기·관리 투영입니다.", "Read and manage the approved knowledge and relations shared by M1 and M2."))
             cards = memory.all()
             active_relations = ledger.active_knowledge_relations({card["card_id"] for card in cards})
-            st.metric("승인 지식카드", len(cards))
-            st.metric("승인 관계", len(active_relations))
-            query = st.text_input("승인 지식 검색", placeholder="예: multi LLM design feasibility", key="knowledge-base-query")
+            st.metric(ui_text("승인 지식카드", "Approved knowledge cards"), len(cards))
+            st.metric(ui_text("승인 관계", "Approved relations"), len(active_relations))
+            query = st.text_input(ui_text("승인 지식 검색", "Search approved knowledge"), placeholder=ui_text("예: multi LLM design feasibility", "e.g., multi LLM design feasibility"), key="knowledge-base-query")
             if query.strip():
                 show_retrieval_results(search_knowledge(query, semantic, embedding_model, limit=10), detailed=True)
         with delta_tab:

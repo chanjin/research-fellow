@@ -6,11 +6,14 @@ promote a paper summary into approved knowledge or a card into a paper fact.
 
 from __future__ import annotations
 
-import uuid
+import html
 import re
+import uuid
+from html.parser import HTMLParser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from research_fellow.infrastructure.document_reader import ExtractedDocument
@@ -36,43 +39,194 @@ def store_paper_upload(uploaded_file: Any, root: Path) -> str:
     return str(target)
 
 
+def _response_content_type(response: Any) -> str:
+    try:
+        return str(response.headers.get("Content-Type", "")).lower()
+    except Exception:
+        return ""
+
+
+def _response_url(response: Any, fallback: str) -> str:
+    try:
+        return str(response.geturl() or fallback)
+    except Exception:
+        return fallback
+
+
+def _read_limited(response: Any, limit: int) -> bytes:
+    try:
+        data = response.read(limit + 1)
+    except TypeError:
+        data = response.read()
+    if len(data) > limit:
+        raise ValueError("원문 응답이 허용 크기를 초과했습니다.")
+    return data
+
+
+def _looks_like_pdf(url: str, content_type: str, payload: bytes) -> bool:
+    return (
+        payload.startswith(b"%PDF")
+        or "application/pdf" in content_type
+        or urlparse(url).path.lower().endswith(".pdf")
+    )
+
+
+def _discover_pdf_urls(page_url: str, html_text: str) -> list[str]:
+    """Find likely PDF links from common scholarly landing-page metadata."""
+    candidates: list[str] = []
+    patterns = [
+        r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']citation_pdf_url["\']',
+        r'<meta[^>]+name=["\']pdf_url["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+property=["\']og:pdf["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<link[^>]+type=["\']application/pdf["\'][^>]+href=["\']([^"\']+)["\']',
+        r'<a[^>]+href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']',
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, html_text, flags=re.IGNORECASE):
+            candidate = html.unescape(match.group(1)).strip()
+            if candidate:
+                resolved = urljoin(page_url, candidate)
+                if resolved not in candidates:
+                    candidates.append(resolved)
+    return candidates[:8]
+
+
+def _download_pdf_candidate(url: str) -> tuple[bytes | None, list[str]]:
+    """Fetch a URL and return PDF bytes, or PDF links discovered on an HTML landing page."""
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 ResearchFellow/0.1",
+            "Accept": "application/pdf,text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urlopen(request, timeout=60) as response:
+        resolved_url = _response_url(response, url)
+        content_type = _response_content_type(response)
+        if "text/html" in content_type or "application/xhtml+xml" in content_type:
+            payload = _read_limited(response, 2 * 1024 * 1024)
+            charset = "utf-8"
+            try:
+                charset = response.headers.get_content_charset() or "utf-8"
+            except Exception:
+                pass
+            text = payload.decode(charset, errors="replace")
+            return None, _discover_pdf_urls(resolved_url, text)
+
+        payload = _read_limited(response, 80 * 1024 * 1024)
+        if _looks_like_pdf(resolved_url, content_type, payload):
+            return payload, []
+        return None, []
+
+
+class _ReadableHTMLParser(HTMLParser):
+    """Extract readable scholarly text from a source HTML page without JS rendering."""
+
+    _BLOCK_TAGS = {
+        "article", "section", "p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
+        "li", "blockquote", "pre", "figcaption", "td", "th", "br"
+    }
+    _SKIP_TAGS = {"script", "style", "noscript", "svg", "canvas", "nav", "footer"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._parts: list[str] = []
+        self.title = ""
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+        if tag == "title":
+            self._in_title = True
+        if not self._skip_depth and tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "title":
+            self._in_title = False
+        if tag in self._SKIP_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+        if not self._skip_depth and tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        text = " ".join(data.split())
+        if not text:
+            return
+        if self._in_title and not self.title:
+            self.title = text
+        self._parts.append(text + " ")
+
+    def readable_text(self) -> str:
+        text = "".join(self._parts)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+
+def document_from_source_url(paper: dict[str, Any], max_bytes: int = 8 * 1024 * 1024) -> StoredPaperUpload:
+    """Fetch a researcher-supplied scholarly HTML source as a text document.
+
+    ``source_url`` is treated as the canonical/readable paper page, not as a PDF
+    download location. Local PDFs remain separately managed through ``pdf_path``.
+    """
+    source_url = str(paper.get("source_url") or "").strip()
+    if not source_url:
+        raise ValueError("원문 URL이 등록되어 있지 않습니다.")
+    request = Request(
+        source_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 ResearchFellow/0.1",
+            "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        },
+    )
+    with urlopen(request, timeout=60) as response:
+        resolved_url = _response_url(response, source_url)
+        content_type = _response_content_type(response)
+        payload = _read_limited(response, max_bytes)
+        if _looks_like_pdf(resolved_url, content_type, payload):
+            raise ValueError("등록된 원문 URL은 PDF 주소입니다. 이 항목은 HTML 원문 URL로 사용하고 PDF는 로컬 파일로 별도 등록해 주세요.")
+        if "text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type:
+            raise ValueError(f"원문 URL에서 읽을 수 있는 HTML/텍스트를 받지 못했습니다. Content-Type: {content_type or 'unknown'}")
+        charset = "utf-8"
+        try:
+            charset = response.headers.get_content_charset() or "utf-8"
+        except Exception:
+            pass
+        raw_text = payload.decode(charset, errors="replace")
+        if "text/plain" in content_type:
+            readable = raw_text.strip()
+        else:
+            parser = _ReadableHTMLParser()
+            parser.feed(raw_text)
+            readable = parser.readable_text()
+        if len(readable) < 500:
+            raise ValueError("원문 URL에서 충분한 본문 텍스트를 읽지 못했습니다. 로그인 또는 JavaScript 렌더링이 필요한 페이지일 수 있습니다.")
+        title = re.sub(r"[^A-Za-z0-9._-]+", "_", str(paper.get("title") or "source"))[:80] or "source"
+        header = f"Source URL: {resolved_url}\nPaper title: {paper.get('title') or ''}\n\n"
+        return StoredPaperUpload(name=f"{title}.txt", content=(header + readable).encode("utf-8"))
 
 
 def ensure_shelf_pdf(paper: dict[str, Any], root: Path) -> str:
-    """Return a usable local PDF path, downloading an arXiv original when needed.
+    """Return an already-registered local PDF path.
 
-    Shelf metadata is durable and may sync across machines, while PDF files are
-    intentionally machine-local. This helper repairs a missing/stale local path
-    on demand from the paper source URL.
+    Source URLs are canonical HTML/full-text links and are intentionally not
+    converted into or used to auto-download PDFs. PDF assets are researcher-
+    managed separately through ``pdf_path``.
     """
     current = str(paper.get("pdf_path") or "").strip()
     if current and Path(current).exists():
         return current
+    return ""
 
-    source_url = str(paper.get("source_url") or "").strip()
-    source_id = str(paper.get("source_id") or "").strip()
-    if not source_url and source_id:
-        source_url = f"https://arxiv.org/abs/{source_id}"
-    if "arxiv.org" not in source_url:
-        return ""
-
-    if "/abs/" in source_url:
-        pdf_url = source_url.replace("/abs/", "/pdf/")
-    elif "/pdf/" in source_url:
-        pdf_url = source_url
-    else:
-        return ""
-    if not pdf_url.lower().endswith(".pdf"):
-        pdf_url += ".pdf"
-
-    root.mkdir(parents=True, exist_ok=True)
-    safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", source_id or Path(pdf_url).stem)
-    target = root / f"{safe_id or uuid.uuid4().hex[:10]}.pdf"
-    if not target.exists():
-        request = Request(pdf_url, headers={"User-Agent": "ResearchFellow/0.1 paper-shelf"})
-        with urlopen(request, timeout=60) as response:
-            target.write_bytes(response.read())
-    return str(target)
 
 def document_from_shelf_path(path: str) -> StoredPaperUpload:
     source = Path(path)

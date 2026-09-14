@@ -76,3 +76,51 @@ def test_auto_cycle_starts_from_unreviewed_cards_and_selects_this_batch_top3(tmp
         synthesis_drafter=lambda prompt: "",
     )
     assert again["status"] == "no_new_information"
+
+
+def test_auto_cycle_can_process_only_selected_source_updates(tmp_path: Path, monkeypatch):
+    import research_fellow.application.research_cycle as cycle
+    from research_fellow.application.advising import recent_knowledge_updates
+
+    ledger = Ledger(tmp_path / "selected.db")
+    cards = []
+    for index in range(1, 4):
+        card_id = f"kc-sel-{index}"
+        _update(ledger, card_id)
+        cards.append({
+            "card_id": card_id, "title": f"Card {index}", "claim": f"Claim {index}",
+            "evidence_excerpt": "evidence", "provenance": {"source_name": f"paper {index}"},
+        })
+
+    updates = recent_knowledge_updates(ledger, limit=500)
+    selected = [item for item in updates if (item.get("payload") or {}).get("card_id") in {"kc-sel-1", "kc-sel-2"}]
+    rq_output = """## RQ 1
+Question: 선택 카드 1과 2에서 무엇을 확인해야 하는가?
+Why Now: 두 카드가 공통된 연구 공백을 보여준다.
+Gap/Tension: 적용 조건이 불명확하다.
+Research Context: 선택된 카드만 사용한다.
+Source Card IDs: kc-sel-1, kc-sel-2
+Exploration Need: 관련 추가 문헌
+"""
+
+    monkeypatch.setattr(cycle, "execute_auto_literature_review", lambda *args, **kwargs: {"status": "completed", "report": "done", "papers": [], "run": {}})
+    result = execute_auto_research_cycle(
+        ledger, cards, tmp_path / "cache",
+        rq_drafter=lambda prompt: rq_output,
+        priority_drafter=lambda prompt: (
+            f"## Priority 1\nRQ_ID: {re.search(r'RQ_ID:\s*(rq-[A-Za-z0-9]+)', prompt).group(1)}\nSCORE: 5\nREASON: 선택된 지식에서 직접 도출됨"
+            if re.search(r'RQ_ID:\s*(rq-[A-Za-z0-9]+)', prompt) else ""
+        ),
+        keyword_drafter=lambda prompt: "",
+        abstract_reviewer=lambda prompt: "",
+        fulltext_drafter=lambda prompt: "",
+        synthesis_drafter=lambda prompt: "",
+        source_updates=selected,
+    )
+
+    assert result["source_card_count"] == 2
+    remaining = recent_knowledge_updates(ledger, limit=500)
+    remaining_ids = {(item.get("payload") or {}).get("card_id") for item in remaining}
+    assert "kc-sel-3" in remaining_ids
+    assert "kc-sel-1" not in remaining_ids
+    assert "kc-sel-2" not in remaining_ids

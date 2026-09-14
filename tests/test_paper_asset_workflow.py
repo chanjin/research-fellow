@@ -117,20 +117,98 @@ LLM 제공자 계층과 컨텍스트 관리가 고위험 영역인 이유는 무
     assert "코딩 에이전트의 품질" in parse_reading_summary(output)
 
 
-def test_shelf_pdf_can_be_recovered_from_arxiv_when_local_file_is_missing(tmp_path: Path, monkeypatch) -> None:
+def test_source_url_is_not_used_to_auto_download_pdf(tmp_path: Path, monkeypatch) -> None:
     from research_fellow.application import paper_shelf
 
-    class _Response:
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
-        def read(self): return b"%PDF-1.4 fake"
+    called = {"value": False}
 
-    monkeypatch.setattr(paper_shelf, "urlopen", lambda *args, **kwargs: _Response())
+    def _urlopen(*args, **kwargs):
+        called["value"] = True
+        raise AssertionError("source_url should not be used by ensure_shelf_pdf")
+
+    monkeypatch.setattr(paper_shelf, "urlopen", _urlopen)
     paper = {
         "source_id": "2401.01234",
-        "source_url": "https://arxiv.org/abs/2401.01234",
+        "source_url": "https://arxiv.org/html/2401.01234",
         "pdf_path": "",
     }
-    path = paper_shelf.ensure_shelf_pdf(paper, tmp_path / "papers")
-    assert Path(path).exists()
-    assert Path(path).name == "2401.01234.pdf"
+    assert paper_shelf.ensure_shelf_pdf(paper, tmp_path / "papers") == ""
+    assert called["value"] is False
+
+
+def test_shelf_source_url_and_reading_context_can_be_edited_after_intake(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "ledger.db")
+    paper = ledger.upsert_shelf_paper({
+        "title": "Editable paper",
+        "source_url": "https://example.org/old",
+        "intake_source": "search",
+    })
+    ledger.save_paper_analysis(paper["paper_id"], research_question="초기 활용 맥락")
+    ledger.update_shelf_paper(
+        paper["paper_id"],
+        shelf_status=paper["shelf_status"],
+        reading_status=paper["reading_status"],
+        source_url="https://example.org/new",
+    )
+    ledger.save_paper_analysis(paper["paper_id"], research_question="수정된 활용 맥락")
+
+    updated = ledger.shelf_paper(paper["paper_id"])
+    analysis = ledger.paper_analysis(paper["paper_id"])
+    assert updated["source_url"] == "https://example.org/new"
+    assert analysis["research_question"] == "수정된 활용 맥락"
+
+
+def test_html_source_url_can_be_read_as_text_document(monkeypatch) -> None:
+    from research_fellow.application import paper_shelf
+
+    html_payload = (
+        "<html><head><title>Agentic Workflows</title></head>"
+        "<body><article><h1>Agentic Workflows</h1>"
+        "<p>This paper distinguishes workflow tools from autonomous agents.</p>"
+        f"<p>{'evidence ' * 100}</p></article></body></html>"
+    ).encode("utf-8")
+
+    class _Headers:
+        def get(self, key, default=""):
+            return "text/html; charset=utf-8" if key.lower() == "content-type" else default
+        def get_content_charset(self): return "utf-8"
+
+    class _Response:
+        headers = _Headers()
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def geturl(self): return "https://arxiv.org/html/2401.01234"
+        def read(self, *args): return html_payload
+
+    monkeypatch.setattr(paper_shelf, "urlopen", lambda *args, **kwargs: _Response())
+    paper = {"title": "Agentic Workflows", "source_url": "https://arxiv.org/html/2401.01234"}
+    upload = paper_shelf.document_from_source_url(paper)
+    text = upload.getvalue().decode("utf-8")
+    assert "Source URL: https://arxiv.org/html/2401.01234" in text
+    assert "workflow tools from autonomous agents" in text
+    assert upload.name.endswith(".txt")
+
+
+def test_html_source_url_rejects_pdf_content(monkeypatch) -> None:
+    from research_fellow.application import paper_shelf
+
+    class _Headers:
+        def get(self, key, default=""):
+            return "application/pdf" if key.lower() == "content-type" else default
+        def get_content_charset(self): return None
+
+    class _Response:
+        headers = _Headers()
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def geturl(self): return "https://example.org/paper.pdf"
+        def read(self, *args): return b"%PDF-1.7 fake"
+
+    monkeypatch.setattr(paper_shelf, "urlopen", lambda *args, **kwargs: _Response())
+    paper = {"title": "Paper", "source_url": "https://example.org/paper.pdf"}
+    try:
+        paper_shelf.document_from_source_url(paper)
+    except ValueError as error:
+        assert "PDF" in str(error)
+    else:
+        raise AssertionError("PDF source URL should be rejected as HTML source")

@@ -1800,6 +1800,7 @@ class Ledger:
     def update_shelf_paper(
         self, paper_id: str, *, shelf_status: str, reading_status: str, labels: list[str] | None = None,
         title: str | None = None, authors: list[str] | None = None, publication_year: str | None = None,
+        source_url: str | None = None,
     ) -> None:
         if shelf_status not in {"core", "reference", "held", "excluded"}:
             raise ValueError("지원하지 않는 서재 상태입니다.")
@@ -1821,6 +1822,9 @@ class Ledger:
             if publication_year is not None:
                 sets.append("publication_year=?")
                 values.append(publication_year if re.fullmatch(r"(?:19|20)\d{2}", publication_year) else "")
+            if source_url is not None:
+                sets.append("source_url=?")
+                values.append(source_url.strip())
             values.extend([now(), paper_id])
             conn.execute(f"UPDATE paper_shelf SET {', '.join(sets)}, updated_at=? WHERE paper_id=?", values)
             self._record_paper_event(conn, paper_id, "state_updated", {"importance": shelf_status, "reading_status": reading_status})

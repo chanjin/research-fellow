@@ -154,7 +154,7 @@ from research_fellow.application.sensemaking import (
     sensemaking_answer_prompt, quick_search_plan_prompt, quick_literature_search,
     knowledge_card_candidate_prompt, parse_sensemaking_card_candidate,
 )
-from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, ensure_shelf_pdf, store_paper_upload, suggested_paper_labels
+from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, document_from_source_url, ensure_shelf_pdf, store_paper_upload, suggested_paper_labels
 from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, reading_prompt, unconsumed_reading_sections
 from research_fellow.application.ontology import ontology_context_dot, ontology_dot, search_cards_for_ontology
 from research_fellow.application.ontology_curation import (
@@ -986,8 +986,16 @@ def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> 
         st.caption(item["payload"].get("title") or item["payload"].get("finding", ""))
 
 
+def _precedent_shared_terms(current: str, previous: str, limit: int = 6) -> list[str]:
+    stop = {"논문", "연구", "질문", "지식카드", "작업", "현재", "대한", "관련", "판단", "등록", "the", "and", "for", "with", "from", "that", "this"}
+    def toks(text: str) -> set[str]:
+        return {t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[가-힣]{2,}", text) if t.lower() not in stop}
+    overlap = sorted(toks(current) & toks(previous), key=lambda x: (-len(x), x))
+    return overlap[:limit]
+
+
 def render_curation_precedents(situation: str, *, episode_types: set[str], semantic: bool, embedding_model: str) -> None:
-    """Put prior researcher decisions before the next curation action."""
+    """Show prior researcher decisions as explainable precedents, not merely similar cards."""
     episodes = [
         EpisodicMemory.model_validate(item)
         for item in ledger.episode_memories()
@@ -996,8 +1004,11 @@ def render_curation_precedents(situation: str, *, episode_types: set[str], seman
     recalls = episodic_retriever.recall(episodes, situation, limit=3, semantic=semantic, embedding_model=embedding_model)
     if not recalls:
         return
-    st.markdown("**유사한 과거 연구자 작업**")
-    st.caption("과거의 등록·보류·무관 판단을 비교하되, 현재 논문의 근거와 조건은 다시 확인하세요.")
+    st.markdown(ui_text("**참고할 만한 과거 연구자 판단**", "**Potentially relevant prior researcher decisions**"))
+    st.caption(ui_text(
+        "임베딩 유사도 자체가 근거는 아닙니다. 현재 작업과 겹치는 맥락, 당시 결정, 원천 논문을 보고 판단 기준만 참고하세요.",
+        "Embedding similarity is not evidence by itself. Use the overlapping context, prior decision, and source papers only as decision precedents."
+    ))
     cards = {card["card_id"]: card for card in memory.all()}
     for recall in recalls:
         episode = recall.episode
@@ -1005,21 +1016,36 @@ def render_curation_precedents(situation: str, *, episode_types: set[str], seman
         decision_label = "등록" if "등록" in decision_text else "보류" if "보류" in decision_text else "무관" if "무관" in decision_text or "등록하지" in decision_text else "검토"
         age = _relative_time(episode.updated_at)
         episode_cards = [cards[card_id] for card_id in episode.evidence_card_ids if card_id in cards]
-        claim_title = episode_cards[0]["title"] if episode_cards else _episode_claim_title(episode.answer_summary, episode.situation_summary)
-        with st.expander(f"{age} · {decision_label} · {claim_title} · 유사도 {recall.score:.2f}"):
-            st.caption(f"수행 시점: {episode.updated_at[:10]} · 당시 판단: {decision_text}")
-            st.markdown("**작업 상황**")
+        shared_terms = _precedent_shared_terms(situation, episode.retrieval_text())
+        sources = []
+        for card in episode_cards:
+            provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+            source_name = str((provenance or {}).get("source_name", "")).strip()
+            if source_name and source_name not in sources:
+                sources.append(source_name)
+        why = (
+            ui_text("겹치는 맥락: ", "Shared context: ") + ", ".join(shared_terms)
+            if shared_terms else
+            ui_text("유사한 연구 판단 상황으로 검색됨", "Retrieved as a similar research-decision situation")
+        )
+        with st.expander(f"{age} · {decision_label} · {why}"):
+            st.markdown(ui_text("**왜 참고하나**", "**Why this may help**"))
+            st.write(why)
+            st.caption(ui_text("당시 결정: ", "Prior decision: ") + decision_text)
+            if sources:
+                st.markdown(ui_text("**참고 논문**", "**Source papers**"))
+                for source in sources[:4]:
+                    st.write(f"- {source}")
+            st.markdown(ui_text("**당시 작업 상황**", "**Prior work context**"))
             st.write(episode.situation_summary)
-            st.markdown("**결정 결과**")
+            st.markdown(ui_text("**결정 결과**", "**Decision outcome**"))
             st.write(episode.answer_summary)
-            if episode.advisory_plan:
-                st.caption("수행 단계: " + " → ".join(episode.advisory_plan))
-            if episode_cards:
-                st.markdown("**당시 등록·참조 지식카드**")
-                for card in episode_cards:
-                    render_knowledge_card(card, key_prefix=f"precedent-{episode.episode_id}")
             if episode.unresolved_items:
-                st.caption("미결 사항: " + " · ".join(episode.unresolved_items))
+                st.caption(ui_text("미결 사항: ", "Open issues: ") + " · ".join(episode.unresolved_items))
+            st.caption(ui_text(
+                f"검색 보조 점수 {recall.score:.2f} · 결론을 복사하지 말고 판단 기준과 차이를 비교하세요.",
+                f"Retrieval score {recall.score:.2f} · Compare decision criteria and differences rather than copying the conclusion."
+            ))
 
 
 def _relative_time(value: str) -> str:
@@ -1754,24 +1780,33 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                     st.success("서재 상태를 저장했습니다.")
                     st.rerun()
             with actions:
+                with st.expander(ui_text("원문 URL 수정", "Edit source URL"), expanded=False):
+                    with st.form(f"paper-source-url-{paper['paper_id']}"):
+                        source_url_value = st.text_input(
+                            ui_text("원문 URL", "Source URL"),
+                            value=paper.get("source_url", ""),
+                            placeholder="https://...",
+                        )
+                        source_url_saved = st.form_submit_button(ui_text("URL 저장", "Save URL"))
+                    if source_url_saved:
+                        ledger.update_shelf_paper(
+                            paper["paper_id"],
+                            shelf_status=paper["shelf_status"],
+                            reading_status=paper["reading_status"],
+                            source_url=source_url_value,
+                        )
+                        st.success(ui_text("원문 URL을 저장했습니다.", "Source URL saved."))
+                        st.rerun()
                 if paper.get("source_url"):
-                    st.link_button("원문 페이지 열기", paper["source_url"], key=f"shelf-url-{paper['paper_id']}")
+                    st.link_button(ui_text("원문 페이지 열기", "Open source page"), paper["source_url"], key=f"shelf-url-{paper['paper_id']}")
                 path = Path(paper["pdf_path"]) if paper.get("pdf_path") and Path(paper["pdf_path"]).exists() else None
                 if path:
                     st.download_button("보관 원문 내려받기", data=path.read_bytes(), file_name=path.name, key=f"shelf-download-{paper['paper_id']}")
                 else:
-                    st.caption("로컬 원문 없음 · arXiv 논문이면 읽기 실행 시 자동으로 다시 가져옵니다.")
-                    if paper.get("source_url") and "arxiv.org" in paper.get("source_url", ""):
-                        if st.button("원문 지금 가져오기", key=f"fetch-shelf-pdf-{paper['paper_id']}"):
-                            try:
-                                recovered = ensure_shelf_pdf(paper, DATA / "papers")
-                                if not recovered:
-                                    raise ValueError("이 논문의 원문 다운로드 주소를 만들 수 없습니다.")
-                                ledger.update_shelf_pdf_path(paper["paper_id"], recovered)
-                                st.success("원문을 로컬에 가져왔습니다.")
-                                st.rerun()
-                            except Exception as error:
-                                st.error(f"원문 가져오기에 실패했습니다: {error}")
+                    st.caption(ui_text(
+                        "로컬 PDF 없음 · 원문 URL은 HTML 원문/논문 페이지 링크로 사용합니다. PDF는 내려받은 뒤 별도로 등록합니다.",
+                        "No local PDF · Source URL is used as the scholarly HTML/full-text page. Register a downloaded PDF separately if needed.",
+                    ))
                 with st.expander("서재함에서 삭제"):
                     st.caption("읽기 요약·질문·일반화 메모·이력·카드 연결이 함께 삭제됩니다. 이미 승인된 지식카드는 유지됩니다.")
                     with st.form(f"paper-shelf-delete-{paper['paper_id']}"):
@@ -1788,19 +1823,28 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                             st.warning("이미 삭제되었거나 찾을 수 없는 서재 항목입니다.")
             if selected_llm_provider("paper") == "gemini":
                 st.caption("본문 읽기 실행 환경: Gemini 외부 API · 이 논문의 원문과 프롬프트가 외부 API로 전송됩니다.")
-            question = st.text_area("이 논문을 읽는 연구 질문·활용 맥락", value=analysis.get("research_question", ""), key=f"shelf-question-{paper['paper_id']}")
+            question = st.text_area(
+                ui_text("이 논문을 읽는 연구 질문·활용 맥락", "Research question / intended use for reading this paper"),
+                value=analysis.get("research_question", ""),
+                key=f"shelf-question-{paper['paper_id']}",
+            )
+            qsave_col, _ = st.columns([1, 3])
+            if qsave_col.button(ui_text("질문·활용 맥락 저장", "Save reading context"), key=f"save-shelf-question-{paper['paper_id']}"):
+                ledger.save_paper_analysis(paper["paper_id"], research_question=question)
+                st.success(ui_text("이 논문을 읽는 질문·활용 맥락을 저장했습니다.", "Reading question / context saved."))
+                st.rerun()
             st.markdown("**M1 논문 읽기 · 요약–해석–질문–첨삭**")
             st.caption("논문 요약, 현재 연구 맥락 해석, 추천 서재 레이블, 원문 근거 기반 읽기 질문을 한 번에 만듭니다.")
             has_reading_record = bool(analysis.get("reading_raw_output") or ledger.paper_reading_questions(paper["paper_id"]))
             reading_action_label = "M1 논문 다시 읽기" if has_reading_record else "M1 논문 읽기 시작"
             if st.button(reading_action_label, type="primary", key=f"paper-reading-{paper['paper_id']}"):
                 try:
-                    resolved_path = str(path) if path and path.exists() else ensure_shelf_pdf(paper, DATA / "papers")
-                    if not resolved_path:
-                        raise ValueError("로컬 원문이 없고 자동으로 원문을 가져올 수 없습니다. PDF를 직접 등록하거나 원문 URL을 확인하세요.")
-                    if resolved_path != paper.get("pdf_path"):
-                        ledger.update_shelf_pdf_path(paper["paper_id"], resolved_path)
-                    document = extract_document(document_from_shelf_path(resolved_path), cache_dir=EXTRACTION_CACHE)
+                    if path and path.exists():
+                        document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
+                    elif paper.get("source_url"):
+                        document = extract_document(document_from_source_url(paper), cache_dir=EXTRACTION_CACHE)
+                    else:
+                        raise ValueError("읽을 원문이 없습니다. 로컬 PDF를 등록하거나 HTML 원문 URL을 입력해 주세요.")
                     streamed_parts: list[str] = []
                     live_output = st.empty()
 
@@ -1838,12 +1882,12 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                 prompt_key = f"manual-reading-prompt-{paper['paper_id']}"
                 if st.button("외부 채팅용 M1 프롬프트 만들기", key=f"make-{prompt_key}"):
                     try:
-                        resolved_path = str(path) if path and path.exists() else ensure_shelf_pdf(paper, DATA / "papers")
-                        if not resolved_path:
-                            raise ValueError("로컬 원문이 없고 자동으로 원문을 가져올 수 없습니다. PDF를 직접 등록하거나 원문 URL을 확인하세요.")
-                        if resolved_path != paper.get("pdf_path"):
-                            ledger.update_shelf_pdf_path(paper["paper_id"], resolved_path)
-                        document = extract_document(document_from_shelf_path(resolved_path), cache_dir=EXTRACTION_CACHE)
+                        if path and path.exists():
+                            document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
+                        elif paper.get("source_url"):
+                            document = extract_document(document_from_source_url(paper), cache_dir=EXTRACTION_CACHE)
+                        else:
+                            raise ValueError("읽을 원문이 없습니다. 로컬 PDF를 등록하거나 HTML 원문 URL을 입력해 주세요.")
                         st.session_state[prompt_key] = reading_prompt(document, paper, question)
                     except Exception as error:
                         st.error(f"M1 프롬프트 준비에 실패했습니다: {error}")
@@ -3380,49 +3424,84 @@ def _render_m1_new_information(model: str, use_ollama: bool, semantic: bool, emb
     st.caption("M2 연구상태 검토에서 아직 처리하지 않은 승인 지식카드입니다. 수동 모드는 RQ 후보를 Thread에 추가하고, 자동 모드는 Top 3 후속 문헌탐색까지 수행합니다.")
     st.metric("미처리 새 지식카드", len(updates))
     if updates:
-        with st.expander(f"미처리 지식카드 {len(updates)}건 보기", expanded=False):
+        update_by_id = {
+            str((update.get("payload") or {}).get("card_id", "")): update
+            for update in updates
+            if str((update.get("payload") or {}).get("card_id", ""))
+        }
+        option_labels: dict[str, str] = {}
+        for cid, update in update_by_id.items():
+            card = cards_by_id.get(cid, {})
+            provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+            source_name = str((provenance or {}).get("source_name", "")).strip()
+            claim = str(card.get("claim") or card.get("title") or cid).strip().replace("\n", " ")
+            short_claim = claim[:95] + ("…" if len(claim) > 95 else "")
+            label = f"{short_claim} · {source_name}" if source_name else short_claim
+            # Keep labels unique even when two claims begin with the same text.
+            option_labels[f"{label} [{cid}]"] = cid
+        selected_labels = st.multiselect(
+            ui_text("연구질문 생성에 사용할 새 지식 선택", "Select new knowledge for research-question generation"),
+            list(option_labels),
+            key="m2-new-info-selected-cards",
+            help=ui_text(
+                "관련된 카드 몇 건만 묶어 하나의 연구질문 생성 batch로 처리합니다. 선택하지 않은 카드는 미처리 상태로 남습니다.",
+                "Group only the relevant cards into this research-question batch. Unselected cards remain unreviewed."
+            ),
+        )
+        selected_ids = [option_labels[label] for label in selected_labels]
+        selected_updates = [update_by_id[cid] for cid in selected_ids if cid in update_by_id]
+        st.caption(ui_text(
+            f"선택 {len(selected_updates)} / 미처리 {len(updates)}건 · 선택하지 않은 지식은 다음 batch에 남습니다.",
+            f"Selected {len(selected_updates)} of {len(updates)} unreviewed items · unselected knowledge remains for a later batch."
+        ))
+        with st.expander(ui_text(f"미처리 지식카드 {len(updates)}건 보기", f"View {len(updates)} unreviewed knowledge cards"), expanded=False):
             for update in updates:
                 cid = str((update.get("payload") or {}).get("card_id", ""))
                 card = cards_by_id.get(cid, {})
-                st.write(f"- `{cid}` · {card.get('claim', card.get('title', ''))}")
-        valid_ids = {str((u.get("payload") or {}).get("card_id", "")) for u in updates if str((u.get("payload") or {}).get("card_id", ""))}
-        prompt = research_question_suggestions_prompt(updates, recent_research_questions(ledger), all_cards, max_suggestions=8)
+                provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+                source_name = str((provenance or {}).get("source_name", "")).strip()
+                st.write(f"- {'✓' if cid in selected_ids else '○'} `{cid}` · {card.get('claim', card.get('title', ''))}")
+                if source_name:
+                    st.caption(ui_text("참고논문 · ", "Source paper · ") + source_name)
+        valid_ids = set(selected_ids)
+        prompt = research_question_suggestions_prompt(selected_updates, recent_research_questions(ledger), all_cards, max_suggestions=8) if selected_updates else ""
         manual_col, auto_col = st.columns(2)
         with manual_col:
-            if st.button("수동 · 연구질문 후보 도출", key="m2-new-info-manual", type="primary"):
+            if st.button(ui_text("수동 · 연구질문 후보 도출", "Manual · Generate RQ candidates"), key="m2-new-info-manual", type="primary", disabled=not selected_updates):
                 parsed = parse_research_question_suggestions(llm_draft(prompt, model, use_ollama) or "", valid_card_ids=valid_ids, limit=8)
                 if not parsed:
                     st.warning("RQ 후보를 읽지 못했습니다. 새 지식은 미처리 상태로 유지됩니다.")
                 else:
-                    review_id = ledger.create_research_state_review("manual", updates)
-                    saved = store_research_question_candidates(ledger, parsed, updates, review_id=review_id)
+                    review_id = ledger.create_research_state_review("manual", selected_updates)
+                    saved = store_research_question_candidates(ledger, parsed, selected_updates, review_id=review_id)
                     for rq in saved:
                         ledger.ensure_research_question_thread(str(rq["rq_id"]), source_type="m1_knowledge", source_payload={"review_id": review_id})
-                    ledger.complete_research_state_review(review_id, generated_rq_count=len(saved), selected_rq_count=0, summary=f"새 지식카드 {len(updates)}건에서 RQ {len(saved)}건을 도출했습니다.")
+                    ledger.complete_research_state_review(review_id, generated_rq_count=len(saved), selected_rq_count=0, summary=f"선택한 새 지식카드 {len(selected_updates)}건에서 RQ {len(saved)}건을 도출했습니다.")
                     st.success(f"RQ Thread {len(saved)}건을 생성·보강했습니다."); st.rerun()
             with st.expander("외부 LLM으로 RQ 후보 도출", expanded=False):
-                st.text_area("외부 LLM용 프롬프트", value=prompt, key="m2-rq-external-prompt", height=360)
+                st.text_area(ui_text("외부 LLM용 프롬프트", "Prompt for external LLM"), value=prompt, key="m2-rq-external-prompt", height=360)
                 manual = st.text_area("외부 LLM 응답 붙여넣기", key="m2-rq-external-response", height=280)
-                if st.button("외부 응답을 RQ Thread에 반영", key="m2-rq-external-apply", disabled=not manual.strip()):
+                if st.button(ui_text("외부 응답을 RQ Thread에 반영", "Apply external response to RQ Threads"), key="m2-rq-external-apply", disabled=(not manual.strip() or not selected_updates)):
                     parsed = parse_research_question_suggestions(manual, valid_card_ids=valid_ids, limit=8)
                     if not parsed:
                         st.error("RQ 블록을 읽지 못했습니다.")
                     else:
-                        review_id = ledger.create_research_state_review("manual", updates)
-                        saved = store_research_question_candidates(ledger, parsed, updates, review_id=review_id)
+                        review_id = ledger.create_research_state_review("manual", selected_updates)
+                        saved = store_research_question_candidates(ledger, parsed, selected_updates, review_id=review_id)
                         for rq in saved:
                             ledger.ensure_research_question_thread(str(rq["rq_id"]), source_type="m1_knowledge", source_payload={"review_id": review_id, "generation_mode": "manual_external_llm"})
-                        ledger.complete_research_state_review(review_id, generated_rq_count=len(saved), selected_rq_count=0, summary=f"외부 LLM으로 새 지식카드 {len(updates)}건에서 RQ {len(saved)}건을 도출했습니다.")
+                        ledger.complete_research_state_review(review_id, generated_rq_count=len(saved), selected_rq_count=0, summary=f"외부 LLM으로 선택한 새 지식카드 {len(selected_updates)}건에서 RQ {len(saved)}건을 도출했습니다.")
                         st.success("RQ Thread에 반영했습니다."); st.rerun()
         with auto_col:
-            if st.button("자동 · 새 지식 연구 사이클 실행", key="m2-new-info-auto", type="primary"):
-                with st.spinner("RQ 생성·보강 → 중요도 평가 → M1 자동 문헌탐색을 수행합니다."):
+            if st.button(ui_text("자동 · 선택 지식 연구 사이클 실행", "Auto · Run cycle for selected knowledge"), key="m2-new-info-auto", type="primary", disabled=not selected_updates):
+                with st.spinner(ui_text("선택한 지식으로 RQ 생성·보강 → 중요도 평가 → M1 자동 문헌탐색을 수행합니다.", "Generating/refining RQs from selected knowledge → prioritizing → running M1 literature follow-up.")):
                     result = execute_auto_research_cycle(
                         ledger, all_cards, CACHE,
                         rq_drafter=lambda p: llm_draft(p, model, use_ollama), priority_drafter=lambda p: llm_draft(p, model, use_ollama),
                         keyword_drafter=lambda p: llm_draft(p, model, use_ollama), abstract_reviewer=lambda p: llm_draft(p, model, use_ollama, profile="abstract_triage"),
                         fulltext_drafter=lambda p: paper_draft_result(p, model, use_ollama, "full_text_similarity").text,
                         synthesis_drafter=lambda p: llm_draft(p, model, use_ollama),
+                        source_updates=selected_updates,
                     )
                 st.session_state["m2-auto-result"] = result; st.rerun()
         auto_result = st.session_state.pop("m2-auto-result", None)
@@ -3832,11 +3911,14 @@ def sensemaking_screen(model: str, use_ollama: bool, semantic: bool, embedding_m
             with st.form("sm-new-thread-form", clear_on_submit=True):
                 title = st.text_input(ui_text("제목", "Title"), placeholder=ui_text("예: Upstream Quality와 Shift-left의 유사성", "e.g., Similarities between Upstream Quality and Shift-left"))
                 first = st.text_area(ui_text("처음 궁금한 주장·사실·사례", "Initial claim, fact, case, or question"), height=130)
-                create = st.form_submit_button(ui_text("Thread 시작", "Start Thread"), type="primary", disabled=not first.strip())
+                create = st.form_submit_button(ui_text("Thread 시작", "Start Thread"), type="primary")
                 if create:
-                    item = ledger.create_sensemaking_thread(title, first)
-                    st.session_state["sensemaking-selected-thread"] = item["thread_id"]
-                    st.rerun()
+                    if not first.strip():
+                        st.warning(ui_text("처음 궁금한 주장·사실·사례를 입력해 주세요.", "Enter an initial claim, fact, case, or question."))
+                    else:
+                        item = ledger.create_sensemaking_thread(title, first)
+                        st.session_state["sensemaking-selected-thread"] = item["thread_id"]
+                        st.rerun()
         threads = ledger.sensemaking_threads(limit=100)
         for idx, item in enumerate(threads, start=1):
             selected = st.session_state.get("sensemaking-selected-thread") == item["thread_id"]

@@ -35,6 +35,7 @@ def execute_auto_research_cycle(
     max_suggestions: int = 8,
     max_select: int = 3,
     resume_run_id: str = "",
+    source_updates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Consume unreviewed M1 cards, update RQs, select Top 3, and run M1 literature review.
 
@@ -42,7 +43,7 @@ def execute_auto_research_cycle(
     their source cards. If candidate generation fails, the cards remain unreviewed and
     can be retried later.
     """
-    updates = recent_knowledge_updates(ledger, limit=500)
+    updates = list(source_updates) if source_updates is not None else recent_knowledge_updates(ledger, limit=500)
     if not updates:
         return {"status": "no_new_information", "source_card_count": 0, "review_id": "", "questions": [], "dispatched": [], "executions": []}
 

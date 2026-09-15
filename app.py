@@ -117,7 +117,10 @@ from research_fellow.application.advisory_workflow import (
     subquestion_judgment_prompt,
 )
 from research_fellow.application.episodic_memory import recall_act_spec, recall_context, store_advisory_episode, store_researcher_curation_episode
-from research_fellow.application.prompt_tasks import knowledge_update_report_prompt, research_question_suggestions_prompt
+from research_fellow.application.prompt_tasks import (
+    knowledge_grouping_prompt, knowledge_update_report_prompt, parse_knowledge_grouping,
+    research_question_suggestions_prompt,
+)
 from research_fellow.application.meaning_summary import (
     attach_reports, build_fact_groups, delta_inputs, delta_meaning_summary_prompt, deterministic_delta_summary,
     latest_summary, meaning_summary_prompt, record_delta_summary,
@@ -1107,6 +1110,48 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
             f"‘{_type_display_name(type_row)}’이 지정되었고 Ontology에 반영되었습니다."
         )
 
+    def _render_manual_card_source_context(card: dict, key_suffix: str) -> None:
+        """Show enough source context to assign additional Types confidently."""
+        provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+        source_paper = None
+        paper_id = str((provenance or {}).get("paper_id") or "").strip()
+        if paper_id:
+            source_paper = ledger.shelf_paper(paper_id)
+        if source_paper is None:
+            source_name = str((provenance or {}).get("source_name") or "").strip().casefold()
+            if source_name:
+                source_paper = next(
+                    (item for item in ledger.shelf_papers() if str(item.get("title", "")).strip().casefold() == source_name),
+                    None,
+                )
+        source_analysis = ledger.paper_analysis(source_paper["paper_id"]) if source_paper else None
+        with st.expander(ui_text("논문 · 원문 맥락 보기", "Paper · source context"), expanded=False):
+            st.markdown(f"**{ui_text('논문 제목', 'Paper title')}**  \n{(source_paper or {}).get('title') or (provenance or {}).get('source_name') or ui_text('출처 제목 정보 없음', 'No source title')}" )
+            abstract = str((source_paper or {}).get("abstract") or "").strip()
+            if abstract:
+                st.markdown(f"**{ui_text('초록', 'Abstract')}**")
+                st.write(abstract)
+            elif source_analysis and str(source_analysis.get("summary") or "").strip():
+                st.markdown(f"**{ui_text('논문 분석 요약', 'Paper analysis summary')}**")
+                st.write(source_analysis.get("summary"))
+            if card.get("context"):
+                st.markdown(f"**{ui_text('카드 맥락', 'Card context')}**")
+                st.write(card.get("context"))
+            if card.get("implication"):
+                st.markdown(f"**{ui_text('설계·연구 함의', 'Research / design implication')}**")
+                st.write(card.get("implication"))
+            if card.get("source_excerpt"):
+                st.markdown(f"**{ui_text('카드 주변 원문', 'Nearby source text')}**")
+                st.text_area(
+                    ui_text("주변 원문", "Nearby source text"), value=str(card.get("source_excerpt")),
+                    height=180, key=f"ontology-manual-source-{key_suffix}", disabled=True, label_visibility="collapsed",
+                )
+            evidence_lines = [line.strip() for line in str(card.get("evidence_excerpt") or "").splitlines() if line.strip()]
+            if evidence_lines:
+                st.markdown(f"**{ui_text('직접 원문 근거', 'Direct source evidence')}**")
+                for evidence in evidence_lines[:5]:
+                    st.markdown(f"- {evidence}")
+
     def _sync_card_types(card_id: str, widget_key: str) -> None:
         selected_ids = list(st.session_state.get(widget_key, []))
         ledger.set_card_ontology_types(card_id, selected_ids)
@@ -1166,19 +1211,29 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
         # "Untyped" is therefore a queue condition, not a curation-complete condition.
         untyped_ids = [str(card["card_id"]) for card in untyped_cards]
         current_ai_target = str(st.session_state.get("ontology-ai-target-card") or "")
+        include_typed_cards = st.checkbox(
+            ui_text("기존 타입이 있는 카드도 포함 · 추가 타입 지정/보정", "Include already typed cards · add/correct Types"),
+            value=False, key="ontology-ai-include-typed",
+            help=ui_text(
+                "기존 카드에 두 번째·세 번째 Type을 추가하려면 켜세요. 같은 논문·원문 맥락과 AI 제안 기능을 그대로 사용할 수 있습니다.",
+                "Enable this to reopen existing cards and add secondary Types with the same paper/source context and AI suggestions.",
+            ),
+        )
         target_ids = list(untyped_ids)
+        if include_typed_cards:
+            target_ids.extend(str(card["card_id"]) for card in cards if str(card["card_id"]) not in set(target_ids))
         if current_ai_target in cards_by_id and current_ai_target not in target_ids:
             target_ids.insert(0, current_ai_target)
 
         if not untyped_cards and not target_ids:
             st.success("현재 승인 지식카드는 모두 하나 이상의 타입이 지정되어 있습니다.")
-            st.caption("추가 타입 지정이 필요하면 Manual Builder에서 카드를 찾거나, AI Curation에서 작업 중이던 카드는 완료하기 전까지 계속 열어둘 수 있습니다.")
+            st.caption("위 옵션을 켜면 기존 타입 카드도 다시 열어 논문·원문 맥락을 보면서 추가 Type을 지정할 수 있습니다.")
         else:
             target_id = st.selectbox(
                 "온톨로지 작업 카드",
                 target_ids,
                 format_func=lambda cid: (
-                    ("[미분류] " if cid in untyped_ids else "[추가 타입 지정] ")
+                    ("[미분류] " if cid in untyped_ids else "[기존 타입 · 추가 지정] ")
                     + f"{cards_by_id[cid].get('title') or cards_by_id[cid].get('claim','')[:70]}"
                 ),
                 key="ontology-ai-target-card",
@@ -1610,6 +1665,7 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
                     if current_types:
                         st.markdown("현재 타입: " + " · ".join(f"`{x.get('facet_name') or '미분류'} / {x['name']}`" for x in current_types))
                     else: st.caption("현재 타입: 미지정")
+                    _render_manual_card_source_context(card, f"builder-{card['card_id']}")
                     key = f"ontology-inline-types-{card['card_id']}"
                     if key not in st.session_state: st.session_state[key] = current_ids
                     else: st.session_state[key] = [v for v in st.session_state[key] if v in set(type_ids)]
@@ -1913,7 +1969,9 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
             for item in reading_questions:
                 with st.expander(f"{reading_decision_labels.get(item['status'], item['status'])} · {item['question']}", expanded=False):
                     st.write(item["tentative_answer"])
-                    st.caption("근거: " + " · ".join(item["evidence"]))
+                    st.markdown("**원문 근거**")
+                    for evidence in list(item["evidence"])[:5]:
+                        st.markdown(f"- {evidence}")
                     st.caption("유보: " + item["uncertainty"])
                     if item.get("research_relevance"):
                         st.caption("연구 관련성: " + item["research_relevance"])
@@ -1945,8 +2003,8 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                         comment = st.text_area("근거 해석·첨삭", value=item["researcher_comment"])
                         st.caption("질문은 논문을 읽는 렌즈입니다. 카드 제목은 목록에서 구별하기 위한 짧은 요약이고, Claim은 근거와 조건을 포함한 완전한 주장입니다. 결정 전에도 제안값을 자유롭게 다듬을 수 있으며, 입력값은 ‘지식카드 등록’을 선택했을 때 카드에 반영됩니다.")
                         evidence_text = st.text_area(
-                            "원문 근거 (한 줄에 하나 · 최소 2개)", value="\n".join(item["evidence"]),
-                            help="각 근거는 p.N과 원문 단서가 있어야 합니다. 예: p.3 Method — evaluation setup",
+                            "원문 근거 (한 줄에 하나 · 2~5개)", value="\n".join(list(item["evidence"])[:5]),
+                            help="각 근거는 p.N과 원문 단서가 있어야 합니다. 서로 다른 맥락을 보여주는 핵심 근거를 최대 5개까지 유지합니다.",
                         )
                         card_title = st.text_input("카드 제목 (짧은 요약)", value=item.get("suggested_title", ""), help="Claim을 그대로 반복하지 말고, 목록·계보에서 구별할 수 있는 짧은 명사구로 작성합니다. 예: ‘명세 우선 설계의 품질 효과’")
                         card_claim = st.text_area("주장 (Claim)", value=item["tentative_answer"], help="근거와 적용 범위를 포함해 한 문장으로 독립적으로 이해되는 완전한 주장입니다.")
@@ -1977,6 +2035,9 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                             continue
                         if decision == "register" and (len(final_evidence) < 2 or any(not re.search(r"\bp\.\s*\d+\b", evidence, flags=re.I) for evidence in final_evidence)):
                             st.error("지식카드 등록에는 p.N 형식의 독립 원문 근거를 최소 2개 입력해야 합니다. 근거가 하나뿐이면 보류로 남기세요.")
+                            continue
+                        if decision == "register" and len(final_evidence) > 5:
+                            st.error("원문 근거는 핵심 위치 최대 5개까지만 유지해 주세요. 중복되거나 중요도가 낮은 근거를 줄인 뒤 다시 저장하세요.")
                             continue
                         if decision == "register" and duplicate_mode == "defer":
                             ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="deferred")
@@ -3423,32 +3484,258 @@ def _render_m1_new_information(model: str, use_ollama: bool, semantic: bool, emb
     st.subheader("M1 새 정보 → 연구질문")
     st.caption("M2 연구상태 검토에서 아직 처리하지 않은 승인 지식카드입니다. 수동 모드는 RQ 후보를 Thread에 추가하고, 자동 모드는 Top 3 후속 문헌탐색까지 수행합니다.")
     st.metric("미처리 새 지식카드", len(updates))
+    if theme_flash := st.session_state.pop("m2-theme-start-flash", None):
+        st.success(theme_flash)
     if updates:
         update_by_id = {
             str((update.get("payload") or {}).get("card_id", "")): update
             for update in updates
             if str((update.get("payload") or {}).get("card_id", ""))
         }
-        option_labels: dict[str, str] = {}
+        display_by_id: dict[str, str] = {}
         for cid, update in update_by_id.items():
             card = cards_by_id.get(cid, {})
             provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
             source_name = str((provenance or {}).get("source_name", "")).strip()
             claim = str(card.get("claim") or card.get("title") or cid).strip().replace("\n", " ")
             short_claim = claim[:95] + ("…" if len(claim) > 95 else "")
-            label = f"{short_claim} · {source_name}" if source_name else short_claim
-            # Keep labels unique even when two claims begin with the same text.
-            option_labels[f"{label} [{cid}]"] = cid
-        selected_labels = st.multiselect(
+            display_by_id[cid] = f"{short_claim} · {source_name}" if source_name else short_claim
+
+        valid_group_ids = set(update_by_id)
+        group_prompt = knowledge_grouping_prompt(updates, all_cards, max_groups=6)
+        group_cols = st.columns([1.5, 4.5])
+        if group_cols[0].button(
+            ui_text("AI 연구주제 그룹 제안", "Suggest research-theme groups"),
+            key="m2-new-info-group-suggest", type="secondary",
+        ):
+            with st.spinner(ui_text("새 지식을 연구주제 관점에서 묶고 있습니다.", "Grouping new knowledge by research theme.")):
+                raw_grouping = llm_draft(group_prompt, model, use_ollama) or ""
+                st.session_state["m2-new-info-groups"] = parse_knowledge_grouping(
+                    raw_grouping, valid_card_ids=valid_group_ids, limit=6
+                )
+                st.session_state["m2-new-info-group-source"] = "internal_llm"
+            st.rerun()
+        group_cols[1].caption(ui_text(
+            "LLM이 주장·맥락·함의·원천 논문을 함께 보고 연구주제 그룹과 서로 다른 Research Question Alternatives를 제안합니다. 연구자는 하나를 선택·수정한 뒤 바로 Thread를 시작할 수 있습니다.",
+            "The LLM proposes research-theme groups and distinct Research Question Alternatives using claims, context, implications, and source papers. Choose and edit one alternative, then start the Thread directly.",
+        ))
+
+        with st.expander(
+            ui_text("외부 LLM으로 연구주제 그룹 제안", "Suggest research-theme groups with an external LLM"),
+            expanded=bool(st.session_state.get("m2-new-info-group-external-error")),
+        ):
+            st.caption(ui_text(
+                "로컬/무료 LLM 대신 ChatGPT·Claude 등 외부 LLM을 사용할 수 있습니다. 아래 프롬프트 전체를 복사해 외부 LLM에 전달하고, JSON 응답을 다시 붙여 넣으세요.",
+                "Use ChatGPT, Claude, or another external LLM instead of the local/free model. Copy the full prompt below, then paste the returned JSON response here.",
+            ))
+            st.text_area(
+                ui_text("외부 LLM용 그룹핑 프롬프트", "Grouping prompt for external LLM"),
+                value=group_prompt,
+                key="m2-new-info-group-external-prompt",
+                height=360,
+                help=ui_text(
+                    "고정 높이 영역입니다. 전체 프롬프트를 복사해서 외부 LLM에 전달하세요.",
+                    "This is a fixed-height area. Copy the complete prompt to the external LLM.",
+                ),
+            )
+            external_grouping = st.text_area(
+                ui_text("외부 LLM 응답 붙여넣기", "Paste external LLM response"),
+                key="m2-new-info-group-external-response",
+                height=280,
+                placeholder=ui_text(
+                    "외부 LLM이 반환한 연구주제 그룹 JSON 전체를 붙여 넣으세요.",
+                    "Paste the complete research-theme grouping JSON returned by the external LLM.",
+                ),
+            )
+            if st.button(
+                ui_text("외부 LLM 그룹 제안 반영", "Apply external LLM group suggestions"),
+                key="m2-new-info-group-external-apply",
+                type="primary",
+                disabled=not external_grouping.strip(),
+            ):
+                parsed_groups = parse_knowledge_grouping(
+                    external_grouping, valid_card_ids=valid_group_ids, limit=6
+                )
+                if not parsed_groups:
+                    st.session_state["m2-new-info-group-external-error"] = True
+                    st.error(ui_text(
+                        "그룹 제안을 해석하지 못했습니다. 외부 LLM이 프롬프트에서 요구한 JSON 형식으로 응답했는지 확인해 주세요.",
+                        "Could not parse the group suggestions. Check that the external LLM returned the JSON format requested in the prompt.",
+                    ))
+                else:
+                    st.session_state["m2-new-info-groups"] = parsed_groups
+                    st.session_state["m2-new-info-group-external-error"] = False
+                    st.session_state["m2-new-info-group-source"] = "external_llm"
+                    st.success(ui_text(
+                        f"외부 LLM의 연구주제 그룹 {len(parsed_groups)}건을 반영했습니다.",
+                        f"Applied {len(parsed_groups)} research-theme groups from the external LLM.",
+                    ))
+                    st.rerun()
+
+        proposed_groups = list(st.session_state.get("m2-new-info-groups", []))
+        if proposed_groups:
+            st.markdown(ui_text("#### 제안된 연구주제 그룹", "#### Suggested research-theme groups"))
+            group_source = st.session_state.get("m2-new-info-group-source", "")
+            if group_source == "external_llm":
+                st.caption(ui_text("제안 생성 · 외부 LLM", "Generated by · External LLM"))
+            elif group_source == "internal_llm":
+                st.caption(ui_text("제안 생성 · 내부 LLM", "Generated by · Internal LLM"))
+            for index, group in enumerate(proposed_groups, start=1):
+                group_ids = [cid for cid in group.get("card_ids", []) if cid in valid_group_ids]
+                if not group_ids:
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"**{index}. {group.get('name', '')}** · {len(group_ids)} cards")
+                    if group.get("research_focus"):
+                        st.write(group["research_focus"])
+                    if group.get("why_together"):
+                        st.caption(ui_text("함께 볼 이유 · ", "Why together · ") + group["why_together"])
+                    alternatives = list(group.get("research_question_alternatives", []))
+                    if not alternatives and group.get("candidate_question"):
+                        alternatives = [{
+                            "title": "",
+                            "question": str(group.get("candidate_question", "")),
+                            "rationale": str(group.get("why_together", "")),
+                            "research_context": str(group.get("research_focus", "")),
+                            "gap_or_tension": "",
+                            "exploration_need": "",
+                        }]
+                    if alternatives:
+                        st.markdown(ui_text("**Research Theme Alternatives**", "**Research Theme Alternatives**"))
+                        alt_index = st.radio(
+                            ui_text("연구 방향 선택", "Choose a research angle"),
+                            options=list(range(len(alternatives))),
+                            format_func=lambda alt_i, alts=alternatives: (
+                                f"{alts[alt_i].get('title') + ' · ' if alts[alt_i].get('title') else ''}{alts[alt_i].get('question', '')}"
+                            ),
+                            key=f"m2-theme-alt-choice-{index}",
+                            label_visibility="collapsed",
+                        )
+                        selected_alt = alternatives[int(alt_index)]
+                        st.caption(ui_text(
+                            "선택한 제안은 출발점입니다. 아래에서 연구자가 질문과 맥락을 직접 수정한 뒤 바로 Thread를 시작할 수 있습니다.",
+                            "The selected alternative is only a starting point. Edit the question and context below, then start the Thread directly.",
+                        ))
+                        edit_key = f"m2-theme-edit-{index}-{alt_index}"
+                        edited_question = st.text_area(
+                            ui_text("Research Question", "Research Question"),
+                            value=str(selected_alt.get("question", "")),
+                            key=f"{edit_key}-question", height=100,
+                        )
+                        edited_rationale = st.text_area(
+                            ui_text("도출 이유 / Why now", "Rationale / Why now"),
+                            value=str(selected_alt.get("rationale") or group.get("why_together", "")),
+                            key=f"{edit_key}-rationale", height=80,
+                        )
+                        edited_context = st.text_area(
+                            ui_text("연구 맥락", "Research context"),
+                            value=str(selected_alt.get("research_context") or group.get("research_focus", "")),
+                            key=f"{edit_key}-context", height=90,
+                        )
+                        with st.expander(ui_text("공백·긴장 / 후속 탐색 필요 수정", "Edit gap/tension and exploration need"), expanded=False):
+                            edited_gap = st.text_area(
+                                ui_text("공백 / 긴장", "Gap / tension"),
+                                value=str(selected_alt.get("gap_or_tension", "")),
+                                key=f"{edit_key}-gap", height=70,
+                            )
+                            edited_need = st.text_area(
+                                ui_text("추가 탐색 필요", "Exploration need"),
+                                value=str(selected_alt.get("exploration_need", "")),
+                                key=f"{edit_key}-need", height=70,
+                            )
+                    else:
+                        edited_question = ""
+                        edited_rationale = str(group.get("why_together", ""))
+                        edited_context = str(group.get("research_focus", ""))
+                        edited_gap = ""
+                        edited_need = ""
+                        st.warning(ui_text(
+                            "이 그룹에는 Research Question Alternative가 없습니다. 그룹 제안을 다시 생성해 주세요.",
+                            "This group has no research-question alternatives. Regenerate the theme suggestions.",
+                        ))
+                    with st.expander(ui_text("그룹의 지식카드 상세 보기", "View knowledge-card details"), expanded=False):
+                        for cid in group_ids:
+                            card = cards_by_id.get(cid, {})
+                            provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+                            st.markdown(f"**{card.get('title') or cid}**")
+                            if (provenance or {}).get("source_name"):
+                                st.caption(ui_text("참고논문 · ", "Source paper · ") + str(provenance.get("source_name")))
+                            st.write(card.get("claim") or "")
+                            if card.get("context"):
+                                st.caption(ui_text("맥락 · ", "Context · ") + str(card.get("context")))
+                            if card.get("implication"):
+                                st.caption(ui_text("함의 · ", "Implication · ") + str(card.get("implication")))
+                            if card.get("limits"):
+                                st.caption(ui_text("한계 · ", "Limits · ") + str(card.get("limits")))
+                    if st.button(
+                        ui_text("이 연구주제로 시작", "Start with this research theme"),
+                        key=f"m2-start-proposed-theme-{index}", type="primary",
+                        disabled=not edited_question.strip(),
+                    ):
+                        group_updates = [update_by_id[cid] for cid in group_ids if cid in update_by_id]
+                        rq_block = f"""## RQ 1
+Question: {edited_question.strip()}
+Why now: {edited_rationale.strip()}
+Gap/Tension: {edited_gap.strip()}
+Research Context: {edited_context.strip()}
+Source Card IDs: {', '.join(group_ids)}
+Exploration Need: {edited_need.strip()}
+"""
+                        parsed = parse_research_question_suggestions(
+                            rq_block, valid_card_ids=set(group_ids), limit=1
+                        )
+                        if not parsed:
+                            st.error(ui_text(
+                                "수정한 연구질문을 저장 가능한 형식으로 만들지 못했습니다.",
+                                "Could not convert the edited research theme into a storable research question.",
+                            ))
+                        else:
+                            review_id = ledger.create_research_state_review("manual", group_updates)
+                            saved = store_research_question_candidates(
+                                ledger, parsed, group_updates, review_id=review_id
+                            )
+                            for rq in saved:
+                                ledger.ensure_research_question_thread(
+                                    str(rq["rq_id"]),
+                                    source_type="m1_knowledge",
+                                    source_payload={
+                                        "review_id": review_id,
+                                        "generation_mode": "theme_alternative",
+                                        "theme_name": str(group.get("name", "")),
+                                        "theme_focus": str(group.get("research_focus", "")),
+                                        "why_together": str(group.get("why_together", "")),
+                                        "alternative_index": int(alt_index) if alternatives else 0,
+                                        "source_card_ids": group_ids,
+                                    },
+                                )
+                            ledger.complete_research_state_review(
+                                review_id, generated_rq_count=len(saved), selected_rq_count=len(saved),
+                                summary=ui_text(
+                                    f"연구주제 그룹 ‘{group.get('name','')}’의 Alternative를 연구자가 수정·확인하여 RQ Thread {len(saved)}건을 시작했습니다.",
+                                    f"Started {len(saved)} RQ Thread(s) after the researcher edited and confirmed an alternative from theme group '{group.get('name','')}'.",
+                                ),
+                            )
+                            if saved:
+                                st.session_state["m2-selected-m1-thread-id"] = str(saved[0]["rq_id"])
+                                st.session_state["m2-theme-start-flash"] = ui_text(
+                                    "선택한 연구주제로 Research Question Thread를 시작했습니다. 아래 M1 새 지식 기반 Thread에서 바로 이어갈 수 있습니다.",
+                                    "Started a Research Question Thread from the selected theme. Continue in the M1-knowledge Thread below.",
+                                )
+                            st.rerun()
+
+        existing_selection = st.session_state.get("m2-new-info-selected-cards", [])
+        if existing_selection and any(value not in valid_group_ids for value in existing_selection):
+            st.session_state["m2-new-info-selected-cards"] = []
+        selected_ids = st.multiselect(
             ui_text("연구질문 생성에 사용할 새 지식 선택", "Select new knowledge for research-question generation"),
-            list(option_labels),
+            options=list(update_by_id),
+            format_func=lambda cid: display_by_id.get(cid, cid),
             key="m2-new-info-selected-cards",
             help=ui_text(
-                "관련된 카드 몇 건만 묶어 하나의 연구질문 생성 batch로 처리합니다. 선택하지 않은 카드는 미처리 상태로 남습니다.",
-                "Group only the relevant cards into this research-question batch. Unselected cards remain unreviewed."
+                "AI 제안 그룹을 그대로 선택하거나, 연구자가 관련 카드 몇 건만 다시 조정해 하나의 연구질문 생성 batch로 처리합니다. 선택하지 않은 카드는 미처리 상태로 남습니다.",
+                "Use an AI-proposed group or adjust the cards manually. Unselected cards remain unreviewed for later batches.",
             ),
         )
-        selected_ids = [option_labels[label] for label in selected_labels]
         selected_updates = [update_by_id[cid] for cid in selected_ids if cid in update_by_id]
         st.caption(ui_text(
             f"선택 {len(selected_updates)} / 미처리 {len(updates)}건 · 선택하지 않은 지식은 다음 batch에 남습니다.",

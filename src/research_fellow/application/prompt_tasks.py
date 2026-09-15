@@ -100,3 +100,131 @@ def research_question_suggestions_prompt(
         existing_questions=existing_questions,
         max_suggestions=max(1, min(max_suggestions, 10)),
     )
+
+
+def knowledge_grouping_prompt(
+    updates: list[dict[str, Any]], cards: list[dict[str, Any]], *, max_groups: int = 6,
+) -> str:
+    """Ask M2 to propose research-theme groups before the researcher selects cards."""
+    cards_by_id = {str(card.get("card_id", "")): card for card in cards}
+    items: list[dict[str, Any]] = []
+    for index, update in enumerate(updates, start=1):
+        payload = update.get("payload", {}) if isinstance(update.get("payload"), dict) else {}
+        card = cards_by_id.get(str(payload.get("card_id", "")))
+        if not card:
+            continue
+        view = _card_view(card, f"K{index}")
+        items.append({
+            **view,
+            "context": str(card.get("context", "")),
+            "implication": str(card.get("implication", "")),
+            "concepts": list(card.get("concepts", [])),
+            "applies_to": list(card.get("applies_to", [])),
+        })
+    return f"""You are helping a researcher organize newly approved knowledge before formulating research questions.
+Group the knowledge cards by research-theme relevance, not merely lexical or embedding similarity.
+A useful group should represent a coherent research issue, tension, comparison, mechanism, or design question that could reasonably lead to one research question.
+Cards may appear in more than one group when they genuinely support different research angles. Do not force every card into a group.
+
+Return JSON only with this schema:
+{{
+  "groups": [
+    {{
+      "name": "short research-theme name",
+      "research_focus": "what common research issue connects these cards",
+      "why_together": "why these cards should be interpreted together rather than only because they are similar",
+      "research_question_alternatives": [
+        {{
+          "title": "short angle label",
+          "question": "one focused research question",
+          "rationale": "why this question is worth asking now from these cards",
+          "research_context": "the concrete research context that should not be lost",
+          "gap_or_tension": "the unresolved gap, contrast, or tension",
+          "exploration_need": "what should be checked next if deeper exploration is needed"
+        }}
+      ],
+      "card_ids": ["exact card_id", "..."]
+    }}
+  ]
+}}
+
+Rules:
+- Return at most {max(1, min(max_groups, 8))} groups.
+- For each group, return 2-4 genuinely different research-question alternatives (prefer 3).
+- Alternatives must differ by research angle, not by superficial wording.
+- Use only card_ids shown below.
+- Prefer groups of 2 or more cards, but allow a strong singleton when it exposes an important independent research direction.
+- Use source paper, context, implication, conditions, and limits when deciding why cards belong together.
+- These are researcher-editable theme/question alternatives, not approved research questions.
+
+New knowledge cards:
+{items}
+"""
+
+
+def parse_knowledge_grouping(text: str, *, valid_card_ids: set[str], limit: int = 8) -> list[dict[str, Any]]:
+    """Parse advisory grouping JSON defensively and keep only known card IDs."""
+    import json
+    import re
+
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, flags=re.S)
+        if not match:
+            return []
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return []
+    groups = payload.get("groups", []) if isinstance(payload, dict) else []
+    results: list[dict[str, Any]] = []
+    for item in groups:
+        if not isinstance(item, dict):
+            continue
+        ids = [str(cid) for cid in item.get("card_ids", []) if str(cid) in valid_card_ids]
+        ids = list(dict.fromkeys(ids))
+        name = str(item.get("name", "")).strip()
+        if not ids or not name:
+            continue
+        alternatives: list[dict[str, str]] = []
+        raw_alternatives = item.get("research_question_alternatives", [])
+        if isinstance(raw_alternatives, list):
+            for alt in raw_alternatives[:4]:
+                if not isinstance(alt, dict):
+                    continue
+                question = str(alt.get("question", "")).strip()
+                if not question:
+                    continue
+                alternatives.append({
+                    "title": str(alt.get("title", "")).strip()[:120],
+                    "question": question,
+                    "rationale": str(alt.get("rationale", "")).strip(),
+                    "research_context": str(alt.get("research_context", "")).strip(),
+                    "gap_or_tension": str(alt.get("gap_or_tension", "")).strip(),
+                    "exploration_need": str(alt.get("exploration_need", "")).strip(),
+                })
+        legacy_question = str(item.get("candidate_question", "")).strip()
+        if not alternatives and legacy_question:
+            alternatives.append({
+                "title": "",
+                "question": legacy_question,
+                "rationale": str(item.get("why_together", "")).strip(),
+                "research_context": str(item.get("research_focus", "")).strip(),
+                "gap_or_tension": "",
+                "exploration_need": "",
+            })
+        results.append({
+            "name": name[:140],
+            "research_focus": str(item.get("research_focus", "")).strip(),
+            "why_together": str(item.get("why_together", "")).strip(),
+            "research_question_alternatives": alternatives,
+            "candidate_question": alternatives[0]["question"] if alternatives else legacy_question,
+            "card_ids": ids,
+        })
+        if len(results) >= max(1, limit):
+            break
+    return results

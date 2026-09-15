@@ -35,7 +35,7 @@ Labels: up to ten concise English labels, separated by commas. Cover topic, meth
 Use these exact Korean field labels in every question block. Do not omit a field; when the source is insufficient, write "원문에서 확인 필요" rather than leaving it blank.
 질문: 연구자의 판단이 필요한 질문
 잠정 답변: 이 논문에만 근거한 해석
-근거: 독립적으로 확인 가능한 p.N과 짧은 원문 단서 두 개. 한 곳만 가능하면 그 사실을 한계·유보에 명시
+근거: 독립적으로 확인 가능한 p.N과 짧은 원문 단서 2~5개. 논문의 핵심 맥락을 더 잘 이해하는 데 도움이 되는 서로 다른 위치를 우선하고, 한 곳만 가능하면 그 사실을 한계·유보에 명시
 한계·유보: 적용 범위 또는 근거의 한계
 연구 관련성: 이 질문이 알리는 현재 가설·설계 선택·평가 쟁점·탐색 방향
 레이블: 간결한 영문 레이블, 쉼표 구분
@@ -58,7 +58,8 @@ Output check before responding:
 - Return one to five complete question blocks by default, and never more than ten, separated by ---.
 - Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건, 카드 맥락, 설계 함의, 주변 원문.
 - Every Evidence value must include p.N and a short source hint.
-- Prefer fewer complete blocks to an incomplete response. Keep every non-evidence field concise (one or two sentences); give exactly two evidence locations unless one is genuinely unavailable.
+- Return 2 to 5 independent evidence locations when the source supports them. Never return more than 5 evidence locations for one question.
+- Prefer fewer complete blocks to an incomplete response. Keep every non-evidence field concise (one or two sentences).
 """
 
 
@@ -155,7 +156,7 @@ def parse_reading_questions(text: str) -> list[dict[str, Any]]:
             results.append({
                 "question": values["question"],
                 "tentative_answer": values["tentative_answer"],
-                "evidence": evidence[:10],
+                "evidence": evidence[:5],
                 "uncertainty": values.get("uncertainty", "원문 범위를 넘어선 일반화는 유보합니다."),
                 "research_relevance": values.get("research_relevance", ""),
                 "suggested_labels": values.get("suggested_labels", ""),

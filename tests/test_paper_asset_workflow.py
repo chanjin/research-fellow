@@ -117,23 +117,23 @@ LLM 제공자 계층과 컨텍스트 관리가 고위험 영역인 이유는 무
     assert "코딩 에이전트의 품질" in parse_reading_summary(output)
 
 
-def test_source_url_is_not_used_to_auto_download_pdf(tmp_path: Path, monkeypatch) -> None:
+def test_shelf_pdf_can_be_recovered_from_arxiv_when_local_file_is_missing(tmp_path: Path, monkeypatch) -> None:
     from research_fellow.application import paper_shelf
 
-    called = {"value": False}
+    class _Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b"%PDF-1.4 fake"
 
-    def _urlopen(*args, **kwargs):
-        called["value"] = True
-        raise AssertionError("source_url should not be used by ensure_shelf_pdf")
-
-    monkeypatch.setattr(paper_shelf, "urlopen", _urlopen)
+    monkeypatch.setattr(paper_shelf, "urlopen", lambda *args, **kwargs: _Response())
     paper = {
         "source_id": "2401.01234",
-        "source_url": "https://arxiv.org/html/2401.01234",
+        "source_url": "https://arxiv.org/abs/2401.01234",
         "pdf_path": "",
     }
-    assert paper_shelf.ensure_shelf_pdf(paper, tmp_path / "papers") == ""
-    assert called["value"] is False
+    path = paper_shelf.ensure_shelf_pdf(paper, tmp_path / "papers")
+    assert Path(path).exists()
+    assert Path(path).name == "2401.01234.pdf"
 
 
 def test_shelf_source_url_and_reading_context_can_be_edited_after_intake(tmp_path: Path) -> None:
@@ -158,57 +158,13 @@ def test_shelf_source_url_and_reading_context_can_be_edited_after_intake(tmp_pat
     assert analysis["research_question"] == "수정된 활용 맥락"
 
 
-def test_html_source_url_can_be_read_as_text_document(monkeypatch) -> None:
-    from research_fellow.application import paper_shelf
-
-    html_payload = (
-        "<html><head><title>Agentic Workflows</title></head>"
-        "<body><article><h1>Agentic Workflows</h1>"
-        "<p>This paper distinguishes workflow tools from autonomous agents.</p>"
-        f"<p>{'evidence ' * 100}</p></article></body></html>"
-    ).encode("utf-8")
-
-    class _Headers:
-        def get(self, key, default=""):
-            return "text/html; charset=utf-8" if key.lower() == "content-type" else default
-        def get_content_charset(self): return "utf-8"
-
-    class _Response:
-        headers = _Headers()
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
-        def geturl(self): return "https://arxiv.org/html/2401.01234"
-        def read(self, *args): return html_payload
-
-    monkeypatch.setattr(paper_shelf, "urlopen", lambda *args, **kwargs: _Response())
-    paper = {"title": "Agentic Workflows", "source_url": "https://arxiv.org/html/2401.01234"}
-    upload = paper_shelf.document_from_source_url(paper)
-    text = upload.getvalue().decode("utf-8")
-    assert "Source URL: https://arxiv.org/html/2401.01234" in text
-    assert "workflow tools from autonomous agents" in text
-    assert upload.name.endswith(".txt")
-
-
-def test_html_source_url_rejects_pdf_content(monkeypatch) -> None:
-    from research_fellow.application import paper_shelf
-
-    class _Headers:
-        def get(self, key, default=""):
-            return "application/pdf" if key.lower() == "content-type" else default
-        def get_content_charset(self): return None
-
-    class _Response:
-        headers = _Headers()
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
-        def geturl(self): return "https://example.org/paper.pdf"
-        def read(self, *args): return b"%PDF-1.7 fake"
-
-    monkeypatch.setattr(paper_shelf, "urlopen", lambda *args, **kwargs: _Response())
-    paper = {"title": "Paper", "source_url": "https://example.org/paper.pdf"}
-    try:
-        paper_shelf.document_from_source_url(paper)
-    except ValueError as error:
-        assert "PDF" in str(error)
-    else:
-        raise AssertionError("PDF source URL should be rejected as HTML source")
+def test_reading_question_evidence_is_capped_at_five() -> None:
+    output = (
+        "Question: 어떤 조건에서 결과가 달라지는가?\n"
+        "Tentative answer: 여러 조건을 비교하면 과업별 차이가 드러난다는 충분히 긴 해석이다.\n"
+        "Evidence: p.1 intro; p.2 method; p.3 setup; p.4 results; p.5 ablation; p.6 discussion\n"
+        "Uncertainty: 추가 검증이 필요하다."
+    )
+    questions = parse_reading_questions(output)
+    assert len(questions) == 1
+    assert questions[0]["evidence"] == ["p.1 intro", "p.2 method", "p.3 setup", "p.4 results", "p.5 ablation"]

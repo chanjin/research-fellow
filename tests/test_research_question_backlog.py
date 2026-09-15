@@ -255,3 +255,23 @@ Exploration Need: 조건 비교가 필요하다.
     rq = ledger.research_question(saved1["rq_id"])
     assert set(rq["source_card_ids"]) == {"kc-a", "kc-b"}
     assert {item["review_id"] for item in ledger.research_question_sources(rq["rq_id"])} == {r1, r2}
+
+
+def test_parse_research_theme_grouping_uses_only_valid_card_ids():
+    from research_fellow.application.prompt_tasks import parse_knowledge_grouping
+
+    raw = '''{
+      "groups": [
+        {
+          "name": "Agent as tool vs role-bearing actor",
+          "research_focus": "Two competing conceptions of agents",
+          "why_together": "The cards contrast deterministic workflow tooling with role-driven emergent behavior.",
+          "candidate_question": "When should an agent be engineered as a workflow tool versus a role-bearing actor?",
+          "card_ids": ["kc-1", "kc-2", "unknown"]
+        }
+      ]
+    }'''
+    groups = parse_knowledge_grouping(raw, valid_card_ids={"kc-1", "kc-2", "kc-3"})
+    assert len(groups) == 1
+    assert groups[0]["card_ids"] == ["kc-1", "kc-2"]
+    assert "workflow" in groups[0]["why_together"]

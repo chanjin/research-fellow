@@ -128,6 +128,11 @@ from research_fellow.application.meaning_summary import (
 from research_fellow.application.search_profiles import (
     abstract_relevance_prompt, attach_relevance, is_english_search_term, keyword_prompt, parse_keyword_plan, run_profile, shortlist_candidates,
 )
+from research_fellow.application.literature_discovery import (
+    apply_discovery_triage, collect_arxiv_candidates, discovery_search_plan_prompt,
+    discovery_triage_prompt, external_literature_discovery_prompt, parse_discovery_search_plan,
+    parse_external_literature_results, paper_access_links, download_discovery_pdf,
+)
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.auto_literature import execute_auto_literature_review
 from research_fellow.application.research_cycle import execute_auto_research_cycle
@@ -905,7 +910,14 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
 
 
 def home(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
-    st.header(ui_text("연구위원 홈", "Research Fellow Home"))
+    st.header(WORKSPACE_PROFILE.label)
+    st.markdown(f"**{ui_text(WORKSPACE_PROFILE.topic_ko, WORKSPACE_PROFILE.topic_en)}**")
+    st.caption(ui_text(WORKSPACE_PROFILE.purpose, {
+        "general": "A broad workspace for cross-domain interests and long-term research memory.",
+        "agent_development": "A focused workspace for AI agent development, specification, workflows, memory, and evaluation.",
+        "vision_ai": "A focused workspace for computer vision, multimodal AI, industrial visual inspection, and representation learning.",
+    }.get(WORKSPACE_KEY, WORKSPACE_PROFILE.purpose)))
+    st.divider()
     st.caption(ui_text("연구자에게 필요한 판단과 M1·M2의 최근 공유현상을 한곳에서 봅니다.", "Review researcher decisions and recent M1/M2 shared phenomena in one place."))
     # Paper reading already includes the researcher's evidence review and card
     # authoring. It therefore creates knowledge directly, not another approval
@@ -2122,7 +2134,187 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
 def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     st.header(ui_text("M1 · 문헌조사·지식화 작업실", "M1 · Literature & Knowledge Workspace"))
     st.caption(ui_text("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.", "M1 explores and structures literature and research notes to prepare candidate knowledge and relations. It does not answer researcher questions directly; validated knowledge is passed to M2."))
-    upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs([ui_text("서재함", "Paper Shelf"), ui_text("온톨로지", "Ontology"), ui_text("관계·계보 정리", "Relations & Lineage"), ui_text("승인 지식 조회", "Approved Knowledge Search"), ui_text("문헌 탐색 작업", "Literature Search Tasks"), ui_text("승인 지식 목록", "Approved Knowledge List")])
+    discovery_tab, upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs([ui_text("LLM 문헌 탐색", "LLM Literature Discovery"), ui_text("서재함", "Paper Shelf"), ui_text("온톨로지", "Ontology"), ui_text("관계·계보 정리", "Relations & Lineage"), ui_text("승인 지식 조회", "Approved Knowledge Search"), ui_text("문헌 탐색 작업", "Literature Search Tasks"), ui_text("승인 지식 목록", "Approved Knowledge List")])
+    with discovery_tab:
+        st.caption(ui_text(
+            "궁금한 연구주제를 빠르게 탐색해 관련 논문의 윤곽을 파악합니다. 이 기능은 정식 문헌리뷰가 아니라 탐색용이며, 마음에 드는 논문을 원문 링크로 확인한 뒤 서재함에 넣어 정식 읽기로 이어갑니다.",
+            "Quickly explore a research topic to understand the literature landscape. This is exploratory discovery, not a systematic review. Inspect source pages, then move promising papers to the shelf for formal reading."
+        ))
+        topic = st.text_area(
+            ui_text("무엇을 찾아보고 싶은가?", "What do you want to explore?"),
+            key="m1-discovery-topic", height=100,
+            placeholder=ui_text("예: Agentic workflow와 role-driven autonomous agent의 차이를 다룬 연구", "e.g. Research comparing agentic workflows with role-driven autonomous agents"),
+        )
+        context = st.text_area(
+            ui_text("연구 맥락 · 관심 관점 (선택)", "Research context / angle (optional)"),
+            key="m1-discovery-context", height=90,
+            placeholder=ui_text("왜 이 주제가 궁금한지, 특히 보고 싶은 관점이나 제외할 범위를 적습니다.", "Add why this matters, the angle you care about, or what should be excluded."),
+        )
+        target_count = st.slider(ui_text("확인할 논문 수", "Number of papers to inspect"), min_value=5, max_value=20, value=12, step=1, key="m1-discovery-count")
+
+        internal_col, external_col = st.columns(2)
+        with internal_col:
+            if st.button(ui_text("내부 LLM으로 빠른 문헌 탐색", "Quick search with internal LLM"), type="primary", disabled=not topic.strip(), key="m1-discovery-internal"):
+                try:
+                    with st.spinner(ui_text("검색전략 생성 → arXiv 후보 수집 → 초록 빠른 비교 중", "Generating search plan → retrieving arXiv candidates → triaging abstracts")):
+                        plan_raw = llm_draft(discovery_search_plan_prompt(topic, context, target_count), model, use_ollama, profile="search_strategy") or ""
+                        plan = parse_discovery_search_plan(plan_raw)
+                        candidates = collect_arxiv_candidates(plan["queries"], max_results=target_count)
+                        if not candidates:
+                            st.session_state["m1-discovery-results"] = []
+                            st.warning(ui_text("현재 검색식으로 arXiv 후보를 찾지 못했습니다. 맥락을 보완하거나 외부 LLM 탐색을 사용해 보세요.", "No arXiv candidates were found with the current plan. Refine the context or try external-LLM discovery."))
+                        else:
+                            triage_raw = llm_draft(discovery_triage_prompt(topic, context, candidates, target_count), model, use_ollama, profile="abstract_triage") or ""
+                            results = apply_discovery_triage(candidates, triage_raw, target_count)
+                            st.session_state["m1-discovery-results"] = results
+                            st.session_state["m1-discovery-plan"] = plan
+                            st.session_state["m1-discovery-summary"] = plan.get("scope_summary", "")
+                            st.session_state["m1-discovery-source"] = "internal"
+                            st.rerun()
+                except Exception as error:
+                    st.error(ui_text(f"빠른 문헌 탐색에 실패했습니다: {error}", f"Quick literature discovery failed: {error}"))
+        with external_col:
+            st.caption(ui_text("웹 검색이 가능한 외부 LLM을 사용하면 arXiv 밖의 논문도 함께 탐색할 수 있습니다.", "A web-enabled external LLM can also discover papers beyond arXiv."))
+
+        with st.expander(ui_text("외부 LLM으로 문헌 탐색", "Discover literature with an external LLM"), expanded=False):
+            prompt_signature = f"{topic.strip()}\n---CONTEXT---\n{context.strip()}\n---COUNT---\n{target_count}"
+            previous_signature = st.session_state.get("m1-discovery-external-prompt-signature")
+            if topic.strip() and prompt_signature != previous_signature:
+                st.session_state["m1-discovery-external-prompt"] = external_literature_discovery_prompt(topic, context, target_count)
+                st.session_state["m1-discovery-external-prompt-signature"] = prompt_signature
+            elif not topic.strip() and prompt_signature != previous_signature:
+                st.session_state["m1-discovery-external-prompt"] = ui_text(
+                    "먼저 위의 ‘무엇을 찾아보고 싶은가?’를 입력하세요.",
+                    "Enter ‘What do you want to explore?’ above first.",
+                )
+                st.session_state["m1-discovery-external-prompt-signature"] = prompt_signature
+
+            st.caption(ui_text(
+                "위의 연구주제와 연구 맥락을 바꾸면 외부 LLM용 검색 프롬프트도 자동으로 갱신됩니다. 아래 프롬프트 전체를 웹 검색이 가능한 외부 LLM에 전달하세요.",
+                "The external-LLM search prompt is regenerated automatically from the topic and research context above. Copy the full prompt below into a web-enabled external LLM.",
+            ))
+            if st.button(
+                ui_text("현재 입력으로 검색 프롬프트 다시 만들기", "Regenerate prompt from current inputs"),
+                disabled=not topic.strip(),
+                key="m1-discovery-external-regenerate",
+            ):
+                st.session_state["m1-discovery-external-prompt"] = external_literature_discovery_prompt(topic, context, target_count)
+                st.session_state["m1-discovery-external-prompt-signature"] = prompt_signature
+                st.rerun()
+
+            st.text_area(
+                ui_text("외부 LLM용 검색 프롬프트", "Prompt for external LLM"),
+                height=360,
+                key="m1-discovery-external-prompt",
+                help=ui_text(
+                    "연구주제·연구 맥락·확인할 논문 수가 반영된 프롬프트입니다. 필요하면 복사 전에 직접 수정할 수 있습니다.",
+                    "This prompt reflects the research topic, research context, and target paper count. You may edit it before copying if needed.",
+                ),
+            )
+            pasted = st.text_area(ui_text("외부 LLM의 JSON 응답 붙여넣기", "Paste the external LLM JSON response"), height=280, key="m1-discovery-external-response")
+            if st.button(ui_text("외부 LLM 결과 반영", "Apply external LLM results"), disabled=not pasted.strip(), key="m1-discovery-external-apply"):
+                try:
+                    parsed = parse_external_literature_results(pasted, target_count)
+                    st.session_state["m1-discovery-results"] = parsed["papers"]
+                    st.session_state["m1-discovery-summary"] = parsed.get("search_summary", "")
+                    st.session_state["m1-discovery-plan"] = {}
+                    st.session_state["m1-discovery-source"] = "external"
+                    st.rerun()
+                except ValueError as error:
+                    st.error(str(error))
+
+        discovery_results = st.session_state.get("m1-discovery-results", [])
+        if discovery_results:
+            source_label = ui_text("내부 LLM + arXiv", "Internal LLM + arXiv") if st.session_state.get("m1-discovery-source") == "internal" else ui_text("외부 LLM", "External LLM")
+            st.markdown(ui_text(f"**빠른 탐색 결과 · {len(discovery_results)}편 · {source_label}**", f"**Quick discovery · {len(discovery_results)} papers · {source_label}**"))
+            summary = str(st.session_state.get("m1-discovery-summary", "")).strip()
+            if summary:
+                st.info(summary)
+            plan = st.session_state.get("m1-discovery-plan", {})
+            if isinstance(plan, dict) and plan.get("queries"):
+                with st.expander(ui_text("사용한 검색식 보기", "View search queries"), expanded=False):
+                    for index, query in enumerate(plan.get("queries", []), start=1):
+                        st.code(f"Q{index}: {query}")
+                    for note in plan.get("search_notes", []):
+                        st.caption(f"- {note}")
+
+            for index, paper in enumerate(discovery_results, start=1):
+                title = str(paper.get("title", "")).strip() or ui_text("제목 없음", "Untitled")
+                year = str(paper.get("published", ""))[:4]
+                score = paper.get("relevance_score")
+                score_text = f" · {ui_text('관련도', 'relevance')} {score}/100" if score is not None else ""
+                st.markdown(f"**{index}. {title}**")
+                authors = ", ".join(paper.get("authors", [])[:6])
+                meta = " · ".join(part for part in [year, authors] if part)
+                if meta or score_text:
+                    st.caption((meta or "") + score_text)
+                if paper.get("quick_take"):
+                    st.write(paper["quick_take"])
+                if paper.get("why_relevant"):
+                    st.caption(ui_text("왜 참고할 만한가 · ", "Why it may matter · ") + str(paper["why_relevant"]))
+                if paper.get("caution"):
+                    st.caption(ui_text("주의 · ", "Caution · ") + str(paper["caution"]))
+                if paper.get("summary"):
+                    with st.expander(ui_text("초록/요약 보기", "View abstract / summary"), expanded=False):
+                        st.write(paper["summary"])
+                links = paper_access_links(paper)
+                source_url = links.get("source_url", "")
+                html_url = links.get("html_url", "")
+                pdf_url = links.get("pdf_url", "")
+                action_html, action_source, action_pdf, action_shelf = st.columns([1, 1, 1, 1])
+                if html_url:
+                    action_html.link_button(ui_text("HTML 원문", "HTML full text"), html_url, key=f"m1-discovery-html-{index}-{paper.get('source_id', '')}")
+                elif source_url:
+                    action_html.link_button(ui_text("원문 열기", "Open source"), source_url, key=f"m1-discovery-open-{index}-{paper.get('source_id', '')}")
+                if source_url and source_url != html_url:
+                    action_source.link_button(ui_text("arXiv/출처", "arXiv / source"), source_url, key=f"m1-discovery-source-{index}-{paper.get('source_id', '')}")
+                if pdf_url:
+                    action_pdf.link_button(ui_text("PDF 열기", "Open PDF"), pdf_url, key=f"m1-discovery-pdf-{index}-{paper.get('source_id', '')}")
+                with action_shelf:
+                    if st.button(ui_text("서재함에 추가", "Add to shelf"), key=f"m1-discovery-add-{index}-{paper.get('source_id', '')}"):
+                        try:
+                            saved = ledger.upsert_shelf_paper({
+                                "title": title,
+                                "authors": list(paper.get("authors", [])),
+                                "publication_year": year if len(year) == 4 else "",
+                                "source_url": html_url or source_url,
+                                "source_id": str(paper.get("source_id", "")).strip(),
+                                "pdf_path": "",
+                                "abstract": str(paper.get("summary", "")).strip(),
+                                "labels": [],
+                                "shelf_status": "reference",
+                                "reading_status": "unread",
+                                "asset_type": "paper",
+                                "intake_source": "llm_discovery",
+                            })
+                            st.success(ui_text(f"서재함에 추가했습니다: {saved['title']}", f"Added to shelf: {saved['title']}"))
+                        except Exception as error:
+                            st.error(str(error))
+                if pdf_url:
+                    if st.button(ui_text("PDF 내려받아 서재함에 보관", "Download PDF into shelf"), key=f"m1-discovery-save-pdf-{index}-{paper.get('source_id', '')}"):
+                        try:
+                            local_pdf = download_discovery_pdf(paper, DATA / "paper_shelf")
+                            saved = ledger.upsert_shelf_paper({
+                                "title": title,
+                                "authors": list(paper.get("authors", [])),
+                                "publication_year": year if len(year) == 4 else "",
+                                "source_url": html_url or source_url,
+                                "source_id": str(paper.get("source_id", "")).strip(),
+                                "pdf_path": local_pdf,
+                                "abstract": str(paper.get("summary", "")).strip(),
+                                "labels": [],
+                                "shelf_status": "reference",
+                                "reading_status": "unread",
+                                "asset_type": "paper",
+                                "intake_source": "llm_discovery",
+                            })
+                            st.success(ui_text(f"PDF를 내려받아 서재함에 보관했습니다: {saved['title']}", f"Downloaded the PDF into the shelf: {saved['title']}"))
+                        except Exception as error:
+                            st.error(ui_text(f"PDF 자동 보관 실패: {error}", f"Could not download the PDF: {error}"))
+                elif not html_url and source_url:
+                    st.caption(ui_text("HTML 원문이 확인되지 않아 출처 페이지를 엽니다. PDF URL이 확인되면 자동 보관할 수 있습니다.", "No HTML full-text link was identified. Open the source page; if a direct PDF URL is available, it can be stored automatically."))
+                st.divider()
+
     with upload_tab:
         st.caption(ui_text("논문·연구 노트·웹페이지를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 등록 자체는 지식카드 생성이 아닙니다.", "Add papers, research notes, and web pages here. Papers selected from search are managed in the same shelf. Adding an item does not create a knowledge card by itself."))
         uploaded = st.file_uploader(ui_text("논문 PDF·연구 노트", "Paper PDF or research note"), type=["pdf", "txt", "md"])
@@ -2900,6 +3092,7 @@ RQ_STATUS_LABELS = {
     "interested": "관심",
     "exploring": "탐색중",
     "hold": "보류",
+    "completed": "완료",
     "rejected": "제외",
 }
 
@@ -2931,7 +3124,7 @@ def render_research_question_backlog() -> None:
         return
 
     counts = {status: sum(1 for item in backlog if item.get("status") == status) for status in RQ_STATUS_LABELS}
-    cols = st.columns(5)
+    cols = st.columns(len(RQ_STATUS_LABELS))
     for col, status in zip(cols, RQ_STATUS_LABELS):
         col.metric(RQ_STATUS_LABELS[status], counts[status])
 
@@ -3210,7 +3403,8 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
         st.warning("선택한 Research Question Thread를 찾을 수 없습니다.")
         return
     source_label = M2_SOURCE_LABELS.get(str(rq.get("source_type", "m1_knowledge")), str(rq.get("source_type", "")))
-    st.subheader(str(rq.get("question", "")))
+    # Keep the question visually prominent without dominating the page.
+    st.markdown(f"**{str(rq.get('question', ''))}**")
     st.caption(f"{source_label} · {RQ_STATUS_LABELS.get(str(rq.get('status')), str(rq.get('status', '')))} · {rq_id}")
     payload = rq.get("source_payload") or {}
     if rq.get("source_type") == "external_advisory":
@@ -3231,10 +3425,18 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
         refresh_callback=lambda: _update_rq_current_state(rq_id, model, use_ollama),
     )
 
-    status_cols = st.columns(4)
-    for col, status, label in zip(status_cols, ["interested", "exploring", "hold", "rejected"], ["관심", "탐색중", "보류", "제외"]):
+    status_cols = st.columns(5)
+    status_actions = [
+        ("interested", ui_text("관심", "Interested")),
+        ("exploring", ui_text("탐색중", "Exploring")),
+        ("hold", ui_text("보류", "On hold")),
+        ("completed", ui_text("완료", "Completed")),
+        ("rejected", ui_text("제외", "Rejected")),
+    ]
+    for col, (status, label) in zip(status_cols, status_actions):
         if col.button(label, key=f"thread-status-{rq_id}-{status}", disabled=rq.get("status") == status):
-            ledger.update_research_question_status(rq_id, status); st.rerun()
+            ledger.update_research_question_status(rq_id, status)
+            st.rerun()
 
     source_ids = list(rq.get("source_card_ids", []))
     cards_by_id = {str(card.get("card_id", "")): card for card in memory.all()}
@@ -3358,7 +3560,8 @@ _THREAD_STATUS_ORDER = {
     "interested": 1,
     "candidate": 2,
     "hold": 3,
-    "rejected": 4,
+    "completed": 4,
+    "rejected": 5,
 }
 
 
@@ -3438,7 +3641,7 @@ def _render_thread_list_for_source(
         with st.container(border=True):
             top = st.columns([5, 1.4])
             with top[0]:
-                st.markdown(f"#### {rq.get('question', '')}")
+                st.markdown(f"**{rq.get('question', '')}**")
             with top[1]:
                 if status == "exploring":
                     st.markdown("**🔵 탐색중**")
@@ -3454,6 +3657,108 @@ def _render_thread_list_for_source(
                 st.session_state[session_key] = "" if is_selected else rq_id
                 st.rerun()
             action_cols[1].caption(f"{M2_SOURCE_LABELS.get(source_type, source_type)} · {rq_id}")
+        if is_selected:
+            with st.container(border=True):
+                _render_thread_detail(rq_id, model, use_ollama, semantic, embedding_model)
+            st.divider()
+
+
+def _render_all_question_threads(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    """Unified issue board for question threads originating from M1, researcher, or external advisory."""
+    backlog = ledger.research_question_backlog(limit=500)
+    for item in backlog:
+        if str(item.get("source_type") or "m1_knowledge") == "m1_knowledge":
+            ledger.ensure_research_question_thread(str(item["rq_id"]), source_type="m1_knowledge")
+
+    allowed_sources = ["m1_knowledge", "researcher", "external_advisory"]
+    threads: list[dict[str, Any]] = []
+    for item in backlog:
+        thread = ledger.research_question_thread(str(item["rq_id"])) or item
+        if str(thread.get("source_type", "m1_knowledge")) in allowed_sources:
+            threads.append(thread)
+
+    pending_statuses = {"candidate", "interested", "exploring", "hold"}
+    completed_statuses = {"completed"}
+    pending_count = sum(1 for rq in threads if str(rq.get("status", "candidate")) in pending_statuses)
+    completed_count = sum(1 for rq in threads if str(rq.get("status", "candidate")) in completed_statuses)
+    rejected_count = sum(1 for rq in threads if str(rq.get("status", "candidate")) == "rejected")
+
+    st.subheader(ui_text("전체 Research Question Threads", "All Research Question Threads"))
+    st.caption(ui_text(
+        "M1 새 지식, 연구자 직접 질문, 외부 자문에서 시작된 질문을 하나의 이슈 보드에서 관리합니다. 기본 화면은 아직 결론나지 않은 Pending 질문입니다.",
+        "Manage questions originating from M1 new knowledge, researcher questions, and external advisory requests in one issue board. Pending questions are shown by default.",
+    ))
+    c1, c2, c3 = st.columns(3)
+    c1.metric(ui_text("Pending", "Pending"), pending_count)
+    c2.metric(ui_text("Completed", "Completed"), completed_count)
+    c3.metric(ui_text("Excluded", "Excluded"), rejected_count)
+
+    view = st.radio(
+        ui_text("질문 보기", "Question view"),
+        ["pending", "completed", "all"],
+        horizontal=True,
+        key="m2-all-thread-view",
+        format_func=lambda value: {
+            "pending": ui_text("Pending Issues", "Pending Issues"),
+            "completed": ui_text("완료 질문", "Completed"),
+            "all": ui_text("전체", "All"),
+        }[value],
+    )
+    selected_sources = st.multiselect(
+        ui_text("질문 출처", "Question sources"),
+        allowed_sources,
+        default=allowed_sources,
+        key="m2-all-thread-source-filter",
+        format_func=lambda value: M2_SOURCE_LABELS.get(value, value),
+    )
+
+    if view == "pending":
+        visible = [rq for rq in threads if str(rq.get("status", "candidate")) in pending_statuses]
+    elif view == "completed":
+        visible = [rq for rq in threads if str(rq.get("status", "candidate")) in completed_statuses]
+    else:
+        visible = list(threads)
+    visible = [rq for rq in visible if str(rq.get("source_type", "m1_knowledge")) in selected_sources]
+    visible = _sorted_threads(visible)
+
+    if not visible:
+        st.info(ui_text("조건에 맞는 질문이 없습니다.", "No questions match the current filters."))
+        return
+
+    selected_id = str(st.session_state.get("m2-selected-all-thread-id") or "")
+    if selected_id and not any(str(rq.get("rq_id")) == selected_id for rq in visible):
+        selected_id = ""
+
+    for rq in visible:
+        rq_id = str(rq.get("rq_id", ""))
+        source_type = str(rq.get("source_type", "m1_knowledge"))
+        status = str(rq.get("status", "candidate"))
+        is_selected = rq_id == selected_id
+        with st.container(border=True):
+            top = st.columns([5.2, 1.6])
+            with top[0]:
+                # Compact question typography for issue-board scanning.
+                st.markdown(f"**{rq.get('question', '')}**")
+            with top[1]:
+                st.caption(RQ_STATUS_LABELS.get(status, status))
+            st.caption(f"{M2_SOURCE_LABELS.get(source_type, source_type)} · {_thread_card_summary(rq)}")
+            latest_change = ledger.latest_research_question_change(rq_id)
+            if latest_change and latest_change.get("summary"):
+                st.caption(f"{ui_text('최근 변화', 'Latest change')} · {latest_change.get('summary')}")
+            cols = st.columns([1.2, 1.4, 4.4])
+            if cols[0].button(ui_text("닫기", "Close") if is_selected else ui_text("열기", "Open"), key=f"m2-all-open-{rq_id}"):
+                st.session_state["m2-selected-all-thread-id"] = "" if is_selected else rq_id
+                st.rerun()
+            if status not in {"completed", "rejected"}:
+                if cols[1].button(ui_text("완료", "Complete"), key=f"m2-all-complete-{rq_id}"):
+                    ledger.update_research_question_status(rq_id, "completed")
+                    st.session_state["m2-selected-all-thread-id"] = ""
+                    st.rerun()
+            elif status == "completed":
+                if cols[1].button(ui_text("다시 열기", "Reopen"), key=f"m2-all-reopen-{rq_id}"):
+                    ledger.update_research_question_status(rq_id, "interested")
+                    st.rerun()
+            cols[2].caption(rq_id)
         if is_selected:
             with st.container(border=True):
                 _render_thread_detail(rq_id, model, use_ollama, semantic, embedding_model)
@@ -4233,14 +4538,27 @@ def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
     st.header(ui_text("M2 · 지식 기반 자문 작업실", "M2 · Knowledge-based Advisory Workspace"))
     st.caption(ui_text("질문 진입점은 별도 페이지로 관리하고, 질문이 정의된 이후의 검토·보고·M1 보강·질문 구체화 흐름은 동일한 Research Question Thread로 수행합니다.", "Question entry points are managed separately. Once a question is defined, review, reporting, M1 supplementation, and refinement continue in the same Research Question Thread."))
     pages = [
+        "전체 질문",
         "M1 새 지식 기반",
         "연구자 직접 질문",
         "외부 자문 요청",
         "M2 Report History",
     ]
-    page = st.radio(ui_text("M2 작업", "M2 Work"), pages, horizontal=True, key="m2-work-page", format_func=lambda v: {"M1 새 지식 기반": ui_text("M1 새 지식 기반", "M1 New Knowledge"), "연구자 직접 질문": ui_text("연구자 직접 질문", "Researcher Questions"), "외부 자문 요청": ui_text("외부 자문 요청", "External Advisory"), "M2 Report History": ui_text("M2 Report History", "M2 Report History")}.get(v, v))
+    page = st.radio(
+        ui_text("M2 작업", "M2 Work"),
+        pages, horizontal=True, key="m2-work-page",
+        format_func=lambda v: {
+            "전체 질문": ui_text("전체 질문", "All Questions"),
+            "M1 새 지식 기반": ui_text("M1 새 지식 기반", "M1 New Knowledge"),
+            "연구자 직접 질문": ui_text("연구자 직접 질문", "Researcher Questions"),
+            "외부 자문 요청": ui_text("외부 자문 요청", "External Advisory"),
+            "M2 Report History": ui_text("M2 Report History", "M2 Report History"),
+        }.get(v, v),
+    )
     st.divider()
-    if page == "M1 새 지식 기반":
+    if page == "전체 질문":
+        _render_all_question_threads(model, use_ollama, semantic, embedding_model)
+    elif page == "M1 새 지식 기반":
         _render_m1_new_information(model, use_ollama, semantic, embedding_model)
     elif page == "연구자 직접 질문":
         _render_researcher_question_page(model, use_ollama, semantic, embedding_model)
@@ -4426,7 +4744,7 @@ def render_workspace_sync() -> None:
             st.error(f"동기화 준비 실패: {exc}")
 
 def main() -> None:
-    st.set_page_config(page_title="Research Fellow", layout="wide")
+    st.set_page_config(page_title=WORKSPACE_PROFILE.browser_title, layout="wide")
     st.markdown("""<style>
     [data-testid="stStatusWidget"], div[data-testid="stStatusWidget"], button[data-testid="stStatusWidget"], [data-testid="stToolbar"] [aria-label*="Running"] { background:#f79009 !important; color:#1f1300 !important; border-color:#f79009 !important; font-weight:700 !important; }
     [data-testid="stStatusWidget"] *, [data-testid="stToolbar"] [aria-label*="Running"] * { color:#1f1300 !important; }
@@ -4438,7 +4756,11 @@ def main() -> None:
         ui_text("연구 작업공간", "Research workspace"),
         workspace_keys,
         index=workspace_keys.index(WORKSPACE_KEY) if WORKSPACE_KEY in workspace_keys else 0,
-        format_func=lambda key: ({"general": ui_text("전체 관심사 · General Research Fellow", "General · General Research Fellow"), "agent_development": ui_text("에이전트 개발 전문 · Agent Development Research Fellow", "Agent Development · Agent Development Research Fellow")}.get(key, WORKSPACE_PROFILES[key].label)),
+        format_func=lambda key: ({
+            "general": ui_text("전체 관심사 · General Research Fellow", "General · General Research Fellow"),
+            "agent_development": ui_text("에이전트 개발 전문 · Agent Development Research Fellow", "Agent Development · Agent Development Research Fellow"),
+            "vision_ai": ui_text("Vision AI 전문 · Vision AI Research Fellow", "Vision AI · Vision AI Research Fellow"),
+        }.get(key, WORKSPACE_PROFILES[key].label)),
         key="research-workspace-selector",
         help=ui_text("기능과 코드는 공유하고, DB·검색 인덱스·전문성 컨텍스트만 분리합니다. 두 브라우저 탭에서 서로 다른 ?workspace= 값을 사용하면 동시에 작업할 수 있습니다.", "The code and workflows are shared; only the DB, retrieval index, and expertise context are separated. Open different ?workspace= values in separate browser tabs to work with both at once."),
     )
@@ -4446,11 +4768,16 @@ def main() -> None:
         st.query_params["workspace"] = selected_workspace
         st.rerun()
     st.sidebar.caption(f"{WORKSPACE_PROFILE.label} · DB · {LOCAL_DB}")
-    st.sidebar.caption(ui_text(WORKSPACE_PROFILE.purpose, {"general": "Broad, long-term research memory across the researcher’s interests", "agent_development": "Specialized workspace for AI agent development, specification, workflows, memory, and evaluation"}.get(WORKSPACE_KEY, WORKSPACE_PROFILE.purpose)))
+    st.sidebar.caption(ui_text(WORKSPACE_PROFILE.purpose, {
+        "general": "Broad, long-term research memory across the researcher’s interests",
+        "agent_development": "Specialized workspace for AI agent development, specification, workflows, memory, and evaluation",
+        "vision_ai": "Specialized workspace for computer vision, multimodal AI, industrial inspection, representation learning, and deployment",
+    }.get(WORKSPACE_KEY, WORKSPACE_PROFILE.purpose)))
     st.sidebar.markdown(
         ui_text("새 탭으로 열기 · ", "Open in new tab · ")
         + ui_text("[전체 관심사](?workspace=general) · ", "[General](?workspace=general) · ")
-        + ui_text("[에이전트 개발 전문](?workspace=agent_development)", "[Agent Development](?workspace=agent_development)")
+        + ui_text("[에이전트 개발 전문](?workspace=agent_development) · ", "[Agent Development](?workspace=agent_development) · ")
+        + ui_text("[Vision AI 전문](?workspace=vision_ai)", "[Vision AI](?workspace=vision_ai)")
     )
     response_language = st.sidebar.radio(
         ui_text("응답 언어", "Response language"), ["English", "한국어"], horizontal=True,

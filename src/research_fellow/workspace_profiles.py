@@ -17,6 +17,9 @@ class ResearchWorkspaceProfile:
     db_filename: str
     cache_name: str
     purpose: str
+    topic_ko: str
+    topic_en: str
+    browser_title: str
     expertise_instruction: str
     server_db_filename: str
 
@@ -29,6 +32,9 @@ WORKSPACE_PROFILES: dict[str, ResearchWorkspaceProfile] = {
         db_filename="research_fellow.db",
         cache_name="research-fellow",
         purpose="개발·연구 전반에서 축적하는 전체 관심사와 장기 연구 메모리",
+        topic_ko="전체 연구 관심사 · 교차 도메인 연구와 장기 지식 축적",
+        topic_en="General Research · Cross-domain inquiry and long-term research memory",
+        browser_title="General Research Fellow",
         expertise_instruction=(
             "Maintain a broad, cross-domain research perspective. Connect the current question to the researcher's "
             "accumulated knowledge without forcing it into a single specialty. Preserve useful cross-domain analogies "
@@ -43,6 +49,9 @@ WORKSPACE_PROFILES: dict[str, ResearchWorkspaceProfile] = {
         db_filename="research_fellow_agent_development.db",
         cache_name="research-fellow-agent-development",
         purpose="현재 논문과 연결된 AI 에이전트 개발·명세·워크플로우·메모리·평가 전문 연구공간",
+        topic_ko="AI 에이전트 개발 · 명세 · 워크플로우 · 메모리 · 평가",
+        topic_en="AI Agent Development · Specification · Workflows · Memory · Evaluation",
+        browser_title="Agent Development Research Fellow",
         expertise_instruction=(
             "Specialize in AI agent engineering and research, especially specification-based agent development, "
             "requirements and world-machine boundaries, APF/AJD-style modeling, agent workflows, memory and knowledge "
@@ -52,6 +61,29 @@ WORKSPACE_PROFILES: dict[str, ResearchWorkspaceProfile] = {
             "generalizable research findings."
         ),
         server_db_filename="research_fellow_agent_development.db",
+    ),
+    "vision_ai": ResearchWorkspaceProfile(
+        key="vision_ai",
+        label="Vision AI Research Fellow",
+        short_label="Vision AI 전문",
+        db_filename="research_fellow_vision_ai.db",
+        cache_name="research-fellow-vision-ai",
+        purpose="Computer Vision·멀티모달 AI·산업 비전 검사·표현학습을 중심으로 축적하는 전문 연구공간",
+        topic_ko="Vision AI · Computer Vision · Multimodal AI · 산업 비전 검사",
+        topic_en="Vision AI · Computer Vision · Multimodal AI · Industrial Vision",
+        browser_title="Vision AI Research Fellow",
+        expertise_instruction=(
+            "Specialize in computer vision and multimodal AI research, including representation learning, vision "
+            "foundation models, image/video understanding, industrial visual inspection, defect detection, segmentation, "
+            "classification, anomaly detection, vision-language models, multimodal learning, synthetic data, simulation, "
+            "domain adaptation, transfer learning, explainability, uncertainty, and physical-world deployment. When "
+            "interpreting evidence, explicitly distinguish image-level, object-level, pixel-level, lot-level, and "
+            "process-level modeling; separate representation learning from downstream task design; distinguish feature-based, "
+            "embedding-based, and end-to-end multimodal approaches; and consider data granularity, label quality, domain shift, "
+            "class imbalance, deployment constraints, and evaluation validity. Connect findings to reusable research questions "
+            "and clearly separate benchmark performance from evidence of industrial usefulness or generalization."
+        ),
+        server_db_filename="research_fellow_vision_ai.db",
     ),
 }
 

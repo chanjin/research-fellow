@@ -1,0 +1,49 @@
+from research_fellow.application.literature_discovery import (
+    apply_discovery_triage,
+    collect_arxiv_candidates,
+    parse_discovery_search_plan,
+    parse_external_literature_results,
+)
+
+
+def test_parse_discovery_search_plan_json():
+    plan = parse_discovery_search_plan('''```json
+    {"scope_summary":"scope","queries":["all:\\"vision agent\\" AND all:evaluation", "all:\\"multimodal agent\\""],"search_notes":["broad"]}
+    ```''')
+    assert len(plan["queries"]) == 2
+    assert plan["scope_summary"] == "scope"
+
+
+def test_collect_arxiv_candidates_deduplicates():
+    def fake_search(query, limit):
+        return [
+            {"source_id": "1", "title": "Paper A", "summary": "A", "published": "2025", "authors": [], "url": "u1"},
+            {"source_id": "2", "title": "Paper B", "summary": "B", "published": "2024", "authors": [], "url": "u2"},
+        ]
+    results = collect_arxiv_candidates(["q1", "q2"], 10, searcher=fake_search)
+    assert [item["source_id"] for item in results] == ["1", "2"]
+
+
+def test_apply_discovery_triage_maps_existing_candidates():
+    candidates = [
+        {"source_id": "1", "title": "A", "summary": "abs", "published": "2025", "authors": [], "url": "u"},
+        {"source_id": "2", "title": "B", "summary": "abs", "published": "2024", "authors": [], "url": "u"},
+    ]
+    output = '{"papers":[{"source_id":"2","relevance_score":91,"quick_take":"take","why_relevant":"why","caution":""}]}'
+    ranked = apply_discovery_triage(candidates, output, 10)
+    assert ranked[0]["source_id"] == "2"
+    assert ranked[0]["relevance_score"] == 91
+
+
+def test_parse_external_results_uses_stable_fallback_id():
+    raw = '''{
+      "search_summary": "overview",
+      "papers": [
+        {"title":"Paper X","authors":["A"],"publication_year":"2026","source_url":"https://example.org/x","source_id":"","abstract_or_summary":"s","relevance_score":88,"quick_take":"q","why_relevant":"w","caution":"c"}
+      ]
+    }'''
+    first = parse_external_literature_results(raw, 10)["papers"][0]
+    second = parse_external_literature_results(raw, 10)["papers"][0]
+    assert first["source_id"].startswith("external-")
+    assert first["source_id"] == second["source_id"]
+    assert first["url"] == "https://example.org/x"

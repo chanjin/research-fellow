@@ -3,12 +3,21 @@
 
 ## 1. Introduction
 
+> 현재 LLM의 발전은 AI Agent 기술
+> 
 Recent advances in large language models (LLMs) have substantially expanded the capabilities of AI agents. Agents can reason over increasingly complex problems, invoke external tools, maintain memory, coordinate with other agents, and execute long sequences of actions. Consequently, much of the current progress in agentic AI is framed around an increasingly ambitious question: How complex a problem can an AI agent successfully solve?
 
+> 얼마나 복잡하고 어려운 문제까지 해결할 수 있는가?
+> 
 This emphasis is natural from the perspective of frontier model development. For developers of foundation models, demonstrating that a new model can solve problems that previous models could not is an important measure of technological progress. Agent workflows extend these capabilities by orchestrating models, tools, and reusable skills to accomplish tasks that cannot be completed through a single model invocation. Planning, tool use, reflection, memory, and multi-agent coordination have therefore become important mechanisms for achieving successful task completion.
 
+
+> 산업 현장에서의 문제는 다르다. 
+> 
 The engineering problem encountered in industrial and professional environments, however, is often different. Many industrial jobs do not require an agent to repeatedly solve frontier-level problems. Instead, they require a bounded responsibility to be performed repeatedly, consistently, and according to operational requirements. An individual task may be relatively simple, yet unreliable execution, inappropriate judgment, or failure to respond to changes in the operating environment can have significant consequences.
 
+> 타스크 완료 보다 지속적 직무 성능이 중요
+> 
 This distinction motivates a shift from task completion to persistent job performance. A task normally terminates when a specified outcome is achieved. A job persists: new events arrive, knowledge accumulates, exceptions occur, organizational rules change, and the same responsibility must continue to be fulfilled. For industrial agents, the relevant question is therefore not only whether an agent can successfully solve a difficult task once, but whether it can continue to satisfy the requirements of its assigned job over time.
 
 ### 1.1 From Technology-First to Job-First Agent Engineering
@@ -171,3 +180,142 @@ Agent의 자율성은 통제를 제거하고 LLM에 직무를 방임하는 것�
 따라서 산업현장에서 Agent에게 직무를 이관하는 과정은 LLM 기술을 먼저 도입하고 적용 범위를 넓히는 과정이 아니다. 인간의 직무 지식과 SOP를 외화하고, 통제된 실행과 OJT를 통해 경험을 축적하며, 검증된 부분부터 책임과 권한을 단계적으로 이전하는 조직적 학습 과정이다.
 
 APF, AJD와 Workflow는 한 번 작성한 후 고정되는 순차적 산출물이 아니다. APF는 World와 상호작용 경계를, AJD는 책임 있는 Agent Machine을, Workflow는 그 직무의 실행 방식을 서로 다른 추상화 수준에서 명세한다. 실행 과정에서 얻은 증거는 세 명세를 지속적으로 수정한다. 이들의 공진화를 통해 Agent는 일회성 작업 자동화에서 벗어나, 변화하는 World에서 책임 있는 직무를 지속적으로 수행하고 개선하는 persistent job agent로 발전한다.
+
+
+## 3. Lessons from Building a Persistent Research Fellow Agent
+
+We implemented a research fellow agent to examine what changes when an AI agent is expected to perform a job continuously rather than complete a bounded task. We deliberately chose a knowledge-intensive job as our first implementation case. Industrial jobs such as equipment maintenance or quality management provide compelling examples of persistent agency, but their realization depends heavily on site-specific equipment, sensors, control systems, physical constraints, and safety requirements. These dependencies make it difficult to separate general principles of agent engineering from the particulars of a given industrial environment.
+
+Research work provides a useful intermediate case. Its primary working environment is informational rather than physical, while the job itself remains persistent and open-ended. A research fellow must continuously accumulate knowledge, preserve research context, relate new evidence to prior understanding, respond to questions, and initiate further investigation when existing knowledge is insufficient. This allowed us to study persistence, memory, knowledge growth, and human governance before introducing the additional complexity of physical-world interaction.
+
+The implementation also changed our understanding of what should be engineered around an LLM. We initially regarded dynamic specification largely as a mechanism for constructing better inputs to the model. Through implementation, however, we came to view the agent itself as the persistent machine and the LLM as only one probabilistic reasoning component within it. This distinction led to several lessons.
+
+### 3.1 Start from the Job, Not the Project
+
+A project is bounded by a goal, a time horizon, and a completion condition. “Complete a paper on topic A by December,” for example, defines a finite objective. Once the paper is completed, the project ends.
+
+A job is different. A researcher may conduct a sequence of projects over many years while retaining continuity in expertise, responsibility, research interests, accumulated experience, and ways of framing problems. Individual projects are temporary expressions of that longer-lived professional role.
+
+This distinction became fundamental in our implementation. The research fellow agent was not defined by a current paper, literature-search request, or advisory question. Its mission was to remain knowledgeable in a research domain, support the researcher over time, preserve the history of prior investigations, and use accumulated experience to improve subsequent work.
+
+This changed the order of design. We did not begin with functions such as search, summarization, question answering, or report generation. We began with the job and its enduring mission. Responsibilities, interactions, workflows, memory structures, and tools were then derived from that job.
+
+This distinction also provides a stable basis for adaptation. The job and mission remain relatively stable, while the procedures used to fulfill them may change. A workflow that is effective today may be reorganized or replaced tomorrow without redefining the job itself.
+
+In this sense, persistent agents should be engineered around enduring responsibilities rather than finite goals.
+
+### 3.2 Build an Agent Layer Around the LLM
+
+The implementation led us to distinguish the agent from its underlying LLM more explicitly.
+
+The machine in our formulation is not the LLM alone. It is the complete job-performing agent: its mission, memory, knowledge, procedures, tools, operating policies, and mechanisms for interacting with the surrounding world. The LLM is a reasoning engine operating inside this machine.
+
+The agent layer therefore mediates between a general-purpose probabilistic model and a domain-specific operational world. For each event or request, it determines what the event means in relation to the job, gathers the relevant knowledge and prior experience, constructs sufficient context, invokes the LLM or other tools, and interprets the result in terms of the agent's responsibilities.
+
+Execution is only one part of this process. The agent must also observe what happened after execution, detect changes in the external world that affect its job, evaluate new information, and update what should influence subsequent action.
+
+At a high level, this produces a continuing loop:
+
+**observe → contextualize → execute → evaluate → update**
+
+Persistence therefore does not reside in an individual LLM invocation. It resides in the surrounding agent layer that maintains continuity across invocations.
+
+This distinction also clarified our interpretation of dynamic specification. We initially treated dynamic specification mainly as the dynamically constructed context presented to the LLM. We now regard it more broadly as the evolving specification and state of the agent itself.
+
+Let \(S_t\) represent the agent's specification and internal state at time \(t\), including its mission, accumulated memories, operating knowledge, procedures, and policies. Let \(K_t\) represent the relevant state of the external world as known to the agent, and \(E_t\) a newly observed event. The execution context for an LLM invocation can then be regarded as a function of these elements:
+
+$$
+C_t = f(S_t, K_t, E_t)
+$$
+
+The important form of persistence is not \(C_t\), which is transient, but the continuity of \(S_t\). Through execution results and human feedback, the agent can evolve from \(S_t\) to \(S_{t+1}\).
+
+This gives the agent a form of operational identity. Two agents may use the same underlying LLM but behave differently because they have accumulated different knowledge, experiences, procedures, and feedback histories.
+
+### 3.3 Externalize Knowledge to Build Expertise and Control
+
+Persistent agents cannot rely solely on knowledge embedded in LLM parameters.
+
+Model-internal knowledge is difficult to inspect and selectively control. It is also difficult to determine whether newly introduced domain knowledge has been incorporated consistently with existing knowledge. Model upgrades further complicate the problem: knowledge critical to a job should not depend entirely on the particular version of the underlying model.
+
+More importantly, much of the knowledge required by a real job does not exist beforehand in a complete form.
+
+A research fellow can retrieve papers, reports, and known findings, but professional knowledge also includes judgments that emerge through work: which evidence proved useful, which claims were later revised, what search strategy worked for a particular class of questions, which assumptions repeatedly failed, and how the researcher interpreted conflicting evidence. Such knowledge is created through the process of performing the job.
+
+We therefore externalized important knowledge rather than attempting to encode it back into model parameters. In the research fellow implementation, this included structured research context, claims and supporting evidence, knowledge cards, accumulated search experience, and later, relationships among knowledge types.
+
+The appropriate representation is domain dependent. A research agent may need to represent claims, evidence, counterarguments, research questions, and source credibility. An equipment-maintenance agent may instead require symptoms, causal hypotheses, maintenance history, interventions, and observed outcomes. The representation should reflect what the job needs to remember and what humans need to inspect.
+
+The purpose of this externalized knowledge is not archival. It is operational.
+
+The agent should not answer a question merely from the generic prior of its LLM. It should answer from the professional knowledge accumulated through previous work. Prior evidence, validated interpretations, and researcher feedback should influence subsequent search, analysis, and judgment.
+
+Externalized knowledge therefore serves two related purposes.
+
+First, it creates specialization. The agent progressively develops responses that reflect its domain and history rather than producing a generic LLM answer.
+
+Second, it creates governability. A human can inspect the basis for a response, identify which knowledge influenced it, correct incorrect interpretations, and revise what should be used in subsequent work.
+
+In this sense, externalized knowledge is not simply a record of past work. It is a control surface for improving future work.
+
+### 3.4 Experience Must Be Converted into Reusable Knowledge
+
+Storing interaction histories alone did not provide this improvement.
+
+Execution logs tell us what happened, but not necessarily what should be learned from it. For a persistent agent, experience must be transformed into representations that can affect future behavior.
+
+This transformation may involve several forms of memory. Semantic memory captures domain knowledge that has become sufficiently stable to reuse. Episodic memory preserves significant prior situations, judgments, and outcomes. Procedural memory captures ways of performing work that have proven effective.
+
+The distinctions are less important than the underlying principle: an experience becomes valuable when it can influence a future decision.
+
+For example, a literature search may initially be a transient workflow execution. If the agent discovers that a particular framing consistently retrieves more relevant work, that lesson can become procedural knowledge. If a researcher repeatedly rejects a particular interpretation of a concept, the corrected interpretation can become semantic knowledge. If an unusual research episode later provides a useful analogy, that episode becomes reusable experience.
+
+This process also means that deploying an agent can itself become a knowledge-creation activity. Rather than assuming that all required domain knowledge must exist before AI deployment, organizations can progressively create structured knowledge while the agent performs its job.
+
+### 3.5 Transfer the Job First, Expand Autonomy Later
+
+Our approach is intentionally conservative at the beginning.
+
+We do not ask the agent to discover from scratch how an existing professional job should be performed. Instead, we first transfer the current job into an explicit form. Existing procedures, domain meanings, accumulated knowledge, interaction patterns, and decision criteria are identified and made available to the agent.
+
+This requires more initial effort than granting an agent broad autonomy. Existing work must be examined, domain knowledge represented, memory structures designed, and early outputs reviewed by knowledgeable humans.
+
+A mentor is therefore necessary during early operation.
+
+The mentor's role is not simply to approve or reject outputs. The mentor communicates what matters in the job: why a particular source is credible, why a conclusion is too strong, what context should have been considered, or when additional investigation is necessary. These corrections should become part of the agent's evolving knowledge and procedures rather than disappear as one-time feedback.
+
+This resembles on-the-job training more than conventional software deployment. The initial specification defines the job, but the agent becomes competent through repeated performance and feedback.
+
+The cost of this approach is evident. Job analysis, knowledge externalization, and mentoring require substantial human participation. The benefit is that the starting behavior is understandable and governable.
+
+Autonomy can then increase progressively.
+
+At first, the agent may follow explicitly defined procedures. Later, accumulated procedural memory can allow it to recommend alternative search strategies, reorder workflow steps, or propose a more efficient way to satisfy its mission. A human can evaluate these proposals before they become part of the agent's operating specification.
+
+The strategy is therefore:
+
+**transfer the job first, then progressively expand autonomy.**
+
+This differs from open-ended self-improvement approaches in which the primary objective is to discover increasingly capable behaviors. Our goal is narrower: growth should remain anchored to a delegated job and should improve fulfillment of that job's mission.
+
+### 3.6 Specification and Implementation Must Co-evolve
+
+The research fellow case also showed that APF, AJD, and workflow specifications cannot be completed once and then handed over for implementation.
+
+Implementation repeatedly revealed missing distinctions in the specification. Designing interactions exposed responsibilities that had not been explicit. Implementing literature discovery revealed that a search intent without sufficient research context produced weak results. Designing advisory responses forced us to distinguish between established knowledge, uncertain claims, and cases requiring further investigation. Memory design raised questions about what should be treated as external-world knowledge and what should remain part of the agent's evolving internal state.
+
+Conversely, changes in the specification affected workflows, prompts, interfaces, and memory representations.
+
+The development process therefore resembled a Twin-Peaks-style co-evolution rather than a linear requirements-to-code pipeline. Job specification, world modeling, workflow design, and implementation became progressively more concrete together.
+
+This was especially important because the object being specified was itself capable of changing through experience. A persistent agent cannot be engineered solely as a static artifact. Its specification must define not only what the agent currently does, but also which parts may evolve, how they may evolve, and how humans retain control over those changes.
+
+### 3.7 From a Research Fellow to Persistent Job Agents
+
+The research fellow case was chosen to isolate the foundations of persistent agency in a knowledge-intensive environment. It does not remove the need for physical-world modeling in industrial applications. Rather, it provides a foundation for extending the approach toward them.
+
+An equipment-maintenance agent, for example, would require additional domains representing equipment state, sensors, control actions, operators, and safety constraints. A quality-management agent would interact with process conditions, measurements, production history, and downstream quality outcomes. Yet the same underlying engineering concerns remain: the agent must be given an enduring job, maintain continuity across executions, accumulate and externalize domain knowledge, receive feedback, and improve while remaining governable.
+
+The broader lesson from the research fellow implementation is therefore that building a persistent agent is not primarily a matter of orchestrating more LLM calls. It is the process of transferring a job into a governable agent layer whose knowledge, experience, and procedures can evolve through continued work.
+
+The LLM provides general reasoning capability. The persistent agent provides continuity, specialization, responsibility, and controlled growth.

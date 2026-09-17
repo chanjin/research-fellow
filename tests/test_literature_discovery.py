@@ -47,3 +47,24 @@ def test_parse_external_results_uses_stable_fallback_id():
     assert first["source_id"].startswith("external-")
     assert first["source_id"] == second["source_id"]
     assert first["url"] == "https://example.org/x"
+
+from research_fellow.application.literature_discovery import build_paper_labels, collect_multisource_candidates, google_scholar_url
+
+
+def test_multisource_candidates_merge_duplicate_title_and_sources():
+    def fake_arxiv(query, limit):
+        return [{"source_id":"2401.12345","title":"Agent Vision","summary":"vision agent memory","published":"2025","authors":[],"url":"https://arxiv.org/abs/2401.12345"}]
+    def fake_semantic(query, limit):
+        return [{"source_id":"2401.12345","title":"Agent Vision","summary":"vision agent memory","published":"2025","authors":[],"url":"https://arxiv.org/abs/2401.12345","discovery_sources":["Semantic Scholar"]}]
+    results = collect_multisource_candidates("agent vision", "", ["q"], ["arxiv","semantic_scholar"], 10, arxiv_searcher=fake_arxiv, semantic_searcher=fake_semantic, crossref_searcher=lambda q,l: [])
+    assert len(results) == 1
+    assert "arXiv" in results[0]["discovery_sources"]
+    assert "Semantic Scholar" in results[0]["discovery_sources"]
+
+
+def test_build_paper_labels_and_google_scholar_link():
+    paper = {"title":"Vision Language Models for Industrial Inspection", "summary":"domain adaptation for industrial defect inspection", "subjects":["Computer Vision"]}
+    labels = build_paper_labels(paper)
+    assert "Computer Vision" in labels
+    assert "inspection" in [x.lower() for x in labels]
+    assert "scholar.google.com" in google_scholar_url(paper)

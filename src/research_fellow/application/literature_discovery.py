@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, urlencode, unquote, urlparse
 from urllib.request import Request, urlopen
 
 from research_fellow.infrastructure.arxiv import search as arxiv_search
@@ -39,6 +39,197 @@ def _json_payload(text: str) -> Any:
         raise ValueError(f"JSON 응답을 해석하지 못했습니다: {error}") from error
 
 
+
+
+
+_STOPWORDS = {
+    "the","and","for","with","from","that","this","into","using","based","toward","towards","via","are","was","were","has","have","had","not","but","its","their","our","your","can","may","model","models","paper","study","approach","method","methods","analysis","results","data","task","tasks","learning","research"
+}
+
+def _strip_markup(text: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", str(text or ""))
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def build_paper_labels(paper: dict[str, Any], max_labels: int = 6) -> list[str]:
+    """Build lightweight initial labels from source keywords/subjects plus title/abstract terms."""
+    explicit: list[str] = []
+    for key in ("keywords", "subjects", "fields_of_study", "labels"):
+        raw = paper.get(key, [])
+        if isinstance(raw, str):
+            raw = [part.strip() for part in re.split(r"[,;|]", raw) if part.strip()]
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    item = item.get("category") or item.get("name") or item.get("label") or ""
+                label = re.sub(r"\s+", " ", str(item or "").strip())
+                if label and label.lower() not in {x.lower() for x in explicit}:
+                    explicit.append(label)
+    text = f"{paper.get('title','')} {paper.get('summary','')}".lower()
+    tokens = re.findall(r"[a-z][a-z0-9-]{3,}", text)
+    counts: dict[str, int] = {}
+    for token in tokens:
+        if token in _STOPWORDS or token.isdigit():
+            continue
+        counts[token] = counts.get(token, 0) + 1
+    ranked = [token for token, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    labels = explicit[:]
+    for token in ranked:
+        if len(labels) >= max_labels:
+            break
+        if token.lower() not in {x.lower() for x in labels}:
+            labels.append(token)
+    return labels[:max_labels]
+
+
+def google_scholar_url(paper: dict[str, Any]) -> str:
+    title = str(paper.get("title", "")).strip()
+    return f"https://scholar.google.com/scholar?q={quote_plus(title)}" if title else "https://scholar.google.com/"
+
+
+def _request_json(url: str, *, timeout: int = 25) -> dict[str, Any]:
+    request = Request(url, headers={"User-Agent": "ResearchFellow/0.1 literature-discovery (mailto:research@example.invalid)"})
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def search_semantic_scholar(query: str, limit: int = 10) -> list[dict[str, Any]]:
+    params = urlencode({
+        "query": query,
+        "limit": max(1, min(int(limit), 20)),
+        "fields": "paperId,title,abstract,year,authors,url,externalIds,openAccessPdf,fieldsOfStudy,s2FieldsOfStudy",
+    })
+    payload = _request_json(f"https://api.semanticscholar.org/graph/v1/paper/search?{params}")
+    results: list[dict[str, Any]] = []
+    for item in payload.get("data", []) or []:
+        if not isinstance(item, dict) or not item.get("title"):
+            continue
+        external_ids = item.get("externalIds") or {}
+        doi = str(external_ids.get("DOI") or "").strip()
+        arxiv = str(external_ids.get("ArXiv") or "").strip()
+        source_id = arxiv or doi or str(item.get("paperId") or "").strip()
+        source_url = f"https://doi.org/{doi}" if doi else (f"https://arxiv.org/abs/{arxiv}" if arxiv else str(item.get("url") or ""))
+        open_pdf = item.get("openAccessPdf") or {}
+        fields = item.get("fieldsOfStudy") or []
+        s2fields = item.get("s2FieldsOfStudy") or []
+        subjects = list(fields) + [x.get("category", "") for x in s2fields if isinstance(x, dict)]
+        paper = {
+            "source_id": source_id, "source": "semantic_scholar", "url": source_url,
+            "pdf_url": str(open_pdf.get("url") or ""), "title": str(item.get("title") or "").strip(),
+            "summary": str(item.get("abstract") or "").strip(), "published": str(item.get("year") or ""),
+            "authors": [str(a.get("name") or "").strip() for a in (item.get("authors") or []) if isinstance(a, dict) and a.get("name")],
+            "doi": doi, "subjects": [str(x).strip() for x in subjects if str(x).strip()],
+            "discovery_sources": ["Semantic Scholar"],
+        }
+        paper["labels"] = build_paper_labels(paper)
+        results.append(paper)
+    return results
+
+
+def search_crossref(query: str, limit: int = 10) -> list[dict[str, Any]]:
+    params = urlencode({"query.bibliographic": query, "rows": max(1, min(int(limit), 20))})
+    payload = _request_json(f"https://api.crossref.org/works?{params}")
+    items = ((payload.get("message") or {}).get("items") or [])
+    results: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title_list = item.get("title") or []
+        title = str(title_list[0] if title_list else "").strip()
+        if not title:
+            continue
+        doi = str(item.get("DOI") or "").strip()
+        year = ""
+        for date_key in ("published-print", "published-online", "issued"):
+            parts = (((item.get(date_key) or {}).get("date-parts") or [[]])[0] or [])
+            if parts:
+                year = str(parts[0]); break
+        authors=[]
+        for a in item.get("author") or []:
+            if not isinstance(a, dict):
+                continue
+            name = " ".join(part for part in [str(a.get("given") or "").strip(), str(a.get("family") or "").strip()] if part)
+            if name: authors.append(name)
+        pdf_url = ""
+        for link in item.get("link") or []:
+            if isinstance(link, dict) and "pdf" in str(link.get("content-type", "")).lower():
+                pdf_url = str(link.get("URL") or "").strip(); break
+        paper = {
+            "source_id": doi or str(item.get("URL") or title), "source": "crossref",
+            "url": f"https://doi.org/{doi}" if doi else str(item.get("URL") or ""),
+            "pdf_url": pdf_url, "title": title, "summary": _strip_markup(str(item.get("abstract") or "")),
+            "published": year, "authors": authors, "doi": doi,
+            "subjects": [str(x).strip() for x in (item.get("subject") or []) if str(x).strip()],
+            "venue": str(((item.get("container-title") or [""])[0]) or "").strip(),
+            "discovery_sources": ["Crossref"],
+        }
+        paper["labels"] = build_paper_labels(paper)
+        results.append(paper)
+    return results
+
+
+def _canonical_paper_key(paper: dict[str, Any]) -> str:
+    doi = str(paper.get("doi", "")).strip().lower()
+    if doi:
+        return "doi:" + doi
+    arxiv = arxiv_id_from_paper(paper)
+    if arxiv:
+        return "arxiv:" + arxiv.lower()
+    title = re.sub(r"[^a-z0-9]+", " ", str(paper.get("title", "")).lower()).strip()
+    return "title:" + title
+
+
+def _merge_paper(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key in ("summary", "pdf_url", "url", "published", "doi", "venue"):
+        if not merged.get(key) and incoming.get(key):
+            merged[key] = incoming[key]
+    if len(incoming.get("authors", []) or []) > len(merged.get("authors", []) or []):
+        merged["authors"] = incoming.get("authors", [])
+    sources = []
+    for source in list(merged.get("discovery_sources", [])) + list(incoming.get("discovery_sources", [])):
+        if source and source not in sources: sources.append(source)
+    merged["discovery_sources"] = sources
+    subjects = []
+    for item in list(merged.get("subjects", [])) + list(incoming.get("subjects", [])):
+        if item and item not in subjects: subjects.append(item)
+    merged["subjects"] = subjects
+    merged["labels"] = build_paper_labels(merged)
+    return merged
+
+
+def collect_multisource_candidates(
+    topic: str, context: str, queries: list[str], sources: list[str], max_results: int = 12,
+    *, arxiv_searcher: Callable[[str, int], list[dict[str, Any]]] = arxiv_search,
+    semantic_searcher: Callable[[str, int], list[dict[str, Any]]] = search_semantic_scholar,
+    crossref_searcher: Callable[[str, int], list[dict[str, Any]]] = search_crossref,
+) -> list[dict[str, Any]]:
+    target = max(5, min(int(max_results), 20))
+    per_source = max(5, min(12, target))
+    collected: list[dict[str, Any]] = []
+    selected = set(sources or ["arxiv"])
+    if "arxiv" in selected:
+        for item in collect_arxiv_candidates(queries, max_results=max(target, 10), searcher=arxiv_searcher):
+            item = dict(item); item["source"] = "arxiv"; item["discovery_sources"] = ["arXiv"]
+            item["labels"] = build_paper_labels(item); collected.append(item)
+    plain_query = re.sub(r"\s+", " ", f"{topic} {context}".strip())[:500]
+    if "semantic_scholar" in selected:
+        try: collected.extend(semantic_searcher(plain_query, per_source))
+        except Exception: pass
+    if "crossref" in selected:
+        try: collected.extend(crossref_searcher(plain_query, per_source))
+        except Exception: pass
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for paper in collected:
+        key = _canonical_paper_key(paper)
+        if not key or key == "title:":
+            continue
+        if key not in merged:
+            merged[key] = dict(paper); order.append(key)
+        else:
+            merged[key] = _merge_paper(merged[key], paper)
+    return [merged[key] for key in order][: max(target * 3, 30)]
 
 def normalize_result_url(value: str) -> str:
     """Extract a real HTTP(S) URL from plain or Markdown-style LLM output."""
@@ -195,7 +386,9 @@ def collect_arxiv_candidates(
                 seen_ids.add(source_id)
             if title_key:
                 seen_titles.add(title_key)
-            merged.append({**paper, "title": title})
+            enriched = {**paper, "title": title, "source": paper.get("source") or "arxiv", "discovery_sources": paper.get("discovery_sources") or ["arXiv"]}
+            enriched["labels"] = build_paper_labels(enriched)
+            merged.append(enriched)
             if len(merged) >= max(target * 2, 20):
                 break
         if len(merged) >= max(target * 2, 20):
@@ -284,8 +477,9 @@ def apply_discovery_triage(candidates: list[dict[str, Any]], text: str, max_resu
     return ranked[: max(5, min(int(max_results), 20))]
 
 
-def external_literature_discovery_prompt(topic: str, context: str, max_results: int) -> str:
+def external_literature_discovery_prompt(topic: str, context: str, max_results: int, sources: list[str] | None = None) -> str:
     target = max(5, min(int(max_results), 20))
+    source_names = ", ".join(sources or ["arXiv", "Semantic Scholar", "Crossref", "Google Scholar"])
     return f"""Act as a literature-discovery assistant with web access.
 I am doing a QUICK exploratory literature search, not a systematic review.
 
@@ -294,6 +488,10 @@ RESEARCH TOPIC / QUESTION
 
 OPTIONAL CONTEXT
 {context.strip() or '(none)'}
+
+SEARCH SOURCES TO CONSULT
+{source_names}
+Use these sources as discovery aids; verify the paper itself rather than trusting a single index.
 
 Find approximately {target} real academic papers that help me understand this topic.
 Prioritize directly relevant work, then a small number of useful adjacent/foundational papers.
@@ -383,8 +581,11 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
                 "why_relevant": str(item.get("why_relevant", "")).strip(),
                 "caution": str(item.get("caution", "")).strip(),
                 "discovery_source": "external",
+                "discovery_sources": list(item.get("discovery_sources", [])) if isinstance(item.get("discovery_sources"), list) else ["External LLM"],
+                "subjects": list(item.get("keywords", [])) if isinstance(item.get("keywords"), list) else [],
             }
         )
+        results[-1]["labels"] = build_paper_labels(results[-1])
     results.sort(key=lambda item: item.get("relevance_score", 0), reverse=True)
     target = max(5, min(int(max_results), 20))
     return {"search_summary": str(payload.get("search_summary", "")).strip(), "papers": results[:target]}

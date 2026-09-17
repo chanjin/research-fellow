@@ -17,6 +17,8 @@ SYNC_TABLES = (
     "phenomena",
     "decisions",
     "search_profiles",
+    "literature_discovery_sessions",
+    "literature_references",
     "knowledge_cards",
     "knowledge_relations",
     "paper_shelf",

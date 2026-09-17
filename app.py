@@ -129,9 +129,10 @@ from research_fellow.application.search_profiles import (
     abstract_relevance_prompt, attach_relevance, is_english_search_term, keyword_prompt, parse_keyword_plan, run_profile, shortlist_candidates,
 )
 from research_fellow.application.literature_discovery import (
-    apply_discovery_triage, collect_arxiv_candidates, discovery_search_plan_prompt,
+    apply_discovery_triage, collect_arxiv_candidates, collect_multisource_candidates, discovery_search_plan_prompt,
     discovery_triage_prompt, external_literature_discovery_prompt, parse_discovery_search_plan,
     parse_external_literature_results, paper_access_links, download_discovery_pdf,
+    google_scholar_url, build_paper_labels,
 )
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.auto_literature import execute_auto_literature_review
@@ -2131,6 +2132,125 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                 st.rerun()
 
 
+def _discovery_paper_key(paper: dict[str, Any]) -> str:
+    return (
+        str(paper.get("source_id", "")).strip()
+        or str(paper.get("source_url", "")).strip()
+        or str(paper.get("html_url", "")).strip()
+        or str(paper.get("pdf_url", "")).strip()
+        or str(paper.get("title", "")).strip().lower()
+    )
+
+
+def _normalized_paper_title(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _paper_identity_tokens(paper: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    source_id = str(paper.get("source_id", "")).strip().lower()
+    doi = str(paper.get("doi", "")).strip().lower()
+    if source_id:
+        tokens.add("id:" + source_id)
+    if doi:
+        doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi).strip()
+        tokens.add("doi:" + doi)
+    for field in ("source_url", "html_url", "pdf_url", "url"):
+        url = str(paper.get(field, "")).strip().lower()
+        if not url:
+            continue
+        doi_match = re.search(r"doi\.org/(10\.[^?#\s]+)", url)
+        if doi_match:
+            tokens.add("doi:" + doi_match.group(1).rstrip("/"))
+        arxiv_match = re.search(r"arxiv\.org/(?:abs|html|pdf)/(\d{4}\.\d{4,5})(?:v\d+)?", url)
+        if arxiv_match:
+            tokens.add("arxiv:" + arxiv_match.group(1))
+    if source_id:
+        arxiv_match = re.fullmatch(r"(?:arxiv:)?(\d{4}\.\d{4,5})(?:v\d+)?", source_id)
+        if arxiv_match:
+            tokens.add("arxiv:" + arxiv_match.group(1))
+    title = _normalized_paper_title(str(paper.get("title", "")))
+    if title:
+        tokens.add("title:" + title)
+    return tokens
+
+
+def _discovery_shelf_match(paper: dict[str, Any], shelf_papers: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidate_tokens = _paper_identity_tokens(paper)
+    if not candidate_tokens:
+        return None
+    strong = {token for token in candidate_tokens if not token.startswith("title:")}
+    candidate_title = next((token for token in candidate_tokens if token.startswith("title:")), "")
+    for shelf_paper in shelf_papers:
+        shelf_tokens = _paper_identity_tokens(shelf_paper)
+        shelf_strong = {token for token in shelf_tokens if not token.startswith("title:")}
+        if strong and shelf_strong and strong.intersection(shelf_strong):
+            return shelf_paper
+        shelf_title = next((token for token in shelf_tokens if token.startswith("title:")), "")
+        if candidate_title and candidate_title == shelf_title:
+            return shelf_paper
+    return None
+
+
+def _discovery_reference_match(paper: dict[str, Any], references: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidate_tokens = _paper_identity_tokens(paper)
+    if not candidate_tokens:
+        return None
+    strong = {token for token in candidate_tokens if not token.startswith("title:")}
+    candidate_title = next((token for token in candidate_tokens if token.startswith("title:")), "")
+    for reference in references:
+        ref_paper = dict(reference.get("paper", {}))
+        ref_tokens = _paper_identity_tokens(ref_paper)
+        ref_strong = {token for token in ref_tokens if not token.startswith("title:")}
+        if strong and ref_strong and strong.intersection(ref_strong):
+            return reference
+        ref_title = next((token for token in ref_tokens if token.startswith("title:")), "")
+        if candidate_title and candidate_title == ref_title:
+            return reference
+    return None
+
+
+def _minimal_discovery_history_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    minimal: list[dict[str, Any]] = []
+    for paper in results:
+        links = paper_access_links(paper)
+        minimal.append({
+            "title": str(paper.get("title", "")).strip(),
+            "source_id": str(paper.get("source_id", "")).strip(),
+            "source_url": links.get("source_url", ""),
+            "html_url": links.get("html_url", ""),
+            "pdf_url": links.get("pdf_url", ""),
+            "history_detail": False,
+        })
+    return minimal
+
+
+def _selected_discovery_history_results(
+    results: list[dict[str, Any]], selected_keys: set[str]
+) -> list[dict[str, Any]]:
+    stored: list[dict[str, Any]] = []
+    for paper in results:
+        key = _discovery_paper_key(paper)
+        links = paper_access_links(paper)
+        if key in selected_keys:
+            detail = dict(paper)
+            detail["source_url"] = links.get("source_url", "")
+            detail["html_url"] = links.get("html_url", "")
+            detail["pdf_url"] = links.get("pdf_url", "")
+            detail["history_detail"] = True
+            stored.append(detail)
+        else:
+            stored.append({
+                "title": str(paper.get("title", "")).strip(),
+                "source_id": str(paper.get("source_id", "")).strip(),
+                "source_url": links.get("source_url", ""),
+                "html_url": links.get("html_url", ""),
+                "pdf_url": links.get("pdf_url", ""),
+                "history_detail": False,
+            })
+    return stored
+
+
 def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     st.header(ui_text("M1 · 문헌조사·지식화 작업실", "M1 · Literature & Knowledge Workspace"))
     st.caption(ui_text("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.", "M1 explores and structures literature and research notes to prepare candidate knowledge and relations. It does not answer researcher questions directly; validated knowledge is passed to M2."))
@@ -2140,6 +2260,132 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             "궁금한 연구주제를 빠르게 탐색해 관련 논문의 윤곽을 파악합니다. 이 기능은 정식 문헌리뷰가 아니라 탐색용이며, 마음에 드는 논문을 원문 링크로 확인한 뒤 서재함에 넣어 정식 읽기로 이어갑니다.",
             "Quickly explore a research topic to understand the literature landscape. This is exploratory discovery, not a systematic review. Inspect source pages, then move promising papers to the shelf for formal reading."
         ))
+
+        discovery_history = ledger.literature_discovery_sessions(limit=20)
+        references = ledger.literature_references(limit=500)
+        history_shelf_papers = ledger.shelf_papers()
+        with st.expander(
+            ui_text(f"문헌 탐색 히스토리 · {len(discovery_history)}건", f"Literature discovery history · {len(discovery_history)}"),
+            expanded=False,
+        ):
+            st.caption(ui_text(
+                "문헌 탐색 이력은 재작업 화면이 아니라 ‘어떤 주제로 무엇을 찾아봤는지’를 남기는 탐색 기록입니다. 각 세션에는 검색 맥락과 당시 결과 논문, 현재 Reference List/서재함 상태만 간단히 표시합니다.",
+                "Discovery history is a lightweight research log, not a re-execution workspace. Each session shows what was searched, the research context, the papers found, and their current Reference List / shelf status.",
+            ))
+            if not discovery_history:
+                st.caption(ui_text(
+                    "아직 저장된 탐색 이력이 없습니다. 탐색을 실행하면 검색 맥락과 결과 논문 제목·링크가 자동 저장됩니다.",
+                    "No saved discovery sessions yet. Running a discovery automatically stores the search context plus result titles and links.",
+                ))
+            for history_index, history in enumerate(discovery_history):
+                history_topic = str(history.get("topic", "")).strip() or ui_text("제목 없는 탐색", "Untitled discovery")
+                history_source = ui_text("내부 LLM", "Internal LLM") if history.get("discovery_source") == "internal" else ui_text("외부 LLM", "External LLM")
+                history_results = list(history.get("results", []))
+                reference_count = sum(1 for paper in history_results if _discovery_reference_match(paper, references))
+                shelf_count = sum(1 for paper in history_results if _discovery_shelf_match(paper, history_shelf_papers))
+                result_count = len(history_results)
+                label = f"{history_topic} · {result_count}{ui_text('편', ' papers')}"
+                with st.expander(label, expanded=False):
+                    st.caption(
+                        f"{_fmt_local_time(history.get('created_at'))} · {history_source} · "
+                        + ui_text(
+                            f"Reference List {reference_count}편 · 서재함 {shelf_count}편",
+                            f"Reference List {reference_count} · Shelf {shelf_count}",
+                        )
+                    )
+                    context_text = str(history.get("research_context", "")).strip()
+                    if context_text:
+                        st.markdown(ui_text("**검색 맥락**", "**Research context**"))
+                        st.write(context_text)
+                    summary_text = str(history.get("search_summary", "")).strip()
+                    if summary_text:
+                        st.markdown(ui_text("**탐색 결과 요약**", "**Discovery summary**"))
+                        st.write(summary_text)
+                    st.markdown(ui_text(f"**결과 논문 · {result_count}편**", f"**Papers found · {result_count}**"))
+                    if not history_results:
+                        st.caption(ui_text("저장된 결과 논문이 없습니다.", "No result papers were stored."))
+                    for paper_index, paper in enumerate(history_results, start=1):
+                        title = str(paper.get("title", "")).strip() or ui_text("제목 없음", "Untitled")
+                        ref_match = _discovery_reference_match(paper, references)
+                        shelf_match = _discovery_shelf_match(paper, history_shelf_papers)
+                        links = paper_access_links(paper)
+                        status_parts = []
+                        if ref_match:
+                            status_parts.append(ui_text("Reference List", "Reference List"))
+                        if shelf_match:
+                            status_parts.append(ui_text("서재함", "Shelf"))
+                        status_text = " · ".join(status_parts) if status_parts else ui_text("탐색 결과", "Discovery only")
+                        paper_col, status_col, link_col = st.columns([6, 2, 1.4])
+                        with paper_col:
+                            st.markdown(f"{paper_index}. {title}")
+                        with status_col:
+                            st.caption(status_text)
+                        with link_col:
+                            open_url = links.get("html_url") or links.get("source_url") or links.get("pdf_url")
+                            if open_url:
+                                st.link_button(ui_text("원문", "Source"), open_url, key=f"m1-history-source-{history.get('session_id','')}-{paper_index}")
+                    if history_index < len(discovery_history) - 1:
+                        st.caption(ui_text(
+                            "이 기록은 당시 탐색 결과를 요약해서 보여줍니다. 관심 논문은 Reference List, 본격적으로 읽을 논문은 서재함에서 계속 관리합니다.",
+                            "This log summarizes the discovery at that time. Keep promising papers in the Reference List and papers selected for full reading in the shelf.",
+                        ))
+
+        with st.expander(
+            ui_text(f"참고문헌 리스트 · {len(references)}편", f"Reference list · {len(references)} papers"),
+            expanded=False,
+        ):
+            if not references:
+                st.caption(ui_text(
+                    "아직 선택한 참고문헌이 없습니다. 문헌 탐색 결과에서 관심 논문을 선택해 Reference List에 추가하세요.",
+                    "No selected references yet. Choose papers from discovery results and add them to the Reference List.",
+                ))
+            else:
+                reference_topics = sorted({str(item.get("topic", "")).strip() for item in references if str(item.get("topic", "")).strip()})
+                topic_filter = st.selectbox(
+                    ui_text("주제별 보기", "Filter by topic"),
+                    options=[""] + reference_topics,
+                    format_func=lambda value: ui_text("전체", "All") if not value else value,
+                    key="m1-reference-topic-filter",
+                )
+                visible_refs = [item for item in references if not topic_filter or item.get("topic") == topic_filter]
+                for ref_index, ref in enumerate(visible_refs):
+                    paper = dict(ref.get("paper", {}))
+                    title = str(paper.get("title", "")).strip() or ui_text("제목 없음", "Untitled")
+                    st.markdown(f"**{title}**")
+                    st.caption(f"{ref.get('topic','')} · {ui_text('상태', 'status')} {ref.get('status','selected')}")
+                    labels = list(ref.get("labels", []))
+                    if labels:
+                        st.caption(ui_text("Labels · ", "Labels · ") + " · ".join(labels))
+                    links = paper_access_links(paper)
+                    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+                    if links.get("html_url"):
+                        c1.link_button(ui_text("HTML 원문", "HTML full text"), links["html_url"], key=f"m1-ref-html-{ref_index}-{ref.get('reference_id','')}")
+                    elif links.get("source_url"):
+                        c1.link_button(ui_text("원문", "Source"), links["source_url"], key=f"m1-ref-source-{ref_index}-{ref.get('reference_id','')}")
+                    c2.link_button("Google Scholar", google_scholar_url(paper), key=f"m1-ref-scholar-{ref_index}-{ref.get('reference_id','')}")
+                    if links.get("pdf_url"):
+                        c3.link_button("PDF", links["pdf_url"], key=f"m1-ref-pdf-{ref_index}-{ref.get('reference_id','')}")
+                    with c4:
+                        if st.button(ui_text("서재함에 추가", "Add to shelf"), key=f"m1-ref-shelf-{ref_index}-{ref.get('reference_id','')}"):
+                            saved = ledger.upsert_shelf_paper({
+                                "title": title,
+                                "authors": list(paper.get("authors", [])),
+                                "publication_year": str(paper.get("published", ""))[:4],
+                                "source_url": links.get("html_url") or links.get("source_url", ""),
+                                "source_id": str(paper.get("source_id", "")).strip(),
+                                "pdf_path": "",
+                                "abstract": str(paper.get("summary", "")).strip(),
+                                "labels": labels,
+                                "shelf_status": "reference",
+                                "reading_status": "unread",
+                                "asset_type": "paper",
+                                "intake_source": "literature_reference",
+                            })
+                            ledger.update_literature_reference_status(ref.get("reference_id", ""), "shelved")
+                            st.success(ui_text(f"서재함에 추가했습니다: {saved['title']}", f"Added to shelf: {saved['title']}"))
+                    if ref_index < len(visible_refs) - 1:
+                        st.divider()
+
         topic = st.text_area(
             ui_text("무엇을 찾아보고 싶은가?", "What do you want to explore?"),
             key="m1-discovery-topic", height=100,
@@ -2151,18 +2397,35 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             placeholder=ui_text("왜 이 주제가 궁금한지, 특히 보고 싶은 관점이나 제외할 범위를 적습니다.", "Add why this matters, the angle you care about, or what should be excluded."),
         )
         target_count = st.slider(ui_text("확인할 논문 수", "Number of papers to inspect"), min_value=5, max_value=20, value=12, step=1, key="m1-discovery-count")
+        source_options = {
+            "arxiv": "arXiv",
+            "semantic_scholar": "Semantic Scholar",
+            "crossref": "Crossref",
+        }
+        selected_sources = st.multiselect(
+            ui_text("내부 탐색 소스", "Internal search sources"),
+            options=list(source_options),
+            default=["arxiv", "semantic_scholar", "crossref"],
+            format_func=lambda key: source_options[key],
+            key="m1-discovery-sources",
+            help=ui_text(
+                "Google Scholar는 자동 수집하지 않고 각 결과의 확인 링크로 제공합니다.",
+                "Google Scholar is provided as a per-paper verification link rather than being scraped automatically.",
+            ),
+        )
 
         internal_col, external_col = st.columns(2)
         with internal_col:
             if st.button(ui_text("내부 LLM으로 빠른 문헌 탐색", "Quick search with internal LLM"), type="primary", disabled=not topic.strip(), key="m1-discovery-internal"):
                 try:
-                    with st.spinner(ui_text("검색전략 생성 → arXiv 후보 수집 → 초록 빠른 비교 중", "Generating search plan → retrieving arXiv candidates → triaging abstracts")):
+                    with st.spinner(ui_text("검색전략 생성 → 다중 학술소스 후보 수집 → 초록 빠른 비교 중", "Generating search plan → retrieving candidates from multiple scholarly sources → triaging abstracts")):
                         plan_raw = llm_draft(discovery_search_plan_prompt(topic, context, target_count), model, use_ollama, profile="search_strategy") or ""
                         plan = parse_discovery_search_plan(plan_raw)
-                        candidates = collect_arxiv_candidates(plan["queries"], max_results=target_count)
+                        candidates = collect_multisource_candidates(topic, context, plan["queries"], selected_sources, max_results=target_count)
+                        plan["sources"] = [source_options.get(key, key) for key in selected_sources]
                         if not candidates:
                             st.session_state["m1-discovery-results"] = []
-                            st.warning(ui_text("현재 검색식으로 arXiv 후보를 찾지 못했습니다. 맥락을 보완하거나 외부 LLM 탐색을 사용해 보세요.", "No arXiv candidates were found with the current plan. Refine the context or try external-LLM discovery."))
+                            st.warning(ui_text("현재 조건으로 후보 논문을 찾지 못했습니다. 탐색 소스나 연구 맥락을 조정하거나 외부 LLM 탐색을 사용해 보세요.", "No candidate papers were found. Adjust the sources or research context, or try external-LLM discovery."))
                         else:
                             triage_raw = llm_draft(discovery_triage_prompt(topic, context, candidates, target_count), model, use_ollama, profile="abstract_triage") or ""
                             results = apply_discovery_triage(candidates, triage_raw, target_count)
@@ -2170,6 +2433,13 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                             st.session_state["m1-discovery-plan"] = plan
                             st.session_state["m1-discovery-summary"] = plan.get("scope_summary", "")
                             st.session_state["m1-discovery-source"] = "internal"
+                            saved_session = ledger.save_literature_discovery_session(
+                                topic=topic, research_context=context, target_count=target_count,
+                                discovery_source="internal", search_plan=plan,
+                                search_summary=plan.get("scope_summary", ""), results=_minimal_discovery_history_results(results),
+                            )
+                            st.session_state["m1-discovery-session-id"] = saved_session.get("session_id", "")
+                            st.session_state["m1-discovery-history-selected"] = []
                             st.rerun()
                 except Exception as error:
                     st.error(ui_text(f"빠른 문헌 탐색에 실패했습니다: {error}", f"Quick literature discovery failed: {error}"))
@@ -2177,10 +2447,11 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             st.caption(ui_text("웹 검색이 가능한 외부 LLM을 사용하면 arXiv 밖의 논문도 함께 탐색할 수 있습니다.", "A web-enabled external LLM can also discover papers beyond arXiv."))
 
         with st.expander(ui_text("외부 LLM으로 문헌 탐색", "Discover literature with an external LLM"), expanded=False):
-            prompt_signature = f"{topic.strip()}\n---CONTEXT---\n{context.strip()}\n---COUNT---\n{target_count}"
+            external_source_names = [source_options.get(key, key) for key in selected_sources] + ["Google Scholar"]
+            prompt_signature = f"{topic.strip()}\n---CONTEXT---\n{context.strip()}\n---COUNT---\n{target_count}\n---SOURCES---\n{'|'.join(external_source_names)}"
             previous_signature = st.session_state.get("m1-discovery-external-prompt-signature")
             if topic.strip() and prompt_signature != previous_signature:
-                st.session_state["m1-discovery-external-prompt"] = external_literature_discovery_prompt(topic, context, target_count)
+                st.session_state["m1-discovery-external-prompt"] = external_literature_discovery_prompt(topic, context, target_count, external_source_names)
                 st.session_state["m1-discovery-external-prompt-signature"] = prompt_signature
             elif not topic.strip() and prompt_signature != previous_signature:
                 st.session_state["m1-discovery-external-prompt"] = ui_text(
@@ -2198,7 +2469,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 disabled=not topic.strip(),
                 key="m1-discovery-external-regenerate",
             ):
-                st.session_state["m1-discovery-external-prompt"] = external_literature_discovery_prompt(topic, context, target_count)
+                st.session_state["m1-discovery-external-prompt"] = external_literature_discovery_prompt(topic, context, target_count, external_source_names)
                 st.session_state["m1-discovery-external-prompt-signature"] = prompt_signature
                 st.rerun()
 
@@ -2219,13 +2490,24 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     st.session_state["m1-discovery-summary"] = parsed.get("search_summary", "")
                     st.session_state["m1-discovery-plan"] = {}
                     st.session_state["m1-discovery-source"] = "external"
+                    saved_session = ledger.save_literature_discovery_session(
+                        topic=topic, research_context=context, target_count=target_count,
+                        discovery_source="external", search_plan={},
+                        search_summary=parsed.get("search_summary", ""), results=_minimal_discovery_history_results(parsed["papers"]),
+                    )
+                    st.session_state["m1-discovery-session-id"] = saved_session.get("session_id", "")
+                    st.session_state["m1-discovery-history-selected"] = []
                     st.rerun()
                 except ValueError as error:
                     st.error(str(error))
 
         discovery_results = st.session_state.get("m1-discovery-results", [])
         if discovery_results:
-            source_label = ui_text("내부 LLM + arXiv", "Internal LLM + arXiv") if st.session_state.get("m1-discovery-source") == "internal" else ui_text("외부 LLM", "External LLM")
+            if st.session_state.get("m1-discovery-source") == "internal":
+                plan_sources = (st.session_state.get("m1-discovery-plan", {}) or {}).get("sources", [])
+                source_label = ui_text("내부 LLM + ", "Internal LLM + ") + (", ".join(plan_sources) if plan_sources else "arXiv")
+            else:
+                source_label = ui_text("외부 LLM", "External LLM")
             st.markdown(ui_text(f"**빠른 탐색 결과 · {len(discovery_results)}편 · {source_label}**", f"**Quick discovery · {len(discovery_results)} papers · {source_label}**"))
             summary = str(st.session_state.get("m1-discovery-summary", "")).strip()
             if summary:
@@ -2238,16 +2520,58 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     for note in plan.get("search_notes", []):
                         st.caption(f"- {note}")
 
+            st.info(ui_text(
+                "탐색 히스토리에는 검색 주제·맥락과 모든 결과의 제목·링크가 기본 저장됩니다. 아래에서 참고할 논문을 선택하면 해당 논문만 빠른 해석·관련성·주의점·초록/요약까지 상세 보존합니다.",
+                "Discovery history keeps the search topic/context plus titles and links for all results by default. Select papers below to preserve their quick take, relevance rationale, caution, and abstract/summary in detail.",
+            ))
+            selected_default = set(st.session_state.get("m1-discovery-history-selected", []))
+            result_options = {_discovery_paper_key(p): p for p in discovery_results}
+            session_id = str(st.session_state.get("m1-discovery-session-id", "")).strip()
+            selected_keys: list[str] = []
+            discovery_shelf_papers = ledger.shelf_papers()
+
+            st.caption(ui_text(
+                "각 논문 카드의 ‘상세 보존’ 체크박스로 관심 논문을 바로 선택하세요. 체크하지 않은 논문도 제목과 원문 링크는 탐색 히스토리에 남습니다.",
+                "Select papers directly with the ‘Preserve details’ checkbox on each paper card. Unchecked papers still retain their title and source link in discovery history.",
+            ))
+
             for index, paper in enumerate(discovery_results, start=1):
                 title = str(paper.get("title", "")).strip() or ui_text("제목 없음", "Untitled")
+                shelf_match = _discovery_shelf_match(paper, discovery_shelf_papers)
                 year = str(paper.get("published", ""))[:4]
                 score = paper.get("relevance_score")
                 score_text = f" · {ui_text('관련도', 'relevance')} {score}/100" if score is not None else ""
+                paper_key = _discovery_paper_key(paper)
                 st.markdown(f"**{index}. {title}**")
+                if shelf_match:
+                    reading_status = str(shelf_match.get("reading_status", "unread"))
+                    shelf_status = str(shelf_match.get("shelf_status", "reference"))
+                    st.success(ui_text(
+                        f"서재함 등록됨 · {shelf_status} · {reading_status}",
+                        f"Already in shelf · {shelf_status} · {reading_status}",
+                    ))
+                checkbox_key = f"m1-discovery-detail-{session_id or 'unsaved'}-{index}"
+                preserve_detail = st.checkbox(
+                    ui_text("상세 보존", "Preserve details"),
+                    value=paper_key in selected_default,
+                    key=checkbox_key,
+                    help=ui_text(
+                        "체크하면 빠른 해석·관련성·주의점·초록/요약까지 탐색 히스토리에 저장되고, Reference List 추가 대상에도 포함됩니다.",
+                        "Checked papers keep quick take, relevance rationale, caution, and abstract/summary in discovery history and are also eligible for Reference List actions.",
+                    ),
+                )
+                if preserve_detail:
+                    selected_keys.append(paper_key)
                 authors = ", ".join(paper.get("authors", [])[:6])
                 meta = " · ".join(part for part in [year, authors] if part)
                 if meta or score_text:
                     st.caption((meta or "") + score_text)
+                discovery_sources = list(paper.get("discovery_sources", []))
+                labels = list(paper.get("labels", [])) or build_paper_labels(paper)
+                if discovery_sources:
+                    st.caption(ui_text("발견 소스 · ", "Found via · ") + " · ".join(discovery_sources))
+                if labels:
+                    st.caption("Labels · " + " · ".join(labels))
                 if paper.get("quick_take"):
                     st.write(paper["quick_take"])
                 if paper.get("why_relevant"):
@@ -2261,7 +2585,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 source_url = links.get("source_url", "")
                 html_url = links.get("html_url", "")
                 pdf_url = links.get("pdf_url", "")
-                action_html, action_source, action_pdf, action_shelf = st.columns([1, 1, 1, 1])
+                action_html, action_source, action_pdf, action_scholar, action_shelf = st.columns([1, 1, 1, 1, 1])
                 if html_url:
                     action_html.link_button(ui_text("HTML 원문", "HTML full text"), html_url, key=f"m1-discovery-html-{index}-{paper.get('source_id', '')}")
                 elif source_url:
@@ -2270,8 +2594,11 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     action_source.link_button(ui_text("arXiv/출처", "arXiv / source"), source_url, key=f"m1-discovery-source-{index}-{paper.get('source_id', '')}")
                 if pdf_url:
                     action_pdf.link_button(ui_text("PDF 열기", "Open PDF"), pdf_url, key=f"m1-discovery-pdf-{index}-{paper.get('source_id', '')}")
+                action_scholar.link_button("Google Scholar", google_scholar_url(paper), key=f"m1-discovery-scholar-{index}-{paper.get('source_id', '')}")
                 with action_shelf:
-                    if st.button(ui_text("서재함에 추가", "Add to shelf"), key=f"m1-discovery-add-{index}-{paper.get('source_id', '')}"):
+                    if shelf_match:
+                        st.caption(ui_text("서재함 등록됨", "In shelf"))
+                    elif st.button(ui_text("서재함에 추가", "Add to shelf"), key=f"m1-discovery-add-{index}-{paper.get('source_id', '')}"):
                         try:
                             saved = ledger.upsert_shelf_paper({
                                 "title": title,
@@ -2281,16 +2608,17 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 "source_id": str(paper.get("source_id", "")).strip(),
                                 "pdf_path": "",
                                 "abstract": str(paper.get("summary", "")).strip(),
-                                "labels": [],
+                                "labels": labels,
                                 "shelf_status": "reference",
                                 "reading_status": "unread",
                                 "asset_type": "paper",
                                 "intake_source": "llm_discovery",
                             })
                             st.success(ui_text(f"서재함에 추가했습니다: {saved['title']}", f"Added to shelf: {saved['title']}"))
+                            st.rerun()
                         except Exception as error:
                             st.error(str(error))
-                if pdf_url:
+                if pdf_url and not shelf_match:
                     if st.button(ui_text("PDF 내려받아 서재함에 보관", "Download PDF into shelf"), key=f"m1-discovery-save-pdf-{index}-{paper.get('source_id', '')}"):
                         try:
                             local_pdf = download_discovery_pdf(paper, DATA / "paper_shelf")
@@ -2302,18 +2630,60 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 "source_id": str(paper.get("source_id", "")).strip(),
                                 "pdf_path": local_pdf,
                                 "abstract": str(paper.get("summary", "")).strip(),
-                                "labels": [],
+                                "labels": labels,
                                 "shelf_status": "reference",
                                 "reading_status": "unread",
                                 "asset_type": "paper",
                                 "intake_source": "llm_discovery",
                             })
                             st.success(ui_text(f"PDF를 내려받아 서재함에 보관했습니다: {saved['title']}", f"Downloaded the PDF into the shelf: {saved['title']}"))
+                            st.rerun()
                         except Exception as error:
                             st.error(ui_text(f"PDF 자동 보관 실패: {error}", f"Could not download the PDF: {error}"))
                 elif not html_url and source_url:
                     st.caption(ui_text("HTML 원문이 확인되지 않아 출처 페이지를 엽니다. PDF URL이 확인되면 자동 보관할 수 있습니다.", "No HTML full-text link was identified. Open the source page; if a direct PDF URL is available, it can be stored automatically."))
                 st.divider()
+
+            st.session_state["m1-discovery-history-selected"] = list(selected_keys)
+            action_save_history, action_add_reference = st.columns(2)
+            with action_save_history:
+                if st.button(
+                    ui_text("체크 논문 상세정보 저장", "Save checked paper details"),
+                    disabled=not session_id,
+                    key="m1-discovery-history-save-selection",
+                    use_container_width=True,
+                ):
+                    stored_results = _selected_discovery_history_results(discovery_results, set(selected_keys))
+                    updated = ledger.update_literature_discovery_session_results(
+                        session_id, stored_results, search_summary=str(st.session_state.get("m1-discovery-summary", ""))
+                    )
+                    if updated:
+                        st.success(ui_text(
+                            f"탐색 기록을 갱신했습니다. 상세 보존 {len(selected_keys)}편 · 나머지는 제목/링크만 저장됩니다.",
+                            f"Discovery history updated. {len(selected_keys)} papers are preserved in detail; the rest keep title/link only.",
+                        ))
+                    else:
+                        st.error(ui_text("탐색 이력을 찾지 못했습니다.", "The discovery session could not be found."))
+            with action_add_reference:
+                if st.button(
+                    ui_text("체크 논문을 참고문헌 리스트에 추가", "Add checked papers to Reference List"),
+                    disabled=not selected_keys,
+                    key="m1-discovery-add-references",
+                    use_container_width=True,
+                ):
+                    added = 0
+                    for key in selected_keys:
+                        paper = result_options.get(key)
+                        if not paper:
+                            continue
+                        labels = list(paper.get("labels", [])) or build_paper_labels(paper)
+                        ledger.upsert_literature_reference(
+                            topic=topic, research_context=context, session_id=session_id,
+                            paper=paper, labels=labels, status="selected",
+                        )
+                        added += 1
+                    st.success(ui_text(f"참고문헌 리스트에 {added}편을 추가했습니다.", f"Added {added} papers to the Reference List."))
+                    st.rerun()
 
     with upload_tab:
         st.caption(ui_text("논문·연구 노트·웹페이지를 이곳에 넣고, 탐색에서 고른 논문도 같은 서재함에서 관리합니다. 등록 자체는 지식카드 생성이 아닙니다.", "Add papers, research notes, and web pages here. Papers selected from search are managed in the same shelf. Adding an item does not create a knowledge card by itself."))

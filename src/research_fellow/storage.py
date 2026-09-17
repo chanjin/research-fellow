@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -105,6 +106,36 @@ class Ledger:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(profile_id) REFERENCES search_profiles(profile_id)
                 );
+                CREATE TABLE IF NOT EXISTS literature_discovery_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    research_context TEXT NOT NULL DEFAULT '',
+                    target_count INTEGER NOT NULL DEFAULT 12,
+                    discovery_source TEXT NOT NULL DEFAULT 'internal',
+                    search_plan_json TEXT NOT NULL DEFAULT '{}',
+                    search_summary TEXT NOT NULL DEFAULT '',
+                    results_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_literature_discovery_sessions_created
+                    ON literature_discovery_sessions(created_at DESC);
+                CREATE TABLE IF NOT EXISTS literature_references (
+                    reference_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL,
+                    research_context TEXT NOT NULL DEFAULT '',
+                    canonical_key TEXT NOT NULL,
+                    paper_json TEXT NOT NULL DEFAULT '{}',
+                    labels_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'selected',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_literature_references_topic_key
+                    ON literature_references(topic, canonical_key);
+                CREATE INDEX IF NOT EXISTS idx_literature_references_updated
+                    ON literature_references(updated_at DESC);
                 CREATE TABLE IF NOT EXISTS llm_calls (
                     call_id TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL,
@@ -875,6 +906,128 @@ class Ledger:
     def update_search_run_candidates(self, run_id: str, candidates: list[dict[str, Any]]) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE search_runs SET candidates_json=? WHERE run_id=?", (json.dumps(candidates, ensure_ascii=False), run_id))
+
+    def save_literature_discovery_session(
+        self, *, topic: str, research_context: str = "", target_count: int = 12,
+        discovery_source: str = "internal", search_plan: dict[str, Any] | None = None,
+        search_summary: str = "", results: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        session_id, timestamp = f"lds-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO literature_discovery_sessions
+                   (session_id, topic, research_context, target_count, discovery_source, search_plan_json, search_summary, results_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, topic.strip(), research_context.strip(), int(target_count), discovery_source.strip() or "internal",
+                 json.dumps(search_plan or {}, ensure_ascii=False), search_summary.strip(),
+                 json.dumps(results or [], ensure_ascii=False), timestamp, timestamp),
+            )
+        return self.literature_discovery_session(session_id) or {}
+
+    def update_literature_discovery_session_results(
+        self, session_id: str, results: list[dict[str, Any]], *, search_summary: str | None = None
+    ) -> dict[str, Any] | None:
+        timestamp = now()
+        with self.connect() as conn:
+            if search_summary is None:
+                conn.execute(
+                    "UPDATE literature_discovery_sessions SET results_json=?, updated_at=? WHERE session_id=?",
+                    (json.dumps(results or [], ensure_ascii=False), timestamp, session_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE literature_discovery_sessions SET results_json=?, search_summary=?, updated_at=? WHERE session_id=?",
+                    (json.dumps(results or [], ensure_ascii=False), search_summary.strip(), timestamp, session_id),
+                )
+        return self.literature_discovery_session(session_id)
+
+    def literature_discovery_sessions(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM literature_discovery_sessions ORDER BY created_at DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        return [self._literature_discovery_session_row(row) for row in rows]
+
+    def literature_discovery_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM literature_discovery_sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return self._literature_discovery_session_row(row) if row else None
+
+    @staticmethod
+    def _literature_discovery_session_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        try:
+            item["search_plan"] = json.loads(item.pop("search_plan_json") or "{}")
+        except Exception:
+            item["search_plan"] = {}
+        try:
+            item["results"] = json.loads(item.pop("results_json") or "[]")
+        except Exception:
+            item["results"] = []
+        return item
+
+    def upsert_literature_reference(
+        self, *, topic: str, paper: dict[str, Any], labels: list[str] | None = None,
+        research_context: str = "", session_id: str = "", status: str = "selected",
+    ) -> dict[str, Any]:
+        title = str(paper.get("title", "")).strip()
+        canonical_key = (
+            str(paper.get("doi", "")).strip().lower()
+            or str(paper.get("source_id", "")).strip().lower()
+            or str(paper.get("source_url", paper.get("url", ""))).strip().lower()
+            or title.lower()
+        )
+        if not topic.strip() or not canonical_key:
+            raise ValueError("Reference topic and paper identifier are required.")
+        timestamp = now()
+        reference_id = "ref-" + hashlib.sha1(f"{topic.strip().lower()}|{canonical_key}".encode("utf-8")).hexdigest()[:16]
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO literature_references
+                   (reference_id, session_id, topic, research_context, canonical_key, paper_json, labels_json, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(topic, canonical_key) DO UPDATE SET
+                     session_id=excluded.session_id, research_context=excluded.research_context,
+                     paper_json=excluded.paper_json, labels_json=excluded.labels_json,
+                     status=excluded.status, updated_at=excluded.updated_at""",
+                (reference_id, session_id.strip(), topic.strip(), research_context.strip(), canonical_key,
+                 json.dumps(paper or {}, ensure_ascii=False), json.dumps(labels or [], ensure_ascii=False),
+                 status.strip() or "selected", timestamp, timestamp),
+            )
+        return self.literature_reference(reference_id) or {}
+
+    def literature_references(self, topic: str = "", status: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        query = "SELECT * FROM literature_references WHERE 1=1"
+        values: list[Any] = []
+        if topic.strip():
+            query += " AND topic=?"; values.append(topic.strip())
+        if status.strip():
+            query += " AND status=?"; values.append(status.strip())
+        query += " ORDER BY updated_at DESC LIMIT ?"; values.append(int(limit))
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(values)).fetchall()
+        return [self._literature_reference_row(row) for row in rows]
+
+    def literature_reference(self, reference_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM literature_references WHERE reference_id=?", (reference_id,)).fetchone()
+        return self._literature_reference_row(row) if row else None
+
+    def update_literature_reference_status(self, reference_id: str, status: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute("UPDATE literature_references SET status=?, updated_at=? WHERE reference_id=?", (status.strip() or "selected", now(), reference_id))
+        return self.literature_reference(reference_id)
+
+    @staticmethod
+    def _literature_reference_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        try: item["paper"] = json.loads(item.pop("paper_json") or "{}")
+        except Exception: item["paper"] = {}
+        try: item["labels"] = json.loads(item.pop("labels_json") or "[]")
+        except Exception: item["labels"] = []
+        return item
 
     def upsert_knowledge_relation(self, relation: dict[str, Any]) -> None:
         """Persist the approved relation projection used by graph traversal.

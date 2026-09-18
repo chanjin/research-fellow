@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -37,6 +38,16 @@ def store_paper_upload(uploaded_file: Any, root: Path) -> str:
     target = root / f"{uuid.uuid4().hex[:10]}-{original_name}"
     target.write_bytes(uploaded_file.getvalue())
     return str(target)
+
+
+def pasted_paper_text_upload(title: str, text: str, *, min_chars: int = 300) -> StoredPaperUpload:
+    """Convert researcher-pasted paper text into a shelf-storable source document."""
+    normalized=str(text or "").replace("\r\n","\n").replace("\r","\n").strip()
+    if len(normalized)<min_chars:
+        raise ValueError(f"붙여넣은 원문은 최소 {min_chars:,}자 이상이어야 합니다. 초록이 아니라 읽을 본문을 입력하세요.")
+    safe_title=re.sub(r"[^0-9A-Za-z가-힣._-]+","_",str(title or "paper")).strip("_.")[:80] or "paper"
+    header=f"Paper title: {str(title or '').strip()}\nSource: researcher-pasted full text\n\n"
+    return StoredPaperUpload(name=f"{safe_title}.txt",content=(header+normalized+"\n").encode("utf-8"))
 
 
 def _response_content_type(response: Any) -> str:
@@ -188,31 +199,41 @@ def document_from_source_url(paper: dict[str, Any], max_bytes: int = 8 * 1024 * 
             "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
         },
     )
-    with urlopen(request, timeout=60) as response:
-        resolved_url = _response_url(response, source_url)
-        content_type = _response_content_type(response)
-        payload = _read_limited(response, max_bytes)
-        if _looks_like_pdf(resolved_url, content_type, payload):
-            raise ValueError("등록된 원문 URL은 PDF 주소입니다. 이 항목은 HTML 원문 URL로 사용하고 PDF는 로컬 파일로 별도 등록해 주세요.")
-        if "text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type:
-            raise ValueError(f"원문 URL에서 읽을 수 있는 HTML/텍스트를 받지 못했습니다. Content-Type: {content_type or 'unknown'}")
-        charset = "utf-8"
-        try:
-            charset = response.headers.get_content_charset() or "utf-8"
-        except Exception:
-            pass
-        raw_text = payload.decode(charset, errors="replace")
-        if "text/plain" in content_type:
-            readable = raw_text.strip()
-        else:
-            parser = _ReadableHTMLParser()
-            parser.feed(raw_text)
-            readable = parser.readable_text()
-        if len(readable) < 500:
-            raise ValueError("원문 URL에서 충분한 본문 텍스트를 읽지 못했습니다. 로그인 또는 JavaScript 렌더링이 필요한 페이지일 수 있습니다.")
-        title = re.sub(r"[^A-Za-z0-9._-]+", "_", str(paper.get("title") or "source"))[:80] or "source"
-        header = f"Source URL: {resolved_url}\nPaper title: {paper.get('title') or ''}\n\n"
-        return StoredPaperUpload(name=f"{title}.txt", content=(header + readable).encode("utf-8"))
+    try:
+        with urlopen(request, timeout=60) as response:
+            resolved_url = _response_url(response, source_url)
+            content_type = _response_content_type(response)
+            payload = _read_limited(response, max_bytes)
+            if _looks_like_pdf(resolved_url, content_type, payload):
+                raise ValueError("등록된 원문 URL은 PDF 주소입니다. 이 항목은 HTML 원문 URL로 사용하고 PDF는 로컬 파일로 별도 등록해 주세요.")
+            if "text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type:
+                raise ValueError(f"원문 URL에서 읽을 수 있는 HTML/텍스트를 받지 못했습니다. Content-Type: {content_type or 'unknown'}")
+            charset = "utf-8"
+            try:
+                charset = response.headers.get_content_charset() or "utf-8"
+            except Exception:
+                pass
+            raw_text = payload.decode(charset, errors="replace")
+            if "text/plain" in content_type:
+                readable = raw_text.strip()
+            else:
+                parser = _ReadableHTMLParser()
+                parser.feed(raw_text)
+                readable = parser.readable_text()
+            if len(readable) < 500:
+                raise ValueError("원문 URL에서 충분한 본문 텍스트를 읽지 못했습니다. 로그인 또는 JavaScript 렌더링이 필요한 페이지일 수 있습니다.")
+            title = re.sub(r"[^A-Za-z0-9._-]+", "_", str(paper.get("title") or "source"))[:80] or "source"
+            header = f"Source URL: {resolved_url}\nPaper title: {paper.get('title') or ''}\n\n"
+            return StoredPaperUpload(name=f"{title}.txt", content=(header + readable).encode("utf-8"))
+    except HTTPError as error:
+        if error.code in {401,403}:
+            raise ValueError(
+                f"원문 사이트가 자동 접근을 차단했습니다(HTTP {error.code}). "
+                "브라우저에서 원문을 내려받아 PDF/TXT/MD로 등록하거나 본문 텍스트를 붙여 넣으세요."
+            ) from error
+        raise ValueError(f"원문 URL 요청에 실패했습니다(HTTP {error.code}).") from error
+    except URLError as error:
+        raise ValueError(f"원문 URL에 연결하지 못했습니다: {error.reason}") from error
 
 
 def ensure_shelf_pdf(paper: dict[str, Any], root: Path) -> str:

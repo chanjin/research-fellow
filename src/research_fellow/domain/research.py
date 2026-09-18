@@ -12,6 +12,25 @@ Priority = Literal["높음", "보통", "낮음"]
 ResearchQuestionStatus = Literal["candidate", "interested", "exploring", "hold", "rejected"]
 ExecutionMode = Literal["manual", "auto"]
 IntentCreator = Literal["m2", "m2_auto"]
+OriginType = Literal["researcher_question", "m2_knowledge", "paper_writing"]
+
+
+class OriginLink(BaseModel):
+    """Stable task origin; the UI renders it as a compact lineage label."""
+
+    origin_type: OriginType
+    origin_id: str = Field(min_length=1)
+    origin_sub_id: str = ""
+    label: str = Field(min_length=1)
+    source_card_ids: list[str] = Field(default_factory=list)
+    research_title: str = ""
+    research_question: str = ""
+    research_context: str = ""
+
+    @field_validator("source_card_ids")
+    @classmethod
+    def compact_source_cards(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in value if item.strip()))[:24]
 
 
 class ResearchState(BaseModel):
@@ -64,6 +83,7 @@ class CurationIntent(BaseModel):
     completion_condition: str = Field(min_length=3)
     execution_mode: ExecutionMode = "manual"
     created_by: IntentCreator = "m2"
+    origin_links: list[OriginLink] = Field(default_factory=list)
 
     @field_validator("labels")
     @classmethod

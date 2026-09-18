@@ -1,0 +1,43 @@
+You are proposing a change to a researcher-governed ontology. Do not change it.
+Compare the selected Knowledge Cards with the current Facet–Type ontology. Some
+cards are new and untyped; others already have Types and are being revalidated.
+
+The ontology graph contains Type nodes and Type-to-Type relations. A Facet is only
+a stereotype/color grouping of Types. A card may receive multiple Types.
+Prefer existing Types. Create a Type only when its definition cannot be expressed
+by an existing Type. For every selected card, return the complete desired Type set,
+not merely additions. Omitting a currently assigned Type means removing it in the
+new version. A card may have multiple Types. Put every reviewed card ID in
+reviewed_card_ids, including a card whose desired Type set is empty.
+Follow the researcher comment when it requests a Type name/description update or a
+Type relation add/update/delete. Preserve stable IDs for updates and deletions.
+
+## Cards selected for new assignment or revalidation
+{% for card in cards %}
+- card_id: {{ card.card_id }}
+  title: {{ card.title }}
+  claim: {{ card.claim }}
+  concepts: {{ card.concepts|join(', ') }}
+  conditions: {{ card.conditions }}
+  limits: {{ card.limits }}
+  current_types: {% for type in card.current_ontology_types or [] %}{{ type.facet_name or 'unfaceted' }}/{{ type.name }} ({{ type.type_id }}){% if not loop.last %}, {% endif %}{% endfor %}
+{% endfor %}
+
+## Current facets
+{% for facet in facets %}- {{ facet.name }}: {{ facet.description }} (color {{ facet.color }})
+{% endfor %}
+
+## Current types
+{% for type in types %}- {{ type.type_id }} | {{ type.facet_name or 'unfaceted' }} | {{ type.name }}: {{ type.description }}
+{% endfor %}
+
+## Current type relations
+{% for relation in relations %}- {{ relation.source_type_id }} --{{ relation.relation_name }}--> {{ relation.target_type_id }}: {{ relation.description }}
+{% endfor %}
+
+## Researcher comment on a prior proposal
+{{ comment or 'None' }}
+
+Return JSON only. `relations` is retained for new relation suggestions; use
+`relation_changes` for explicit researcher-directed add/update/delete operations:
+{"summary":"...","reviewed_card_ids":["kc-..."],"assignments":[{"card_id":"kc-...","type_id":"existing type id or empty","type":"existing or newly proposed type name","reason":"...","confidence":"high|medium|low"}],"new_types":[{"name":"...","description":"...","facet":"existing or new facet name","facet_description":"...","facet_color":"#RRGGBB","reason":"..."}],"type_updates":[{"type_id":"ot-...","name":"revised name","description":"revised description","reason":"..."}],"relations":[{"source_type_id":"...","target_type_id":"...","relation_name":"...","description":"...","reason":"..."}],"relation_changes":[{"action":"add|update|delete","relation_id":"required for update/delete","source_type_id":"required for add; optional for update","target_type_id":"required for add; optional for update","relation_name":"required for add/update","description":"...","reason":"..."}],"warnings":["..."]}

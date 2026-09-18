@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import sys
+import uuid
 from datetime import UTC, datetime
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable
+
+# Always prefer this checkout's source tree over a previously installed package.
+_LOCAL_SRC = Path(__file__).resolve().parent / "src"
+if _LOCAL_SRC.is_dir() and str(_LOCAL_SRC) not in sys.path:
+    sys.path.insert(0, str(_LOCAL_SRC))
 
 import streamlit as st
 
@@ -46,6 +55,14 @@ def ui_text(ko: str, en: str) -> str:
     should pass through this helper.
     """
     return en if st.session_state.get("response-language", "English") == "English" else ko
+
+
+def render_origin_labels(value: dict[str, Any], *, prefix: str | None = None) -> None:
+    """Render structured lineage as compact labels without losing stable IDs."""
+    labels = origin_labels(value.get("origin_links", []))
+    if labels:
+        heading = prefix or ui_text("시작지점", "Origin")
+        st.markdown(f"**{heading}** · " + " · ".join(f"`{label.replace('`', '')}`" for label in labels))
 
 set_llm_audit_logger = getattr(llm_backend, "set_llm_audit_logger", lambda _logger: None)
 set_llm_audit_log_path = getattr(llm_backend, "set_llm_audit_log_path", lambda _path: None)
@@ -127,7 +144,10 @@ from research_fellow.application.meaning_summary import (
 )
 from research_fellow.application.search_profiles import (
     abstract_relevance_prompt, attach_relevance, is_english_search_term, keyword_prompt, parse_keyword_plan, run_profile, shortlist_candidates,
+    intent_discovery_task_prompt, run_intent_discovery_plan, run_intent_discovery_task, scheduled_profiles,
 )
+from research_fellow.search_configuration import SEARCH_SOURCE_LABELS, configured_search_sources
+from research_fellow.origin_lineage import cards_for_origin, merge_origin_links, normalize_origin_links, origin_labels, origin_research_context
 from research_fellow.application.literature_discovery import (
     apply_discovery_triage, collect_arxiv_candidates, collect_multisource_candidates, discovery_search_plan_prompt,
     discovery_triage_prompt, external_literature_discovery_prompt, parse_discovery_search_plan,
@@ -163,12 +183,29 @@ from research_fellow.application.sensemaking import (
     sensemaking_answer_prompt, quick_search_plan_prompt, quick_literature_search,
     knowledge_card_candidate_prompt, parse_sensemaking_card_candidate,
 )
-from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, document_from_source_url, ensure_shelf_pdf, store_paper_upload, suggested_paper_labels
+from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, document_from_source_url, ensure_shelf_pdf, pasted_paper_text_upload, store_paper_upload, suggested_paper_labels
 from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, reading_prompt, unconsumed_reading_sections
-from research_fellow.application.ontology import ontology_context_dot, ontology_dot, search_cards_for_ontology
+from research_fellow.application.ontology import ontology_context_dot, ontology_dot, ontology_plotly_figure, search_cards_for_ontology
 from research_fellow.application.ontology_curation import (
     build_curation_context, parse_relation_suggestions, parse_type_suggestions,
     relation_suggestion_prompt, type_suggestion_prompt,
+)
+from research_fellow.application.ontology_evolution import ontology_delta_prompt, parse_ontology_delta
+from research_fellow.application.paper_coauthor import (
+    annotation_legend, apply_appendix_refresh, apply_review, apply_revisions,
+    appendix_prompt as short_paper_appendix_prompt, draft_prompt as short_paper_draft_prompt,
+    full_revision_prompt as short_paper_full_revision_prompt,
+    manuscript_markdown, parse_manuscript, parse_review, review_prompt as short_paper_review_prompt,
+    review_change_set, revision_prompt as short_paper_revision_prompt, revision_todo_timeline,
+    revision_todos, sentences as manuscript_sentences,
+    parse_todo_verification, todo_verification_prompt as short_paper_todo_verification_prompt,
+    parse_resolution_proposal, resolution_proposal_prompt as short_paper_resolution_proposal_prompt,
+    group_resolution_prompt as short_paper_group_resolution_prompt,
+    parse_group_resolution, parse_todo_group_plan, search_revision_assets, selected_group_revisions,
+    todo_grouping_prompt as short_paper_todo_grouping_prompt,
+)
+from research_fellow.application.paper_evidence import (
+    assemble_paper_evidence_candidates, paper_evidence_query,
 )
 from research_fellow.application.duplicate_review import similar_approved_cards
 from research_fellow.application.management import delete_knowledge_card, delete_knowledge_relation
@@ -176,7 +213,7 @@ from research_fellow.application.relations import (
     RELATION_TYPES, create_relation_candidate, lineage_dot, lineage_overview_prompt,
     parse_relation_batch_drafts, relation_batch_prompt,
 )
-from research_fellow.infrastructure.document_reader import extract_document, infer_bibliographic_metadata
+from research_fellow.infrastructure.document_reader import extract_document, extracted_document_text, infer_bibliographic_metadata
 from research_fellow.infrastructure.web_reader import WebPageExtractionError, fetch_web_page
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever, RetrievalResult
 from research_fellow.infrastructure.episodic_retrieval import EpisodicRetriever
@@ -194,7 +231,7 @@ from research_fellow.prompt_profiles import apply_prompt_profile
 from research_fellow.workspace_profiles import WORKSPACE_PROFILES, get_workspace_profile
 from research_fellow.workspace_sync import WorkspaceSync
 from research_fellow.ui.developer import render_developer_screen
-from research_fellow.domain.research import ResearchState
+from research_fellow.domain.research import CurationIntent, ResearchState
 
 
 ROOT = Path(__file__).parent
@@ -229,6 +266,7 @@ _db_override = os.environ.get(f"RESEARCH_FELLOW_DB_FILENAME_{_workspace_env_suff
 if not _db_override and WORKSPACE_KEY == "general":
     _db_override = os.environ.get("RESEARCH_FELLOW_DB_FILENAME", "").strip()
 LOCAL_DB = DATA / (_db_override or WORKSPACE_PROFILE.db_filename)
+INTERNAL_SEARCH_SOURCES = configured_search_sources()
 ledger = Ledger(LOCAL_DB)
 set_llm_audit_logger(ledger.record_llm_call)
 set_llm_audit_log_path(CACHE / "logs" / "llm_calls.jsonl")
@@ -326,6 +364,7 @@ def show_retrieval_results(results: list[RetrievalResult], detailed: bool = Fals
             st.caption(f"보충 설명: {card['explanation']}")
         if card.get("labels"):
             st.caption(f"레이블: {', '.join(card['labels'])}")
+        render_origin_labels(card)
         if card.get("evidence_excerpt"):
             st.caption(f"근거 발췌: {card['evidence_excerpt']}")
         if detailed:
@@ -462,6 +501,7 @@ def show_decision_request(item: dict[str, object]) -> None:
         st.write(f"연구 맥락: {intent.get('research_context', '이 Intent의 연구 맥락이 아직 명시되지 않았습니다.')}")
         if intent.get("labels"):
             st.caption(f"레이블: {', '.join(intent['labels'])}")
+        render_origin_labels(intent)
         st.caption(f"우선순위: {intent.get('priority', '보통')}")
         st.write(f"기대 근거: {intent.get('expected_evidence', '관련 근거 카드와 출처·조건·한계')}")
         st.write(f"완료 조건: {intent.get('completion_condition', '출처·조건·한계가 연결된 탐색 결과를 보고합니다.')}")
@@ -495,6 +535,7 @@ def show_auto_literature_reports() -> None:
                     citations = paper.get("citation_count")
                     citation_text = "확인 불가" if citations is None else f"{int(citations):,}회"
                     st.write(f"- **{paper.get('title', '')}** · {str(paper.get('published', ''))[:4]} · 인용 {citation_text} · 본문 적합성 {paper.get('full_text_similarity', 0)}/100")
+                    render_origin_labels(paper, prefix="탐색 시작지점")
                     if paper.get("url"):
                         st.caption(paper["url"])
                     if st.button("서재함에 추가", key=f"auto-report-shelf-{item['phenomenon_id']}-{paper.get('source_id', '')}"):
@@ -503,6 +544,7 @@ def show_auto_literature_reports() -> None:
                             "publication_year": str(paper.get("published", ""))[:4], "source_url": paper.get("url", ""),
                             "source_id": paper.get("source_id", ""), "abstract": paper.get("abstract", ""), "pdf_path": paper.get("pdf_path", ""),
                             "shelf_status": "reference", "reading_status": "unread", "asset_type": "paper", "intake_source": "auto_search",
+                            "origin_links": paper.get("origin_links", []),
                         })
                         st.success(f"서재함에 추가했습니다: {saved['title']}")
 
@@ -889,6 +931,7 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
             for card in group["cards"]:
                 st.write(f"- **{card['title']}** — {card['claim']}")
                 st.caption(f"출처: {card.get('provenance', {}).get('source_name', '미상')} · 레이블: {', '.join(card.get('labels', []))}")
+                render_origin_labels(card)
             st.markdown("**승인된 관계**")
             if group["relations"]:
                 titles = {card["card_id"]: card["title"] for card in group["cards"]}
@@ -1088,6 +1131,7 @@ def render_knowledge_card(card: dict[str, object], *, key_prefix: str = "card") 
     st.caption(f"출처: {source} · 근거 수준: {card.get('evidence_level', '미상')}")
     if card.get("labels") or card.get("concepts"):
         st.caption(f"레이블: {', '.join(card.get('labels', [])) or '미입력'} · 개념: {', '.join(card.get('concepts', [])) or '미입력'}")
+    render_origin_labels(card)
     st.caption(f"적용 대상: {', '.join(card.get('applies_to', [])) or '미입력'} · 조건: {card.get('conditions') or '미입력'}")
     with st.expander("근거·한계 보기", expanded=False):
         st.write(card.get("evidence_excerpt") or "근거 발췌 미입력")
@@ -1099,6 +1143,262 @@ def render_knowledge_card(card: dict[str, object], *, key_prefix: str = "card") 
                 st.write(f"- {item.get('source_name', '출처 미상')} · {item.get('evidence_excerpt', '')}")
 
 
+def render_ontology_change_review(model: str, use_ollama: bool) -> None:
+    """Review new and existing card classifications, then publish a versioned snapshot."""
+    raw_cards = memory.all()
+    cards = [{**card, "current_ontology_types": ledger.ontology_types_for_card(str(card["card_id"]))} for card in raw_cards]
+    cards_by_id = {str(card["card_id"]): card for card in cards}
+    untyped = [card for card in cards if not card["current_ontology_types"]]
+    typed = [card for card in cards if card["current_ontology_types"]]
+    current = ledger.latest_ontology_version()
+    st.markdown("### 온톨로지 변경 검토")
+    st.caption("새 카드의 타입을 제안하고 기존 카드의 다중 타입 배정도 재검토합니다. 연구자의 승인 전에는 현재 온톨로지가 바뀌지 않습니다.")
+    left, right, third = st.columns(3)
+    left.metric("현재 버전", (current or {}).get("version_label", "초기 구조"))
+    right.metric("검토 대기 카드", len(untyped))
+    third.metric("승인 대기 변경안", len(ledger.ontology_change_reviews(status="proposed")))
+
+    def _render_zoomable_type_graph(types: list[dict], relations: list[dict], facets: list[dict], highlights: dict[str, str], *, key: str) -> None:
+        st.caption("점선 테두리는 Facet, 테두리 안의 상자는 Type입니다. Type 사이의 화살표는 관계를 나타냅니다.")
+        st.graphviz_chart(ontology_dot(types, relations, facets, highlights), use_container_width=True)
+        figure = ontology_plotly_figure(types, relations, facets, highlights)
+        if figure is not None:
+            with st.expander("확대·이동 가능한 그래프로 보기", expanded=False):
+                st.caption("이 보기는 구조 탐색용입니다. Facet 구분은 노드 색상으로 표시됩니다. 마우스 휠로 확대·축소하고 드래그하여 이동할 수 있습니다.")
+                st.plotly_chart(figure, use_container_width=True, config={"scrollZoom": True, "displaylogo": False, "responsive": True}, key=key)
+
+    new_ids = st.multiselect(
+        "이번 변경 검토에 포함할 새 지식카드", [str(card["card_id"]) for card in untyped],
+        default=[str(card["card_id"]) for card in untyped],
+        format_func=lambda card_id: str(cards_by_id.get(card_id, {}).get("title") or card_id),
+        help="신규 카드는 개수 제한 없이 전체가 기본 선택됩니다. 필요한 경우 일부를 해제하여 나누어 검토할 수 있습니다.",
+    )
+    existing_ids = st.multiselect(
+        "함께 재검토할 기존 지식카드 (선택)", [str(card["card_id"]) for card in typed],
+        default=[], format_func=lambda card_id: (
+            f"{cards_by_id.get(card_id, {}).get('title', card_id)} · "
+            + ", ".join(str(item["name"]) for item in cards_by_id.get(card_id, {}).get("current_ontology_types", []))
+        ),
+        help="새 버전에서 기존 타입의 추가·제거가 필요한 카드를 선택합니다. 한 카드는 여러 타입을 유지할 수 있습니다.",
+    )
+    selected = list(dict.fromkeys([*new_ids, *existing_ids]))
+    chosen = [cards_by_id[card_id] for card_id in selected if card_id in cards_by_id]
+    prompt = ontology_delta_prompt(
+        cards=chosen, facets=ledger.ontology_facets(), types=ledger.ontology_types(),
+        relations=ledger.ontology_type_relations(),
+    ) if chosen else ""
+    if chosen:
+        if st.button("내부 LLM으로 변경 Diff 만들기", type="primary", disabled=not selected, key="ontology-delta-generate"):
+            result = llm_draft_result(prompt, model, use_ollama)
+            if result.text:
+                try:
+                    proposal = parse_ontology_delta(result.text, cards=chosen, types=ledger.ontology_types())
+                    review = ledger.create_ontology_change_review(source_card_ids=selected, proposal=proposal)
+                    st.session_state["ontology-change-review-id"] = review["review_id"]
+                    st.rerun()
+                except ValueError as error:
+                    st.error(str(error))
+            else:
+                st.error(f"변경 Diff 생성에 실패했습니다: {result.error}")
+        with st.expander("외부 LLM으로 변경 Diff 만들기", expanded=False):
+            st.caption("프롬프트를 복사하거나 필요한 경우 직접 수정한 뒤 외부 LLM에 전달하고, 받은 JSON 응답을 붙여넣으세요.")
+            selection_key = abs(hash(tuple(selected))) % 1000000
+            external_prompt = st.text_area(
+                "외부 LLM용 프롬프트", value=prompt, height=420,
+                key=f"ontology-delta-external-prompt-{selection_key}",
+            )
+            st.download_button("프롬프트 TXT 다운로드", data=external_prompt, file_name="ontology-delta-prompt.txt", mime="text/plain", key=f"ontology-delta-prompt-download-{selection_key}")
+            manual_response = st.text_area(
+                "외부 LLM JSON 응답", height=320,
+                key=f"ontology-delta-external-response-{selection_key}",
+                placeholder='{"summary":"...","reviewed_card_ids":["kc-..."],"assignments":[],"new_types":[],"relations":[],"warnings":[]}',
+            )
+            if st.button(
+                "외부 응답 검증 · 변경안으로 저장", disabled=not chosen or not manual_response.strip(),
+                key=f"ontology-delta-external-apply-{selection_key}",
+            ):
+                try:
+                    proposal = parse_ontology_delta(manual_response, cards=chosen, types=ledger.ontology_types())
+                    review = ledger.create_ontology_change_review(source_card_ids=selected, proposal=proposal)
+                    st.session_state["ontology-change-review-id"] = review["review_id"]
+                    st.success("외부 LLM 응답을 검증하고 온톨로지 변경안으로 저장했습니다.")
+                    st.rerun()
+                except (ValueError, TypeError) as error:
+                    st.error(f"외부 응답을 반영할 수 없습니다: {error}")
+    elif not untyped:
+        st.info("새 미분류 카드는 없습니다. 기존 카드의 타입 배정을 재검토하려면 위에서 카드를 선택하세요.")
+
+    versions = ledger.ontology_versions(limit=30)
+    def _version_type_highlights(change: dict) -> dict[str, str]:
+        changed_ids = list(change.get("changed_type_ids", []))
+        if not changed_ids:
+            changed_ids = [
+                type_id for item in change.get("assignment_changes", [])
+                for type_id in [*item.get("before_type_ids", []), *item.get("after_type_ids", [])]
+            ]
+        new_ids = {str(type_id) for type_id in change.get("new_type_ids", [])}
+        highlights = {str(type_id): "changed" for type_id in changed_ids if str(type_id) not in new_ids}
+        highlights.update({type_id: "new" for type_id in new_ids})
+        return highlights
+
+    def _render_change_legend() -> None:
+        st.caption("그래프 변경 색상 · 🟩 신규 타입 · 🟨 이름·설명 또는 카드 배정이 변경된 기존 타입 · 그 외 색상은 Facet")
+
+    last_version_id = st.session_state.get("ontology-last-published-version-id")
+    highlighted = next((item for item in versions if item["version_id"] == last_version_id), None)
+    if highlighted:
+        st.divider(); st.markdown(f"### 방금 발행된 온톨로지 · {highlighted['version_label']}")
+        st.success(highlighted.get("summary") or "온톨로지 새 버전을 발행했습니다.")
+        snapshot = highlighted.get("snapshot") or {}; change = highlighted.get("change") or {}
+        if snapshot.get("types"):
+            _render_change_legend()
+            _render_zoomable_type_graph(snapshot["types"], snapshot.get("relations", []), snapshot.get("facets", []), _version_type_highlights(change), key=f"published-ontology-{highlighted['version_id']}")
+        for item in change.get("assignment_changes", []):
+            type_names = {str(t["type_id"]): str(t["name"]) for t in snapshot.get("types", [])}
+            before_names = [type_names.get(value, value) for value in item.get("before_type_ids", [])]
+            after_names = [type_names.get(value, value) for value in item.get("after_type_ids", [])]
+            st.write(f"- **{cards_by_id.get(item['card_id'], {}).get('title', item['card_id'])}**: {', '.join(before_names) or '타입 없음'} → {', '.join(after_names) or '타입 없음'}")
+
+    reviews = ledger.ontology_change_reviews(status="proposed")
+    if reviews:
+        review_id = st.session_state.get("ontology-change-review-id") or reviews[0]["review_id"]
+        review = next((item for item in reviews if item["review_id"] == review_id), reviews[0])
+        st.divider(); st.markdown(f"### 제안 변경안 · {review['review_id']}")
+        proposal = review["proposal"]
+        st.write(proposal.get("summary") or "변경 요약이 없습니다.")
+        for warning in proposal.get("warnings", []): st.warning(warning)
+        preview_types = [dict(item) for item in ledger.ontology_types()]
+        preview_relations = [dict(item) for item in ledger.ontology_type_relations()]
+        preview_highlights: dict[str, str] = {}
+        type_by_name = {str(item["name"]).casefold(): item for item in preview_types}
+        preview_type_by_id = {str(item["type_id"]): item for item in preview_types}
+        for item in proposal.get("type_updates", []):
+            current_type = preview_type_by_id.get(str(item.get("type_id") or ""))
+            if current_type:
+                current_type["name"] = item.get("name") or current_type["name"]
+                current_type["description"] = item.get("description") or current_type.get("description") or ""
+                preview_highlights[str(current_type["type_id"])] = "changed"
+        for item in proposal.get("assignments", []):
+            existing = type_by_name.get(str(item.get("type") or "").casefold())
+            if existing: preview_highlights[str(existing["type_id"])] = "changed"
+        for index, item in enumerate(proposal.get("new_types", []), start=1):
+            temporary_id = f"proposal-new-{index}"
+            preview_types.append({"type_id":temporary_id,"name":item.get("name") or temporary_id,"description":item.get("description") or "","facet_id":None,"facet_name":item.get("facet") or "Facet 미지정","card_count":0})
+            preview_highlights[temporary_id] = "new"
+        preview_relations.extend(proposal.get("relations", []))
+        for item in proposal.get("relation_changes", []):
+            action = item.get("action")
+            if action == "delete":
+                preview_relations = [row for row in preview_relations if str(row.get("relation_id")) != str(item.get("relation_id"))]
+            elif action == "update":
+                for row in preview_relations:
+                    if str(row.get("relation_id")) == str(item.get("relation_id")):
+                        row.update({key: value for key, value in item.items() if value and key in {"source_type_id", "target_type_id", "relation_name", "description"}})
+            elif action == "add":
+                preview_relations.append(item)
+        st.markdown("#### 제안 온톨로지 그래프")
+        _render_change_legend()
+        _render_zoomable_type_graph(preview_types, preview_relations, ledger.ontology_facets(), preview_highlights, key=f"proposal-ontology-{review['review_id']}")
+        tabs = st.tabs(["카드 타입 배정", "신규 타입", "타입 관계", "연구자 검토"])
+        with tabs[0]:
+            grouped: dict[str, list[dict]] = {}
+            for item in proposal.get("assignments", []): grouped.setdefault(str(item["card_id"]), []).append(item)
+            for card_id in proposal.get("reviewed_card_ids", []):
+                desired = grouped.get(str(card_id), [])
+                current_names = [str(item["name"]) for item in cards_by_id.get(str(card_id), {}).get("current_ontology_types", [])]
+                desired_names = [str(item["type"]) for item in desired]
+                st.markdown(f"**{cards_by_id.get(str(card_id), {}).get('title', card_id)}**")
+                st.write(f"현재: {', '.join(current_names) or '타입 없음'} → 제안: {', '.join(desired_names) or '타입 없음'}")
+                for item in desired: st.caption(f"{item['type']} · {item.get('confidence', 'medium')} · {item.get('reason') or '근거 설명 없음'}")
+        with tabs[1]:
+            for item in proposal.get("new_types", []):
+                with st.container(border=True):
+                    st.success(f"신규 타입 · {item['facet'] or 'Facet 미지정'} / {item['name']}")
+                    st.write(item.get("description") or "설명 없음"); st.caption(item.get("reason") or "생성 이유 없음")
+            for item in proposal.get("type_updates", []):
+                st.warning(f"타입 수정 · {item.get('type_id')} → {item.get('name')}")
+                st.write(item.get("description") or "설명 없음"); st.caption(item.get("reason") or "수정 이유 없음")
+        with tabs[2]:
+            for item in proposal.get("relations", []):
+                st.markdown(f"**{item['source_type']}** → `{item['relation_name']}` → **{item['target_type']}**")
+                st.write(item.get("description") or "설명 없음"); st.caption(item.get("reason") or "제안 근거 없음")
+            for item in proposal.get("relation_changes", []):
+                st.markdown(f"**관계 {item.get('action')}** · {item.get('relation_id') or '신규'} · `{item.get('relation_name') or '이름 유지'}`")
+                st.caption(item.get("reason") or "변경 이유 없음")
+        with tabs[3]:
+            st.caption("그래프를 확대·이동하며 아래 구조화 의견을 선택하거나 자유 의견을 입력하세요. 수정 Diff를 생성한 뒤 다시 검토·승인할 수 있습니다.")
+            current_types = ledger.ontology_types(); current_relations = ledger.ontology_type_relations()
+            type_options = [str(item["type_id"]) for item in current_types]
+            type_lookup = {str(item["type_id"]): item for item in current_types}
+            relation_options = [str(item["relation_id"]) for item in current_relations]
+            relation_lookup = {str(item["relation_id"]): item for item in current_relations}
+            opinion_kind = st.selectbox("구조화 의견", ["선택 안 함", "타입 이름·설명 수정", "관계 이름·설명 수정", "관계 추가", "관계 삭제"], key=f"ontology-opinion-kind-{review['review_id']}")
+            structured_comment = ""
+            if opinion_kind == "타입 이름·설명 수정" and type_options:
+                type_id = st.selectbox("수정할 타입", type_options, format_func=lambda value: type_lookup[value]["name"], key=f"ontology-opinion-type-{review['review_id']}")
+                revised_name = st.text_input("새 타입 이름", value=str(type_lookup[type_id]["name"]), key=f"ontology-opinion-type-name-{review['review_id']}")
+                revised_description = st.text_area("새 타입 설명", value=str(type_lookup[type_id].get("description") or ""), key=f"ontology-opinion-type-desc-{review['review_id']}")
+                structured_comment = f"타입 수정: type_id={type_id}, 이름='{revised_name}', 설명='{revised_description}'."
+            elif opinion_kind in {"관계 이름·설명 수정", "관계 삭제"} and relation_options:
+                relation_id = st.selectbox("대상 관계", relation_options, format_func=lambda value: f"{type_lookup.get(str(relation_lookup[value]['source_type_id']), {}).get('name', '?')} — {relation_lookup[value]['relation_name']} → {type_lookup.get(str(relation_lookup[value]['target_type_id']), {}).get('name', '?')}", key=f"ontology-opinion-relation-{review['review_id']}")
+                if opinion_kind == "관계 삭제":
+                    structured_comment = f"관계 삭제: relation_id={relation_id}."
+                else:
+                    relation_name = st.text_input("새 관계 이름", value=str(relation_lookup[relation_id]["relation_name"]), key=f"ontology-opinion-relation-name-{review['review_id']}")
+                    relation_description = st.text_area("새 관계 설명", value=str(relation_lookup[relation_id].get("description") or ""), key=f"ontology-opinion-relation-desc-{review['review_id']}")
+                    structured_comment = f"관계 수정: relation_id={relation_id}, 이름='{relation_name}', 설명='{relation_description}'."
+            elif opinion_kind == "관계 추가" and len(type_options) >= 2:
+                source_id = st.selectbox("출발 타입", type_options, format_func=lambda value: type_lookup[value]["name"], key=f"ontology-opinion-source-{review['review_id']}")
+                target_id = st.selectbox("도착 타입", type_options, index=1, format_func=lambda value: type_lookup[value]["name"], key=f"ontology-opinion-target-{review['review_id']}")
+                relation_name = st.text_input("관계 이름", key=f"ontology-opinion-new-relation-name-{review['review_id']}")
+                relation_description = st.text_area("관계 설명", key=f"ontology-opinion-new-relation-desc-{review['review_id']}")
+                structured_comment = f"관계 추가: source_type_id={source_id}, target_type_id={target_id}, 이름='{relation_name}', 설명='{relation_description}'."
+            comment = st.text_area("자유 수정·보완 요청", value=review.get("researcher_comment", ""), placeholder="예: 이 카드의 기존 Method 타입은 제거하고 Claim과 Evaluation Context를 함께 부여해줘.", key=f"ontology-review-comment-{review['review_id']}")
+            combined_comment = "\n".join(value for value in [structured_comment, comment.strip()] if value)
+            review_cards = [cards_by_id[card_id] for card_id in review.get("source_card_ids", []) if card_id in cards_by_id]
+            revision_prompt = ontology_delta_prompt(cards=review_cards, facets=ledger.ontology_facets(), types=current_types, relations=current_relations, comment=combined_comment)
+            c1, c2, c3 = st.columns(3)
+            if c1.button("코멘트 저장", key=f"ontology-review-comment-save-{review['review_id']}"):
+                ledger.update_ontology_change_review_comment(review["review_id"], combined_comment); st.success("검토 의견을 저장했습니다.")
+            if c2.button("의견 반영 Diff 재생성", disabled=not review_cards or not combined_comment, key=f"ontology-review-regenerate-{review['review_id']}"):
+                result = llm_draft_result(revision_prompt, model, use_ollama)
+                if result.text:
+                    try:
+                        revised = parse_ontology_delta(result.text, cards=review_cards, types=current_types)
+                        new_review = ledger.create_ontology_change_review(source_card_ids=review["source_card_ids"], proposal=revised, base_version_id=review.get("base_version_id"))
+                        ledger.update_ontology_change_review_comment(new_review["review_id"], combined_comment)
+                        st.session_state["ontology-change-review-id"] = new_review["review_id"]; st.rerun()
+                    except ValueError as error: st.error(str(error))
+                else: st.error(f"수정 Diff 생성에 실패했습니다: {result.error}")
+            if c3.button("검토 승인 · 새 버전 발행", type="primary", key=f"ontology-review-approve-{review['review_id']}"):
+                try:
+                    version = ledger.approve_ontology_change_review(review["review_id"], summary=proposal.get("summary", ""))
+                    st.session_state["ontology-last-published-version-id"] = version["version_id"]
+                    st.session_state.pop("ontology-change-review-id", None); st.rerun()
+                except ValueError as error: st.error(str(error))
+            with st.expander("외부 LLM으로 의견 반영 Diff 재생성", expanded=False):
+                revised_external_prompt = st.text_area("수정 Diff 프롬프트", value=revision_prompt, height=420, key=f"ontology-revision-prompt-{review['review_id']}")
+                revised_external_response = st.text_area("외부 LLM JSON 응답", height=300, key=f"ontology-revision-response-{review['review_id']}")
+                if st.button("외부 수정 응답 검증 · 저장", disabled=not revised_external_response.strip(), key=f"ontology-revision-apply-{review['review_id']}"):
+                    try:
+                        revised = parse_ontology_delta(revised_external_response, cards=review_cards, types=current_types)
+                        new_review = ledger.create_ontology_change_review(source_card_ids=review["source_card_ids"], proposal=revised, base_version_id=review.get("base_version_id"))
+                        ledger.update_ontology_change_review_comment(new_review["review_id"], combined_comment)
+                        st.session_state["ontology-change-review-id"] = new_review["review_id"]; st.rerun()
+                    except (ValueError, TypeError) as error: st.error(f"외부 수정 응답을 반영할 수 없습니다: {error}")
+
+    if versions:
+        st.divider(); st.markdown("### 온톨로지 버전 이력")
+        for version in versions:
+            with st.expander(f"{version['version_label']} · {_fmt_local_time(version.get('approved_at'))} · {version.get('summary') or '변경 요약 없음'}", expanded=False):
+                snapshot = version.get("snapshot") or {}; change = version.get("change") or {}
+                st.caption(f"기반 버전: {version.get('base_version_id') or '없음'} · 반영 카드 {len(version.get('source_card_ids', []))}건")
+                if snapshot.get("types"):
+                    _render_change_legend()
+                    _render_zoomable_type_graph(snapshot["types"], snapshot.get("relations", []), snapshot.get("facets", []), _version_type_highlights(change), key=f"history-ontology-{version['version_id']}")
+                st.write(f"카드 타입 변경 {len(change.get('assignment_changes', []))}건 · 변경 타입 {len(change.get('changed_type_ids', []))}건 · 신규 타입 {len(change.get('new_type_ids', []))}건 · 신규 관계 {len(change.get('new_relation_ids', []))}건 · 수정 관계 {len(change.get('updated_relation_ids', []))}건 · 삭제 관계 {len(change.get('deleted_relation_ids', []))}건")
+
+
 def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     """Facet-aware, multi-type ontology builder with contextual graph feedback."""
     st.subheader(ui_text("온톨로지", "Ontology"))
@@ -1108,7 +1408,10 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
     cards = memory.all()
     cards_by_id = {card["card_id"]: card for card in cards}
     approved_relations = ledger.active_knowledge_relations()
-    ai_tab, builder_tab, map_tab = st.tabs([ui_text("AI Curation", "AI Curation"), ui_text("Manual Builder", "Manual Builder"), ui_text("Ontology Map", "Ontology Map")])
+    review_tab, map_tab = st.tabs([
+        ui_text("변경 검토", "Change Review"),
+        ui_text("온톨로지 맵", "Ontology Map"),
+    ])
 
     def _card_display_name(card_id: str) -> str:
         card = cards_by_id.get(str(card_id), {})
@@ -1185,9 +1488,23 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
                 f"지식카드 ‘{_card_display_name(card_id)}’의 타입 지정이 해제되었고 Ontology에 반영되었습니다."
             )
 
+    with review_tab:
+        render_ontology_change_review(model, use_ollama)
+
+    # Legacy AI/manual tools share one deliberately secondary workspace at the
+    # bottom of Change Review. Normal evolution should use the versioned flow.
+    maintenance_tab = review_tab.expander(
+        ui_text("고급 유지관리 · 복구 및 초기 구성", "Advanced Maintenance · recovery and initialization"),
+        expanded=False,
+    )
+    ai_tab = maintenance_tab
+    builder_tab = maintenance_tab
+
     with ai_tab:
-        st.markdown("### AI Ontology Curation")
-        st.caption("LLM은 온톨로지를 확정하지 않습니다. 미분류 카드 주변의 유사 카드와 기존 타입을 바탕으로 후보만 제안하고, 연구자가 승인한 항목만 반영합니다.")
+        st.markdown("### 고급 유지관리")
+        st.warning("일상적인 타입·관계 변경은 ‘변경 검토’를 사용하세요. 아래 기능은 초기 구조 구성, 긴급 복구, 개별 카드 진단을 위한 호환 도구입니다.")
+        st.markdown("#### 레거시 AI 큐레이션 도구")
+        st.caption("기존 단일 카드 중심 큐레이션 흐름입니다. 변경 이력과 승인 단위가 필요한 작업은 Change Review에서 수행하세요.")
 
         def _clear_ai_card_work_state(card_id: str) -> None:
             """Clear temporary curation state only when the researcher finishes this card."""
@@ -1638,6 +1955,9 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
                                         st.error(str(error))
 
     with builder_tab:
+        st.divider()
+        st.markdown("### 직접 편집·복구 도구")
+        st.caption("LLM 없이 특정 카드 배정이나 관계를 즉시 복구해야 할 때만 사용합니다. 일반 변경은 Change Review를 권장합니다.")
         search_col, graph_col = st.columns([1.45, 1], gap="large")
         with search_col:
             st.markdown("### 지식카드 탐색 · 타입 부여")
@@ -1743,48 +2063,34 @@ def render_ontology_workspace(model: str, use_ollama: bool, semantic: bool, embe
     with map_tab:
         facets = ledger.ontology_facets(); facet_by_id = {x["facet_id"]: x for x in facets}
         types = ledger.ontology_types(); relations = ledger.ontology_type_relations(); type_by_id = {x["type_id"]: x for x in types}
-        st.markdown("### 전체 Ontology Map")
+        st.markdown("### 현재 승인된 Ontology Map")
+        st.caption("이 화면은 승인된 현재 구조를 탐색하는 읽기 전용 화면입니다. 변경은 ‘변경 검토’에서 제안·검토·승인하세요.")
         if types: st.graphviz_chart(ontology_dot(types, relations, facets), use_container_width=True)
         else: st.info("타입을 먼저 정의하면 전체 타입 그래프가 표시됩니다.")
-        st.markdown("### Facet 관리")
-        st.caption("Facet은 Type의 메타분류입니다. 그래프의 관계 노드가 아니라 타입을 묶는 의미 축입니다.")
-        with st.expander("+ Facet 추가", expanded=not bool(facets)):
-            fname = st.text_input("Facet 이름", placeholder="예: Requirement, Agent Case, Target Domain", key="ontology-facet-name")
-            fdesc = st.text_area("Facet 설명", height=80, key="ontology-facet-description")
-            if st.button("Facet 저장", type="primary", disabled=not fname.strip(), key="ontology-facet-save"):
-                try: ledger.create_ontology_facet(fname, fdesc); st.rerun()
-                except ValueError as error: st.error(str(error))
-        for facet in facets: st.caption(f"**{facet['name']}** · Type {facet['type_count']}개 · {facet.get('description') or '설명 없음'}")
+        st.markdown("### Facet · Type 현황")
+        st.caption("Facet은 Type의 메타분류이며 그래프에서는 점선 영역과 색상으로 표시됩니다.")
+        for facet in facets:
+            facet_types = [item for item in types if str(item.get("facet_id") or "") == str(facet["facet_id"])]
+            with st.expander(f"{facet['name']} · Type {len(facet_types)}개"):
+                st.write(facet.get("description") or "설명 없음")
+                for item in facet_types:
+                    st.markdown(f"- **{item['name']}** · 카드 {item['card_count']}건")
+                    if item.get("description"): st.caption(item["description"])
+        ungrouped_types = [item for item in types if not item.get("facet_id")]
+        if ungrouped_types:
+            with st.expander(f"Facet 미지정 · Type {len(ungrouped_types)}개"):
+                for item in ungrouped_types: st.markdown(f"- **{item['name']}** · 카드 {item['card_count']}건")
         if types:
-            st.markdown("### 타입 관리")
+            st.markdown("### Type별 지식카드")
             for item in types:
                 with st.expander(f"[{item.get('facet_name') or 'Facet 미지정'}] {item['name']} · 카드 {item['card_count']}건"):
                     st.write(item.get("description") or "설명 없음")
-                    facet_options = [None, *[x["facet_id"] for x in facets]]
-                    selected = st.selectbox("Facet 변경", facet_options,
-                        index=facet_options.index(item.get("facet_id")) if item.get("facet_id") in facet_options else 0,
-                        format_func=lambda v, names=facet_by_id: "Facet 미지정" if v is None else names[v]["name"], key=f"ontology-type-facet-{item['type_id']}")
-                    if st.button("Facet 반영", key=f"ontology-type-facet-save-{item['type_id']}"):
-                        try: ledger.update_ontology_type(item["type_id"], name=item["name"], description=item.get("description") or "", facet_id=selected); st.rerun()
-                        except ValueError as error: st.error(str(error))
                     for card_id in ledger.ontology_card_ids(item["type_id"]): st.write(f"- {cards_by_id.get(card_id, {}).get('title', card_id)}")
-        if len(types) >= 2:
-            st.markdown("### 타입 간 관계 정의")
-            ids = [x["type_id"] for x in types]
-            source_id = st.selectbox("출발 타입", ids, format_func=lambda v: f"{type_by_id[v].get('facet_name') or '미분류'} · {type_by_id[v]['name']}", key="ontology-map-rel-source")
-            targets = [v for v in ids if v != source_id]
-            target_id = st.selectbox("도착 타입", targets, format_func=lambda v: f"{type_by_id[v].get('facet_name') or '미분류'} · {type_by_id[v]['name']}", key="ontology-map-rel-target")
-            rel_name = st.text_input("관계 이름", placeholder="예: operates_on, constrains, requires", key="ontology-map-rel-name")
-            rel_desc = st.text_area("관계 설명", key="ontology-map-rel-description")
-            if st.button("타입 관계 저장", type="primary", disabled=not rel_name.strip(), key="ontology-map-rel-save"):
-                try: ledger.create_ontology_type_relation(source_id, target_id, rel_name, rel_desc); st.rerun()
-                except ValueError as error: st.error(str(error))
         if relations:
             st.markdown("### 정의된 관계")
             for r in relations:
-                cols = st.columns([5,1]); cols[0].write(f"**{type_by_id.get(r['source_type_id'],{}).get('name',r['source_type_id'])}** → `{r['relation_name']}` → **{type_by_id.get(r['target_type_id'],{}).get('name',r['target_type_id'])}**")
-                if r.get("description"): cols[0].caption(r["description"])
-                if cols[1].button("삭제", key=f"delete-ontology-rel-{r['relation_id']}"): ledger.delete_ontology_type_relation(r["relation_id"]); st.rerun()
+                st.write(f"**{type_by_id.get(r['source_type_id'],{}).get('name',r['source_type_id'])}** → `{r['relation_name']}` → **{type_by_id.get(r['target_type_id'],{}).get('name',r['target_type_id'])}**")
+                if r.get("description"): st.caption(r["description"])
 
 def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     """Paper assets are read and reviewed here, not converted to claims on intake."""
@@ -1820,6 +2126,15 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
         with st.expander(f"{status_labels.get(paper['shelf_status'], paper['shelf_status'])} · {paper['title']}"):
             st.caption(f"{paper.get('publication_year') or '연도 확인 필요'} · {', '.join(paper.get('authors', [])) or '저자 확인 필요'} · {reading_labels.get(paper['reading_status'], paper['reading_status'])}")
             st.caption(f"레이블: {', '.join(paper.get('labels', [])) or '아직 없음'}")
+            render_origin_labels(paper, prefix=ui_text("발견 시작지점", "Discovery origin"))
+            paper_lineage_context = origin_research_context(paper.get("origin_links", []))
+            if paper_lineage_context:
+                with st.expander(ui_text("이 문헌을 찾은 연구질문·의도 맥락", "Research question and intent behind this paper"), expanded=False):
+                    st.text(paper_lineage_context)
+                    st.caption(ui_text(
+                        "이 맥락은 아래 지식카드 등록 시 카드 맥락의 초깃값으로 승계됩니다.",
+                        "This context is carried into the Knowledge Card context field below.",
+                    ))
             analysis = ledger.paper_analysis(paper["paper_id"]) or {}
             suggested_labels = suggested_paper_labels(analysis.get("reading_raw_output", ""), max_labels=10)
             if suggested_labels:
@@ -1873,9 +2188,30 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                     st.download_button("보관 원문 내려받기", data=path.read_bytes(), file_name=path.name, key=f"shelf-download-{paper['paper_id']}")
                 else:
                     st.caption(ui_text(
-                        "로컬 PDF 없음 · 원문 URL은 HTML 원문/논문 페이지 링크로 사용합니다. PDF는 내려받은 뒤 별도로 등록합니다.",
-                        "No local PDF · Source URL is used as the scholarly HTML/full-text page. Register a downloaded PDF separately if needed.",
+                        "보관 원문 파일 없음 · 원문 URL을 사용하거나 아래에서 다운로드한 파일·붙여넣은 텍스트를 등록할 수 있습니다.",
+                        "No stored source file · Use the source URL or register a downloaded file / pasted text below.",
                     ))
+                    with st.expander(ui_text("원문 파일·텍스트 보완", "Add source file or pasted text"),expanded=not bool(paper.get("source_url"))):
+                        shelf_upload=st.file_uploader(
+                            ui_text("다운로드한 PDF/TXT/MD", "Downloaded PDF/TXT/MD"),type=["pdf","txt","md"],
+                            key=f"shelf-source-file-{paper['paper_id']}",
+                        )
+                        shelf_pasted_text=st.text_area(
+                            ui_text("원문 텍스트 Copy/Paste", "Copy/paste paper text"),height=160,
+                            key=f"shelf-source-text-{paper['paper_id']}",
+                        )
+                        shelf_file_col,shelf_text_col=st.columns(2)
+                        if shelf_file_col.button(ui_text("원문 파일 연결", "Attach source file"),disabled=shelf_upload is None,key=f"shelf-source-file-save-{paper['paper_id']}"):
+                            try:
+                                saved=_store_manual_discovery_source(paper,shelf_upload,shelf_match=paper,intake_source="shelf_manual_file")
+                                st.success(ui_text(f"원문 파일을 연결했습니다: {saved['title']}",f"Source file attached: {saved['title']}"));st.rerun()
+                            except Exception as error:st.error(ui_text(f"원문 파일 등록 실패: {error}",f"Could not register source file: {error}"))
+                        if shelf_text_col.button(ui_text("붙여넣은 원문 연결", "Attach pasted text"),disabled=not shelf_pasted_text.strip(),key=f"shelf-source-text-save-{paper['paper_id']}"):
+                            try:
+                                pasted_upload=pasted_paper_text_upload(str(paper.get("title") or "paper"),shelf_pasted_text)
+                                saved=_store_manual_discovery_source(paper,pasted_upload,shelf_match=paper,intake_source="shelf_pasted_text")
+                                st.success(ui_text(f"붙여넣은 원문을 연결했습니다: {saved['title']}",f"Pasted source attached: {saved['title']}"));st.rerun()
+                            except Exception as error:st.error(ui_text(f"원문 텍스트 등록 실패: {error}",f"Could not register pasted text: {error}"))
                 with st.expander("서재함에서 삭제"):
                     st.caption("읽기 요약·질문·일반화 메모·이력·카드 연결이 함께 삭제됩니다. 이미 승인된 지식카드는 유지됩니다.")
                     with st.form(f"paper-shelf-delete-{paper['paper_id']}"):
@@ -1949,7 +2285,9 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
             with st.expander("외부 채팅으로 수동 처리", expanded=False):
                 st.caption("API 한도·장애 시에 사용합니다. 생성한 프롬프트와 논문 발췌문을 Gemini 웹 또는 ChatGPT에 직접 전달한 뒤, 응답 전체를 붙여 넣으세요. 비공개 원문은 전송 전에 연구자가 판단해야 합니다.")
                 prompt_key = f"manual-reading-prompt-{paper['paper_id']}"
+                prompt_error_key=f"manual-reading-prompt-error-{paper['paper_id']}"
                 if st.button("외부 채팅용 M1 프롬프트 만들기", key=f"make-{prompt_key}"):
+                    st.session_state.pop(prompt_key,None);st.session_state.pop(prompt_error_key,None)
                     try:
                         if path and path.exists():
                             document = extract_document(document_from_shelf_path(str(path)), cache_dir=EXTRACTION_CACHE)
@@ -1959,7 +2297,37 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                             raise ValueError("읽을 원문이 없습니다. 로컬 PDF를 등록하거나 HTML 원문 URL을 입력해 주세요.")
                         st.session_state[prompt_key] = reading_prompt(document, paper, question)
                     except Exception as error:
-                        st.error(f"M1 프롬프트 준비에 실패했습니다: {error}")
+                        st.session_state[prompt_error_key]=str(error)
+                prompt_error=str(st.session_state.get(prompt_error_key) or "")
+                if prompt_error:
+                    st.warning(f"M1 프롬프트 준비 중 원문을 가져오지 못했습니다: {prompt_error}")
+                    st.caption("사이트 접근을 반복하지 않고 아래 대체 원문으로 프롬프트를 생성할 수 있습니다.")
+                fallback_file=st.file_uploader(
+                    "대체 원문 파일 · PDF/TXT/MD",type=["pdf","txt","md"],
+                    key=f"manual-reading-source-file-{paper['paper_id']}",
+                )
+                fallback_text=st.text_area(
+                    "대체 원문 텍스트 Copy/Paste",height=160,key=f"manual-reading-source-text-{paper['paper_id']}",
+                    placeholder="브라우저에서 확보한 논문 본문을 붙여 넣으세요.",
+                )
+                persist_fallback=st.checkbox(
+                    "이 대체 원문을 서재함 논문에도 연결",value=True,key=f"manual-reading-source-persist-{paper['paper_id']}",
+                    help="다음 M1 읽기와 M2 리비전에서도 같은 원문을 다시 사용할 수 있습니다.",
+                )
+                if st.button(
+                    "대체 원문으로 M1 프롬프트 만들기",type="primary",
+                    disabled=fallback_file is None and not fallback_text.strip(),key=f"manual-reading-source-build-{paper['paper_id']}",
+                ):
+                    try:
+                        fallback_upload=fallback_file if fallback_file is not None else pasted_paper_text_upload(str(paper.get("title") or "paper"),fallback_text)
+                        document=extract_document(fallback_upload,max_pages=60,chars_per_page=8000,cache_dir=EXTRACTION_CACHE)
+                        st.session_state[prompt_key]=reading_prompt(document,paper,question)
+                        st.session_state.pop(prompt_error_key,None)
+                        if persist_fallback:
+                            _store_manual_discovery_source(paper,fallback_upload,shelf_match=paper,intake_source="m1_manual_prompt_fallback")
+                            st.success("대체 원문을 서재함에 연결하고 M1 프롬프트를 만들었습니다.")
+                        else:st.success("대체 원문으로 M1 프롬프트를 만들었습니다. 원문 파일은 서재함에 저장하지 않았습니다.")
+                    except Exception as error:st.error(f"대체 원문으로 M1 프롬프트를 만들지 못했습니다: {error}")
                 manual_prompt = st.session_state.get(prompt_key, "")
                 if manual_prompt:
                     st.code(manual_prompt, language="markdown")
@@ -2021,6 +2389,13 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                         )
                         card_title = st.text_input("카드 제목 (짧은 요약)", value=item.get("suggested_title", ""), help="Claim을 그대로 반복하지 말고, 목록·계보에서 구별할 수 있는 짧은 명사구로 작성합니다. 예: ‘명세 우선 설계의 품질 효과’")
                         card_claim = st.text_area("주장 (Claim)", value=item["tentative_answer"], help="근거와 적용 범위를 포함해 한 문장으로 독립적으로 이해되는 완전한 주장입니다.")
+                        card_context_default = "\n\n".join(filter(None, [
+                            str(item.get("suggested_context") or "").strip(), paper_lineage_context,
+                        ]))
+                        card_context = st.text_area(
+                            "연구질문·의도 맥락", value=card_context_default, height=150,
+                            help="이 문헌을 찾게 된 연구제목·질문·탐색 의도와 논문 안의 카드 맥락을 함께 보존합니다. 등록 전에 수정할 수 있습니다.",
+                        )
                         card_labels = st.text_input("레이블 (쉼표 구분, 선택)", value=item.get("suggested_labels", ""), help="M1 제안을 수정해 입력합니다. 관리·검색용 분류어이며 온톨로지 개념과 일치할 필요는 없습니다.")
                         card_concepts = st.text_input("핵심 개념 (쉼표 구분)", value=item.get("suggested_concepts", ""), help="M1 제안을 수정해 입력합니다. 나중에 카드 간 관계를 만들 도메인 개념입니다.")
                         card_applies_to = st.text_input("적용 대상 (쉼표 구분)", value=item.get("suggested_applies_to", ""), help="M1 제안을 수정해 입력합니다. 이 Claim이 다루는 객체·상황·과업의 유형입니다.")
@@ -2062,6 +2437,8 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                                 "reading_question": item["question"], "evidence_excerpt": "\n".join(final_evidence)[:1600],
                                 "citation_markers": final_evidence, "conditions": card_conditions.strip(),
                                 "limits": card_limits.strip(), "researcher_comment": comment.strip(),
+                                "research_context": card_context.strip(),
+                                "origin_links": paper.get("origin_links", []),
                             })
                             existing_cards = ledger.paper_card_ids(paper["paper_id"])
                             ledger.set_paper_card_links(paper["paper_id"], [*existing_cards, enriched["card_id"]])
@@ -2075,6 +2452,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                             card = memory.add({
                                 "title": card_title.strip(), "source_kind": "external_paper" if paper.get("asset_type") in {"paper", "web_page"} else "researcher_idea_note",
                                 "claim": card_claim.strip(), "explanation": "\n".join(part for part in [f"읽기 질문: {item['question']}", f"연구자 해석·첨삭: {comment.strip()}" if comment.strip() else ""] if part),
+                                "context": card_context.strip(),
                                 "labels": [value.strip() for value in card_labels.split(",") if value.strip()],
                                 "concepts": [value.strip() for value in card_concepts.split(",") if value.strip()],
                                 "applies_to": [value.strip() for value in card_applies_to.split(",") if value.strip()],
@@ -2082,6 +2460,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                                 "evidence_excerpt": "\n".join(final_evidence)[:1600], "evidence_pages": [],
                                 "citation_markers": final_evidence, "conditions": card_conditions.strip(), "limits": card_limits.strip(),
                                 "provenance": {"source_name": paper["title"], "paper_id": paper["paper_id"], "grounding": "paper_reading_researcher_registration", "reading_question": item["question"]},
+                                "origin_links": paper.get("origin_links", []),
                             })
                             existing_cards = ledger.paper_card_ids(paper["paper_id"])
                             ledger.set_paper_card_links(paper["paper_id"], [*existing_cards, card["card_id"]])
@@ -2192,6 +2571,31 @@ def _discovery_shelf_match(paper: dict[str, Any], shelf_papers: list[dict[str, A
     return None
 
 
+def _store_manual_discovery_source(
+    paper: dict[str,Any], upload: Any, *, shelf_match: dict[str,Any] | None=None,
+    intake_source: str="llm_discovery_manual_source",
+) -> dict[str,Any]:
+    """Attach a researcher-supplied PDF/text source to a discovery result or shelf row."""
+    document=extract_document(upload,max_pages=60,chars_per_page=8000,cache_dir=EXTRACTION_CACHE)
+    links=paper_access_links(paper);existing=shelf_match or {}
+    published=str(paper.get("publication_year") or paper.get("published") or existing.get("publication_year") or "")[:4]
+    source_id=str(paper.get("source_id") or existing.get("source_id") or document.document_id).strip()
+    return ledger.upsert_shelf_paper({
+        "paper_id":str(existing.get("paper_id") or paper.get("paper_id") or ""),
+        "title":str(paper.get("title") or existing.get("title") or document.title or "Untitled paper").strip(),
+        "authors":list(paper.get("authors") or existing.get("authors") or []),
+        "publication_year":published if len(published)==4 else "",
+        "source_url":str(links.get("html_url") or links.get("source_url") or existing.get("source_url") or ""),
+        "source_id":source_id,"pdf_path":store_paper_upload(upload,DATA / "paper_shelf"),
+        "abstract":str(paper.get("summary") or paper.get("abstract") or existing.get("abstract") or "").strip(),
+        "labels":list(paper.get("labels") or existing.get("labels") or build_paper_labels(paper)),
+        "shelf_status":str(existing.get("shelf_status") or "reference"),
+        "reading_status":str(existing.get("reading_status") or "unread"),
+        "asset_type":"paper","intake_source":intake_source,
+        "origin_links":paper.get("origin_links") or existing.get("origin_links") or [],
+    })
+
+
 def _discovery_reference_match(paper: dict[str, Any], references: list[dict[str, Any]]) -> dict[str, Any] | None:
     candidate_tokens = _paper_identity_tokens(paper)
     if not candidate_tokens:
@@ -2220,9 +2624,38 @@ def _minimal_discovery_history_results(results: list[dict[str, Any]]) -> list[di
             "source_url": links.get("source_url", ""),
             "html_url": links.get("html_url", ""),
             "pdf_url": links.get("pdf_url", ""),
+            "origin_links": normalize_origin_links(paper.get("origin_links", [])),
             "history_detail": False,
         })
     return minimal
+
+
+_DISCOVERY_WORKSPACE_KEYS = (
+    "m1-discovery-topic", "m1-discovery-context", "m1-discovery-count",
+    "m1-discovery-context-card-ids", "m1-discovery-results", "m1-discovery-plan",
+    "m1-discovery-summary", "m1-discovery-source", "m1-discovery-session-id",
+    "m1-discovery-run-id", "m1-discovery-history-selected",
+)
+
+
+def _save_discovery_workspace() -> None:
+    payload = {
+        key: st.session_state.get(key)
+        for key in _DISCOVERY_WORKSPACE_KEYS
+        if key in st.session_state
+    }
+    if payload.get("m1-discovery-results") is not None:
+        ledger.save_literature_discovery_workspace(payload)
+
+
+def _restore_discovery_workspace() -> None:
+    if st.session_state.get("m1-discovery-workspace-restored"):
+        return
+    saved = ledger.literature_discovery_workspace() or {}
+    for key in _DISCOVERY_WORKSPACE_KEYS:
+        if key not in st.session_state and key in saved:
+            st.session_state[key] = saved[key]
+    st.session_state["m1-discovery-workspace-restored"] = True
 
 
 def _selected_discovery_history_results(
@@ -2246,6 +2679,7 @@ def _selected_discovery_history_results(
                 "source_url": links.get("source_url", ""),
                 "html_url": links.get("html_url", ""),
                 "pdf_url": links.get("pdf_url", ""),
+                "origin_links": normalize_origin_links(paper.get("origin_links", [])),
                 "history_detail": False,
             })
     return stored
@@ -2254,23 +2688,221 @@ def _selected_discovery_history_results(
 def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
     st.header(ui_text("M1 · 문헌조사·지식화 작업실", "M1 · Literature & Knowledge Workspace"))
     st.caption(ui_text("M1은 문헌과 연구 노트를 탐색·구조화해 승인 후보 지식과 관계를 준비합니다. 연구자 질문이나 외부 자문에는 직접 답하지 않고, 검증 지식을 M2에 갱신합니다.", "M1 explores and structures literature and research notes to prepare candidate knowledge and relations. It does not answer researcher questions directly; validated knowledge is passed to M2."))
-    discovery_tab, upload_tab, ontology_tab, relation_tab, search_tab, queue_tab, memory_tab = st.tabs([ui_text("LLM 문헌 탐색", "LLM Literature Discovery"), ui_text("서재함", "Paper Shelf"), ui_text("온톨로지", "Ontology"), ui_text("관계·계보 정리", "Relations & Lineage"), ui_text("승인 지식 조회", "Approved Knowledge Search"), ui_text("문헌 탐색 작업", "Literature Search Tasks"), ui_text("승인 지식 목록", "Approved Knowledge List")])
+    discovery_tab, upload_tab, knowledge_tab, ontology_tab = st.tabs([
+        ui_text("문헌 탐색", "Literature Discovery"),
+        ui_text("서재함", "Paper Shelf"),
+        ui_text("승인 지식", "Approved Knowledge"),
+        ui_text("온톨로지", "Ontology"),
+    ])
+    # Search tasks are an execution state of Literature Discovery. Search, list,
+    # relations, and lineage are projections of the same approved knowledge base.
+    queue_tab = discovery_tab
+    knowledge_browse_tab, relation_tab = knowledge_tab.tabs([
+        ui_text("검색·목록", "Search & List"),
+        ui_text("관계·계보 보완", "Relations & Lineage Maintenance"),
+    ])
+    search_tab = knowledge_browse_tab
+    memory_tab = knowledge_browse_tab
     with discovery_tab:
+        _restore_discovery_workspace()
         st.caption(ui_text(
             "궁금한 연구주제를 빠르게 탐색해 관련 논문의 윤곽을 파악합니다. 이 기능은 정식 문헌리뷰가 아니라 탐색용이며, 마음에 드는 논문을 원문 링크로 확인한 뒤 서재함에 넣어 정식 읽기로 이어갑니다.",
             "Quickly explore a research topic to understand the literature landscape. This is exploratory discovery, not a systematic review. Inspect source pages, then move promising papers to the shelf for formal reading."
         ))
 
-        discovery_history = ledger.literature_discovery_sessions(limit=20)
+        # Show the whole backlog before any individual search form. Selecting an
+        # Intent below loads its question/context into the shared discovery form.
+        queue_overview_profiles = ledger.search_profiles()
+        active_queue_profiles = [item for item in queue_overview_profiles if item.get("is_active")]
+        completed_queue_profiles = [item for item in queue_overview_profiles if not item.get("is_active")]
+        due_profile_ids = {str(item["profile_id"]) for item in scheduled_profiles(ledger)}
+        st.subheader(ui_text("연구 Intent 탐색 작업 큐", "Research Intent discovery queue"))
+        queue_metric_1, queue_metric_2, queue_metric_3 = st.columns(3)
+        queue_metric_1.metric(ui_text("대기 Intent", "Queued Intents"), len(active_queue_profiles))
+        queue_metric_2.metric(ui_text("주기 도래", "Due now"), len(due_profile_ids))
+        queue_metric_3.metric(ui_text("완료", "Completed"), len(completed_queue_profiles))
+        if active_queue_profiles:
+            queue_rows = []
+            for item in active_queue_profiles:
+                profile_id = str(item["profile_id"])
+                if item.get("cadence") == "manual":
+                    execution_state = ui_text("연구자 수동 실행", "Researcher-run")
+                elif profile_id in due_profile_ids:
+                    execution_state = ui_text("실행 주기 도래", "Due now")
+                else:
+                    execution_state = ui_text("다음 주기 대기", "Waiting for cadence")
+                queue_rows.append({
+                    ui_text("상태", "Status"): execution_state,
+                    ui_text("시작지점", "Origin"): " · ".join(origin_labels(item.get("origin_links", []))) or "-",
+                    ui_text("제목", "Title"): item.get("title", ""),
+                    ui_text("주기", "Cadence"): item.get("cadence", ""),
+                    ui_text("최근 실행", "Last run"): _fmt_local_time(item.get("last_run_at")) or "-",
+                })
+            st.dataframe(queue_rows, hide_index=True, use_container_width=True)
+        else:
+            st.info(ui_text(
+                "현재 실행 가능한 연구 Intent가 없습니다. 승인된 Intent가 등록되면 이곳에 표시됩니다.",
+                "There are no runnable Research Intents. Approved Intents will appear here.",
+            ))
+
+        queue_profile_by_id = {str(item["profile_id"]): item for item in active_queue_profiles}
+        pending_queue_profile_id = str(st.session_state.pop("m1-discovery-pending-profile-id", ""))
+        if pending_queue_profile_id in queue_profile_by_id:
+            # The detailed queue is rendered later on the same page. Stage its
+            # selection before the top selectbox is instantiated on this rerun.
+            st.session_state["m1-discovery-queue-selection"] = pending_queue_profile_id
+            st.session_state["m1-discovery-loaded-profile-id"] = ""
+        if st.session_state.pop("m1-discovery-reset-queue-selection", False):
+            st.session_state["m1-discovery-queue-selection"] = ""
+        queue_select_col, queue_clear_col = st.columns([5, 1])
+        with queue_select_col:
+            selected_queue_profile_id = st.selectbox(
+                ui_text("직접 수행할 Intent 선택", "Select an Intent to run now"),
+                options=[""] + list(queue_profile_by_id),
+                format_func=lambda value: ui_text("Intent를 선택하세요", "Select an Intent") if not value else str(queue_profile_by_id[value].get("title") or value),
+                key="m1-discovery-queue-selection",
+            )
+        with queue_clear_col:
+            st.write("")
+            clear_discovery = st.button(ui_text("내용 Clear", "Clear"), key="m1-discovery-clear", use_container_width=True)
+        if clear_discovery:
+            for key in (
+                "m1-discovery-results", "m1-discovery-plan", "m1-discovery-summary",
+                "m1-discovery-source", "m1-discovery-session-id", "m1-discovery-run-id",
+                "m1-discovery-history-selected", "m1-discovery-external-response",
+                "m1-discovery-external-prompt", "m1-discovery-external-prompt-signature",
+            ):
+                st.session_state.pop(key, None)
+            st.session_state["m1-discovery-topic"] = ""
+            st.session_state["m1-discovery-context"] = ""
+            st.session_state["m1-discovery-context-card-ids"] = []
+            ledger.clear_literature_discovery_workspace()
+            # Preserve the selection marker so Clear does not immediately refill it.
+            st.session_state["m1-discovery-loaded-profile-id"] = selected_queue_profile_id
+            st.rerun()
+        if selected_queue_profile_id and selected_queue_profile_id != st.session_state.get("m1-discovery-loaded-profile-id"):
+            selected_profile = queue_profile_by_id[selected_queue_profile_id]
+            st.session_state["m1-discovery-topic"] = str(selected_profile.get("question") or selected_profile.get("title") or "")
+            st.session_state["m1-discovery-context"] = str(selected_profile.get("context") or "")
+            st.session_state["m1-discovery-context-card-ids"] = []
+            st.session_state["m1-discovery-loaded-profile-id"] = selected_queue_profile_id
+            for key in (
+                "m1-discovery-results", "m1-discovery-plan", "m1-discovery-summary",
+                "m1-discovery-source", "m1-discovery-session-id", "m1-discovery-run-id",
+                "m1-discovery-history-selected", "m1-discovery-external-response",
+                "m1-discovery-external-prompt", "m1-discovery-external-prompt-signature",
+            ):
+                st.session_state.pop(key, None)
+            ledger.clear_literature_discovery_workspace()
+            st.rerun()
+        if selected_queue_profile_id:
+            st.success(ui_text(
+                "선택한 Intent의 연구질문과 탐색 맥락을 아래 문헌 탐색 입력에 채웠습니다. 수정한 뒤 실행해도 같은 Intent 실행 이력으로 기록됩니다.",
+                "The selected Intent's question and context are loaded below. You may edit them; the run will still be recorded under this Intent.",
+            ))
+            selected_direct_profile = queue_profile_by_id[selected_queue_profile_id]
+            direct_previous_runs = ledger.search_runs(selected_queue_profile_id, limit=5)
+            direct_prompt = intent_discovery_task_prompt(
+                {
+                    **selected_direct_profile,
+                    "question": str(st.session_state.get("m1-discovery-topic") or selected_direct_profile.get("question") or ""),
+                    "context": str(st.session_state.get("m1-discovery-context") or selected_direct_profile.get("context") or ""),
+                },
+                direct_previous_runs,
+                int(st.session_state.get("m1-discovery-count", 12)),
+            )
+            with st.expander(ui_text("이 Intent의 탐색 플랜 프롬프트", "Literature-plan prompt for this Intent"), expanded=False):
+                st.caption(ui_text(
+                    "이 프롬프트는 논문 목록 자체가 아니라, 다중 학술소스에서 실행할 검색식과 선별 관점을 생성합니다.",
+                    "This prompt generates search queries and screening perspectives for scholarly sources; it does not directly return the final paper list.",
+                ))
+                direct_prompt_text = st.text_area(
+                    ui_text("LLM Task 프롬프트", "LLM Task prompt"),
+                    value=direct_prompt, height=320,
+                    key=f"m1-direct-intent-prompt-{selected_queue_profile_id}",
+                    help=ui_text(
+                        "필요하면 검색 범위나 선별 관점을 수정한 뒤 바로 실행할 수 있습니다.",
+                        "You may revise the search scope or screening perspective before running it.",
+                    ),
+                )
+            direct_run_col, edit_run_col = st.columns(2)
+            with direct_run_col:
+                run_selected_intent = st.button(
+                    ui_text("탐색 플랜 생성 · 바로 실행", "Generate plan and run now"),
+                    type="primary", key="m1-direct-intent-run", use_container_width=True,
+                )
+            with edit_run_col:
+                st.caption(ui_text(
+                    "질문이나 맥락을 바꾸려면 아래 ‘새 문헌 탐색’ 입력을 수정한 뒤 실행하세요.",
+                    "To revise the question or context, edit the New literature discovery fields below before running.",
+                ))
+            if run_selected_intent:
+                direct_count = int(st.session_state.get("m1-discovery-count", 12))
+                direct_execution_profile = {
+                    **selected_direct_profile,
+                    "question": str(st.session_state.get("m1-discovery-topic") or selected_direct_profile.get("question") or "").strip(),
+                    "context": str(st.session_state.get("m1-discovery-context") or selected_direct_profile.get("context") or "").strip(),
+                }
+                try:
+                    with st.spinner(ui_text(
+                        "Intent 탐색 플랜 생성 → 학술소스 검색 → 초록 맥락 평가 중",
+                        "Generating the Intent plan → searching scholarly sources → triaging abstracts",
+                    )):
+                        direct_outcome = run_intent_discovery_task(
+                            ledger, direct_execution_profile, trigger="manual_researcher",
+                            planner=lambda _prompt: llm_draft(direct_prompt_text, model, use_ollama, profile="search_strategy"),
+                            triage_drafter=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                            sources=list(INTERNAL_SEARCH_SOURCES), max_results=direct_count,
+                        )
+                    if direct_outcome["status"] == "failed":
+                        st.error(direct_outcome["error"])
+                    else:
+                        direct_plan = dict(direct_outcome.get("plan", {}))
+                        direct_plan["sources"] = [SEARCH_SOURCE_LABELS.get(key, key) for key in INTERNAL_SEARCH_SOURCES]
+                        st.session_state["m1-discovery-results"] = list(direct_outcome.get("candidates", []))
+                        st.session_state["m1-discovery-plan"] = direct_plan
+                        st.session_state["m1-discovery-summary"] = direct_plan.get("scope_summary", "")
+                        st.session_state["m1-discovery-source"] = "internal"
+                        st.session_state["m1-discovery-run-id"] = direct_outcome.get("run_id", "")
+                        st.session_state.pop("m1-discovery-session-id", None)
+                        st.session_state["m1-discovery-history-selected"] = []
+                        _save_discovery_workspace()
+                        st.session_state["m1-discovery-direct-run-message"] = ui_text(
+                            f"‘{selected_direct_profile.get('title', '')}’ Intent를 직접 실행해 후보 {len(direct_outcome.get('candidates', []))}편을 기록했습니다.",
+                            f"Ran ‘{selected_direct_profile.get('title', '')}’ and recorded {len(direct_outcome.get('candidates', []))} candidates.",
+                        )
+                        if selected_direct_profile.get("cadence") == "manual":
+                            st.session_state["m1-discovery-loaded-profile-id"] = ""
+                            st.session_state["m1-discovery-reset-queue-selection"] = True
+                        st.rerun()
+                except Exception as error:
+                    st.error(ui_text(f"Intent 직접 탐색에 실패했습니다: {error}", f"Could not run the Intent directly: {error}"))
+        if direct_run_message := st.session_state.pop("m1-discovery-direct-run-message", ""):
+            st.success(str(direct_run_message))
+
+        discovery_history_all = ledger.unified_literature_discovery_runs(limit=100)
         references = ledger.literature_references(limit=500)
         history_shelf_papers = ledger.shelf_papers()
+        history_origin_filter = st.selectbox(
+            ui_text("탐색 이력 출발점", "Discovery history origin"),
+            ["all", "knowledge_cards", "research_intent"],
+            format_func=lambda value: {
+                "all": ui_text("전체", "All"),
+                "knowledge_cards": ui_text("지식카드 기반", "Knowledge Card"),
+                "research_intent": ui_text("M2 연구 Intent 기반", "M2 Research Intent"),
+            }[value], key="m1-unified-discovery-origin-filter",
+        )
+        discovery_history = [
+            item for item in discovery_history_all
+            if history_origin_filter == "all" or item.get("origin_type") == history_origin_filter
+        ]
         with st.expander(
-            ui_text(f"문헌 탐색 히스토리 · {len(discovery_history)}건", f"Literature discovery history · {len(discovery_history)}"),
+            ui_text(f"통합 문헌 탐색 이력 · {len(discovery_history)}건", f"Unified literature discovery history · {len(discovery_history)}"),
             expanded=False,
         ):
             st.caption(ui_text(
-                "문헌 탐색 이력은 재작업 화면이 아니라 ‘어떤 주제로 무엇을 찾아봤는지’를 남기는 탐색 기록입니다. 각 세션에는 검색 맥락과 당시 결과 논문, 현재 Reference List/서재함 상태만 간단히 표시합니다.",
-                "Discovery history is a lightweight research log, not a re-execution workspace. Each session shows what was searched, the research context, the papers found, and their current Reference List / shelf status.",
+                "지식카드 기반 일회성 탐색과 M2 연구 Intent 기반 주기 실행을 같은 형식으로 보여줍니다. 개별 실행은 완료되지만 활성 Intent 프로필은 다음 주기에 다시 실행됩니다.",
+                "Ad-hoc Knowledge Card searches and periodic M2 Research Intent runs share one history. Each run completes, while an active Intent profile can run again on its next cadence.",
             ))
             if not discovery_history:
                 st.caption(ui_text(
@@ -2279,21 +2911,28 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 ))
             for history_index, history in enumerate(discovery_history):
                 history_topic = str(history.get("topic", "")).strip() or ui_text("제목 없는 탐색", "Untitled discovery")
-                history_source = ui_text("내부 LLM", "Internal LLM") if history.get("discovery_source") == "internal" else ui_text("외부 LLM", "External LLM")
+                origin_label = ui_text("지식카드", "Knowledge Card") if history.get("origin_type") == "knowledge_cards" else ui_text("M2 연구 Intent", "M2 Research Intent")
+                mode_label = {
+                    "ad_hoc": ui_text("일회성", "Ad-hoc"),
+                    "manual": ui_text("연구자 실행", "Researcher-run"),
+                    "periodic": ui_text("주기 실행", "Periodic"),
+                }.get(str(history.get("execution_mode")), ui_text("실행", "Run"))
+                history_source = ui_text("내부 LLM", "Internal LLM") if history.get("trigger") == "internal" else str(history.get("trigger") or ui_text("외부/자동", "External/automatic"))
                 history_results = list(history.get("results", []))
                 reference_count = sum(1 for paper in history_results if _discovery_reference_match(paper, references))
                 shelf_count = sum(1 for paper in history_results if _discovery_shelf_match(paper, history_shelf_papers))
                 result_count = len(history_results)
-                label = f"{history_topic} · {result_count}{ui_text('편', ' papers')}"
+                label = f"[{origin_label} · {mode_label}] {history_topic} · {result_count}{ui_text('편', ' papers')}"
                 with st.expander(label, expanded=False):
                     st.caption(
-                        f"{_fmt_local_time(history.get('created_at'))} · {history_source} · "
+                        f"{_fmt_local_time(history.get('created_at'))} · {history_source} · {history.get('status', 'completed')} · "
                         + ui_text(
                             f"Reference List {reference_count}편 · 서재함 {shelf_count}편",
                             f"Reference List {reference_count} · Shelf {shelf_count}",
                         )
                     )
                     context_text = str(history.get("research_context", "")).strip()
+                    render_origin_labels(history)
                     if context_text:
                         st.markdown(ui_text("**검색 맥락**", "**Research context**"))
                         st.write(context_text)
@@ -2301,6 +2940,10 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     if summary_text:
                         st.markdown(ui_text("**탐색 결과 요약**", "**Discovery summary**"))
                         st.write(summary_text)
+                    if history.get("query"):
+                        st.caption(ui_text("검색 전략: ", "Search strategy: ") + str(history["query"]))
+                    if history.get("error"):
+                        st.error(str(history["error"]))
                     st.markdown(ui_text(f"**결과 논문 · {result_count}편**", f"**Papers found · {result_count}**"))
                     if not history_results:
                         st.caption(ui_text("저장된 결과 논문이 없습니다.", "No result papers were stored."))
@@ -2323,7 +2966,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                         with link_col:
                             open_url = links.get("html_url") or links.get("source_url") or links.get("pdf_url")
                             if open_url:
-                                st.link_button(ui_text("원문", "Source"), open_url, key=f"m1-history-source-{history.get('session_id','')}-{paper_index}")
+                                st.link_button(ui_text("원문", "Source"), open_url, key=f"m1-history-source-{history.get('run_id','')}-{paper_index}")
                     if history_index < len(discovery_history) - 1:
                         st.caption(ui_text(
                             "이 기록은 당시 탐색 결과를 요약해서 보여줍니다. 관심 논문은 Reference List, 본격적으로 읽을 논문은 서재함에서 계속 관리합니다.",
@@ -2353,6 +2996,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     title = str(paper.get("title", "")).strip() or ui_text("제목 없음", "Untitled")
                     st.markdown(f"**{title}**")
                     st.caption(f"{ref.get('topic','')} · {ui_text('상태', 'status')} {ref.get('status','selected')}")
+                    render_origin_labels(paper, prefix=ui_text("탐색 시작지점", "Discovery origin"))
                     labels = list(ref.get("labels", []))
                     if labels:
                         st.caption(ui_text("Labels · ", "Labels · ") + " · ".join(labels))
@@ -2380,12 +3024,55 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 "reading_status": "unread",
                                 "asset_type": "paper",
                                 "intake_source": "literature_reference",
+                                "origin_links": paper.get("origin_links", []),
                             })
                             ledger.update_literature_reference_status(ref.get("reference_id", ""), "shelved")
                             st.success(ui_text(f"서재함에 추가했습니다: {saved['title']}", f"Added to shelf: {saved['title']}"))
                     if ref_index < len(visible_refs) - 1:
                         st.divider()
 
+        st.markdown(ui_text("### 새 문헌 탐색", "### New literature discovery"))
+        approved_cards_for_discovery = memory.all()
+        discovery_card_by_id = {str(card["card_id"]): card for card in approved_cards_for_discovery}
+        discovery_card_ids = st.multiselect(
+            ui_text("탐색의 출발점이 될 지식카드 (선택)", "Knowledge Cards to use as discovery context (optional)"),
+            options=list(discovery_card_by_id),
+            format_func=lambda card_id: str(discovery_card_by_id[card_id].get("title") or card_id),
+            key="m1-discovery-context-card-ids",
+            help=ui_text(
+                "선택한 카드의 주장·조건·한계·개념으로 탐색 대상과 연구 맥락 초안을 구성합니다.",
+                "Build an editable topic and context from the selected cards' claims, conditions, limits, and concepts.",
+            ),
+        )
+        if st.button(
+            ui_text("선택 카드로 탐색 문맥 구성", "Build discovery context from selected cards"),
+            key="m1-discovery-build-from-cards", disabled=not discovery_card_ids,
+        ):
+            selected_context_cards = [discovery_card_by_id[card_id] for card_id in discovery_card_ids]
+            concepts = list(dict.fromkeys(
+                str(concept).strip() for card in selected_context_cards
+                for concept in card.get("concepts", []) if str(concept).strip()
+            ))
+            titles = [str(card.get("title") or "").strip() for card in selected_context_cards if str(card.get("title") or "").strip()]
+            st.session_state["m1-discovery-topic"] = ui_text(
+                f"{', '.join(titles[:3])}와 관련된 최신 근거, 상충 결과 및 미해결 연구 문제",
+                f"Recent evidence, conflicting findings, and open questions related to {', '.join(titles[:3])}",
+            )
+            context_lines = [ui_text("선택 지식카드에서 출발한 탐색입니다.", "This discovery starts from selected approved Knowledge Cards.")]
+            for card in selected_context_cards:
+                context_lines.extend([
+                    f"- {card.get('title') or card['card_id']}: {card.get('claim') or ''}",
+                    f"  {ui_text('조건', 'Conditions')}: {card.get('conditions') or ui_text('미기재', 'not stated')}",
+                    f"  {ui_text('한계', 'Limits')}: {card.get('limits') or ui_text('미기재', 'not stated')}",
+                ])
+            if concepts:
+                context_lines.append(f"{ui_text('핵심 개념', 'Core concepts')}: {', '.join(concepts[:20])}")
+            context_lines.append(ui_text(
+                "기존 주장을 반복하기보다 이를 보완·반박하거나 적용 범위를 구체화하는 문헌을 우선 탐색합니다.",
+                "Prioritize literature that extends, challenges, or clarifies the scope of the existing claims.",
+            ))
+            st.session_state["m1-discovery-context"] = "\n".join(context_lines)
+            st.rerun()
         topic = st.text_area(
             ui_text("무엇을 찾아보고 싶은가?", "What do you want to explore?"),
             key="m1-discovery-topic", height=100,
@@ -2397,50 +3084,89 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             placeholder=ui_text("왜 이 주제가 궁금한지, 특히 보고 싶은 관점이나 제외할 범위를 적습니다.", "Add why this matters, the angle you care about, or what should be excluded."),
         )
         target_count = st.slider(ui_text("확인할 논문 수", "Number of papers to inspect"), min_value=5, max_value=20, value=12, step=1, key="m1-discovery-count")
-        source_options = {
-            "arxiv": "arXiv",
-            "semantic_scholar": "Semantic Scholar",
-            "crossref": "Crossref",
-        }
-        selected_sources = st.multiselect(
-            ui_text("내부 탐색 소스", "Internal search sources"),
-            options=list(source_options),
-            default=["arxiv", "semantic_scholar", "crossref"],
-            format_func=lambda key: source_options[key],
-            key="m1-discovery-sources",
-            help=ui_text(
-                "Google Scholar는 자동 수집하지 않고 각 결과의 확인 링크로 제공합니다.",
-                "Google Scholar is provided as a per-paper verification link rather than being scraped automatically.",
-            ),
-        )
+        discovery_origin_values = [{
+            "origin_type": "m2_knowledge", "origin_id": card_id,
+            "label": str(discovery_card_by_id[card_id].get("title") or card_id),
+            "source_card_ids": [card_id],
+            "research_title": topic.strip(),
+            "research_question": topic.strip(),
+            "research_context": context.strip(),
+        } for card_id in discovery_card_ids]
+        if not discovery_origin_values and topic.strip():
+            origin_digest = hashlib.sha256(f"{topic.strip()}\n{context.strip()}".encode("utf-8")).hexdigest()[:12]
+            discovery_origin_values.append({
+                "origin_type": "researcher_question", "origin_id": f"rq-search-{origin_digest}",
+                "label": topic.strip()[:120], "source_card_ids": [],
+                "research_title": topic.strip(), "research_question": topic.strip(),
+                "research_context": context.strip(),
+            })
+        discovery_origin_links = normalize_origin_links(discovery_origin_values)
+        source_options = SEARCH_SOURCE_LABELS
+        selected_sources = list(INTERNAL_SEARCH_SOURCES)
 
         internal_col, external_col = st.columns(2)
         with internal_col:
             if st.button(ui_text("내부 LLM으로 빠른 문헌 탐색", "Quick search with internal LLM"), type="primary", disabled=not topic.strip(), key="m1-discovery-internal"):
                 try:
                     with st.spinner(ui_text("검색전략 생성 → 다중 학술소스 후보 수집 → 초록 빠른 비교 중", "Generating search plan → retrieving candidates from multiple scholarly sources → triaging abstracts")):
-                        plan_raw = llm_draft(discovery_search_plan_prompt(topic, context, target_count), model, use_ollama, profile="search_strategy") or ""
-                        plan = parse_discovery_search_plan(plan_raw)
-                        candidates = collect_multisource_candidates(topic, context, plan["queries"], selected_sources, max_results=target_count)
-                        plan["sources"] = [source_options.get(key, key) for key in selected_sources]
-                        if not candidates:
-                            st.session_state["m1-discovery-results"] = []
-                            st.warning(ui_text("현재 조건으로 후보 논문을 찾지 못했습니다. 탐색 소스나 연구 맥락을 조정하거나 외부 LLM 탐색을 사용해 보세요.", "No candidate papers were found. Adjust the sources or research context, or try external-LLM discovery."))
-                        else:
-                            triage_raw = llm_draft(discovery_triage_prompt(topic, context, candidates, target_count), model, use_ollama, profile="abstract_triage") or ""
-                            results = apply_discovery_triage(candidates, triage_raw, target_count)
-                            st.session_state["m1-discovery-results"] = results
-                            st.session_state["m1-discovery-plan"] = plan
-                            st.session_state["m1-discovery-summary"] = plan.get("scope_summary", "")
-                            st.session_state["m1-discovery-source"] = "internal"
-                            saved_session = ledger.save_literature_discovery_session(
-                                topic=topic, research_context=context, target_count=target_count,
-                                discovery_source="internal", search_plan=plan,
-                                search_summary=plan.get("scope_summary", ""), results=_minimal_discovery_history_results(results),
+                        selected_profile = queue_profile_by_id.get(selected_queue_profile_id)
+                        if selected_profile:
+                            execution_profile = {**selected_profile, "question": topic.strip(), "context": context.strip()}
+                            outcome = run_intent_discovery_task(
+                                ledger, execution_profile, trigger="manual_researcher",
+                                planner=lambda prompt: llm_draft(prompt, model, use_ollama, profile="search_strategy"),
+                                triage_drafter=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                                sources=selected_sources, max_results=target_count,
                             )
-                            st.session_state["m1-discovery-session-id"] = saved_session.get("session_id", "")
-                            st.session_state["m1-discovery-history-selected"] = []
-                            st.rerun()
+                            if outcome["status"] == "failed":
+                                st.error(outcome["error"])
+                            else:
+                                results = list(outcome.get("candidates", []))
+                                plan = dict(outcome.get("plan", {}))
+                                plan["sources"] = [source_options.get(key, key) for key in selected_sources]
+                                st.session_state["m1-discovery-results"] = results
+                                st.session_state["m1-discovery-plan"] = plan
+                                st.session_state["m1-discovery-summary"] = plan.get("scope_summary", "")
+                                st.session_state["m1-discovery-source"] = "internal"
+                                st.session_state["m1-discovery-run-id"] = outcome.get("run_id", "")
+                                st.session_state.pop("m1-discovery-session-id", None)
+                                st.session_state["m1-discovery-history-selected"] = []
+                                _save_discovery_workspace()
+                                if selected_profile.get("cadence") == "manual":
+                                    st.session_state["m1-discovery-loaded-profile-id"] = ""
+                                    st.session_state["m1-discovery-reset-queue-selection"] = True
+                                st.rerun()
+                        else:
+                            plan_raw = llm_draft(discovery_search_plan_prompt(topic, context, target_count), model, use_ollama, profile="search_strategy") or ""
+                            plan = parse_discovery_search_plan(plan_raw)
+                            candidates = collect_multisource_candidates(topic, context, plan["queries"], selected_sources, max_results=target_count)
+                            plan["sources"] = [source_options.get(key, key) for key in selected_sources]
+                            if not candidates:
+                                st.session_state["m1-discovery-results"] = []
+                                st.session_state["m1-discovery-plan"] = plan
+                                st.session_state["m1-discovery-summary"] = plan.get("scope_summary", "")
+                                st.session_state["m1-discovery-source"] = "internal"
+                                _save_discovery_workspace()
+                                st.warning(ui_text("현재 조건으로 후보 논문을 찾지 못했습니다. 연구 맥락을 조정하거나 외부 LLM 탐색을 사용해 보세요.", "No candidate papers were found. Adjust the research context or try external-LLM discovery."))
+                            else:
+                                triage_raw = llm_draft(discovery_triage_prompt(topic, context, candidates, target_count), model, use_ollama, profile="abstract_triage") or ""
+                                results = apply_discovery_triage(candidates, triage_raw, target_count)
+                                results = [{**paper, "origin_links": discovery_origin_links} for paper in results]
+                                st.session_state["m1-discovery-results"] = results
+                                st.session_state["m1-discovery-plan"] = plan
+                                st.session_state["m1-discovery-summary"] = plan.get("scope_summary", "")
+                                st.session_state["m1-discovery-source"] = "internal"
+                                st.session_state.pop("m1-discovery-run-id", None)
+                                saved_session = ledger.save_literature_discovery_session(
+                                    topic=topic, research_context=context, target_count=target_count,
+                                    discovery_source="internal", search_plan=plan,
+                                    search_summary=plan.get("scope_summary", ""), results=_minimal_discovery_history_results(results),
+                                    origin_card_ids=discovery_card_ids,
+                                )
+                                st.session_state["m1-discovery-session-id"] = saved_session.get("session_id", "")
+                                st.session_state["m1-discovery-history-selected"] = []
+                                _save_discovery_workspace()
+                                st.rerun()
                 except Exception as error:
                     st.error(ui_text(f"빠른 문헌 탐색에 실패했습니다: {error}", f"Quick literature discovery failed: {error}"))
         with external_col:
@@ -2486,17 +3212,21 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             if st.button(ui_text("외부 LLM 결과 반영", "Apply external LLM results"), disabled=not pasted.strip(), key="m1-discovery-external-apply"):
                 try:
                     parsed = parse_external_literature_results(pasted, target_count)
+                    parsed["papers"] = [{**paper, "origin_links": discovery_origin_links} for paper in parsed["papers"]]
                     st.session_state["m1-discovery-results"] = parsed["papers"]
                     st.session_state["m1-discovery-summary"] = parsed.get("search_summary", "")
                     st.session_state["m1-discovery-plan"] = {}
                     st.session_state["m1-discovery-source"] = "external"
+                    st.session_state.pop("m1-discovery-run-id", None)
                     saved_session = ledger.save_literature_discovery_session(
                         topic=topic, research_context=context, target_count=target_count,
                         discovery_source="external", search_plan={},
                         search_summary=parsed.get("search_summary", ""), results=_minimal_discovery_history_results(parsed["papers"]),
+                        origin_card_ids=discovery_card_ids,
                     )
                     st.session_state["m1-discovery-session-id"] = saved_session.get("session_id", "")
                     st.session_state["m1-discovery-history-selected"] = []
+                    _save_discovery_workspace()
                     st.rerun()
                 except ValueError as error:
                     st.error(str(error))
@@ -2509,6 +3239,10 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             else:
                 source_label = ui_text("외부 LLM", "External LLM")
             st.markdown(ui_text(f"**빠른 탐색 결과 · {len(discovery_results)}편 · {source_label}**", f"**Quick discovery · {len(discovery_results)} papers · {source_label}**"))
+            st.caption(ui_text(
+                "현재 결과는 임시 작업본으로 보존됩니다. 다른 페이지를 다녀와도 유지되며, ‘내용 Clear’ 또는 다음 탐색 실행 시 교체됩니다.",
+                "These results are retained as the current working set across page changes. Clear them with ‘Clear’ or replace them by running another discovery.",
+            ))
             summary = str(st.session_state.get("m1-discovery-summary", "")).strip()
             if summary:
                 st.info(summary)
@@ -2527,6 +3261,8 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             selected_default = set(st.session_state.get("m1-discovery-history-selected", []))
             result_options = {_discovery_paper_key(p): p for p in discovery_results}
             session_id = str(st.session_state.get("m1-discovery-session-id", "")).strip()
+            intent_run_id = str(st.session_state.get("m1-discovery-run-id", "")).strip()
+            discovery_history_id = session_id or intent_run_id
             selected_keys: list[str] = []
             discovery_shelf_papers = ledger.shelf_papers()
 
@@ -2543,6 +3279,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 score_text = f" · {ui_text('관련도', 'relevance')} {score}/100" if score is not None else ""
                 paper_key = _discovery_paper_key(paper)
                 st.markdown(f"**{index}. {title}**")
+                render_origin_labels(paper, prefix=ui_text("탐색 시작지점", "Discovery origin"))
                 if shelf_match:
                     reading_status = str(shelf_match.get("reading_status", "unread"))
                     shelf_status = str(shelf_match.get("shelf_status", "reference"))
@@ -2613,6 +3350,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 "reading_status": "unread",
                                 "asset_type": "paper",
                                 "intake_source": "llm_discovery",
+                                "origin_links": paper.get("origin_links", []),
                             })
                             st.success(ui_text(f"서재함에 추가했습니다: {saved['title']}", f"Added to shelf: {saved['title']}"))
                             st.rerun()
@@ -2635,6 +3373,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 "reading_status": "unread",
                                 "asset_type": "paper",
                                 "intake_source": "llm_discovery",
+                                "origin_links": paper.get("origin_links", []),
                             })
                             st.success(ui_text(f"PDF를 내려받아 서재함에 보관했습니다: {saved['title']}", f"Downloaded the PDF into the shelf: {saved['title']}"))
                             st.rerun()
@@ -2642,6 +3381,36 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                             st.error(ui_text(f"PDF 자동 보관 실패: {error}", f"Could not download the PDF: {error}"))
                 elif not html_url and source_url:
                     st.caption(ui_text("HTML 원문이 확인되지 않아 출처 페이지를 엽니다. PDF URL이 확인되면 자동 보관할 수 있습니다.", "No HTML full-text link was identified. Open the source page; if a direct PDF URL is available, it can be stored automatically."))
+                stored_path_value=str((shelf_match or {}).get("pdf_path") or "").strip()
+                has_stored_source=bool(stored_path_value) and Path(stored_path_value).exists()
+                if not html_url and not pdf_url and not has_stored_source:
+                    manual_source_key=f"{index}-{hashlib.sha256(paper_key.encode('utf-8')).hexdigest()[:12]}"
+                    with st.expander(ui_text("원문 직접 등록 · 다운로드 파일 또는 텍스트", "Register source manually · downloaded file or text"),expanded=False):
+                        st.caption(ui_text(
+                            "Google Scholar·출판사에서 원문을 내려받은 뒤 PDF/TXT/MD를 등록하거나, 확보한 본문 전체를 붙여 넣으세요. 등록한 원문은 서재함의 동일 논문과 M1 읽기·M2 리비전에 사용됩니다.",
+                            "Download the paper from Google Scholar or the publisher and register a PDF/TXT/MD file, or paste the full text. The source is attached to the same shelf paper for M1 reading and M2 revision.",
+                        ))
+                        manual_file=st.file_uploader(
+                            ui_text("다운로드한 원문 파일", "Downloaded source file"),type=["pdf","txt","md"],
+                            key=f"m1-discovery-manual-file-{manual_source_key}",
+                        )
+                        pasted_text=st.text_area(
+                            ui_text("원문 텍스트 Copy/Paste", "Copy/paste paper text"),height=180,
+                            key=f"m1-discovery-pasted-text-{manual_source_key}",
+                            placeholder=ui_text("초록이 아니라 분석에 사용할 논문 본문을 붙여 넣으세요.", "Paste the paper body to be analyzed, not only the abstract."),
+                        )
+                        file_col,text_col=st.columns(2)
+                        if file_col.button(ui_text("다운로드 파일 등록", "Register downloaded file"),disabled=manual_file is None,key=f"m1-discovery-register-file-{manual_source_key}"):
+                            try:
+                                saved=_store_manual_discovery_source({**paper,"labels":labels},manual_file,shelf_match=shelf_match,intake_source="llm_discovery_manual_file")
+                                st.success(ui_text(f"원문 파일을 서재함 논문에 연결했습니다: {saved['title']}",f"Source file attached to shelf paper: {saved['title']}"));st.rerun()
+                            except Exception as error:st.error(ui_text(f"원문 파일 등록 실패: {error}",f"Could not register source file: {error}"))
+                        if text_col.button(ui_text("붙여넣은 원문 등록", "Register pasted text"),disabled=not pasted_text.strip(),key=f"m1-discovery-register-text-{manual_source_key}"):
+                            try:
+                                pasted_upload=pasted_paper_text_upload(title,pasted_text)
+                                saved=_store_manual_discovery_source({**paper,"labels":labels},pasted_upload,shelf_match=shelf_match,intake_source="llm_discovery_pasted_text")
+                                st.success(ui_text(f"붙여넣은 원문을 서재함 논문에 연결했습니다: {saved['title']}",f"Pasted source attached to shelf paper: {saved['title']}"));st.rerun()
+                            except Exception as error:st.error(ui_text(f"원문 텍스트 등록 실패: {error}",f"Could not register pasted text: {error}"))
                 st.divider()
 
             st.session_state["m1-discovery-history-selected"] = list(selected_keys)
@@ -2649,14 +3418,18 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             with action_save_history:
                 if st.button(
                     ui_text("체크 논문 상세정보 저장", "Save checked paper details"),
-                    disabled=not session_id,
+                    disabled=not discovery_history_id,
                     key="m1-discovery-history-save-selection",
                     use_container_width=True,
                 ):
                     stored_results = _selected_discovery_history_results(discovery_results, set(selected_keys))
-                    updated = ledger.update_literature_discovery_session_results(
-                        session_id, stored_results, search_summary=str(st.session_state.get("m1-discovery-summary", ""))
-                    )
+                    if session_id:
+                        updated = ledger.update_literature_discovery_session_results(
+                            session_id, stored_results, search_summary=str(st.session_state.get("m1-discovery-summary", ""))
+                        )
+                    else:
+                        ledger.update_search_run_candidates(intent_run_id, stored_results)
+                        updated = {"run_id": intent_run_id} if intent_run_id else None
                     if updated:
                         st.success(ui_text(
                             f"탐색 기록을 갱신했습니다. 상세 보존 {len(selected_keys)}편 · 나머지는 제목/링크만 저장됩니다.",
@@ -2678,7 +3451,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                             continue
                         labels = list(paper.get("labels", [])) or build_paper_labels(paper)
                         ledger.upsert_literature_reference(
-                            topic=topic, research_context=context, session_id=session_id,
+                            topic=topic, research_context=context, session_id=discovery_history_id,
                             paper=paper, labels=labels, status="selected",
                         )
                         added += 1
@@ -2868,6 +3641,8 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
     with ontology_tab:
         render_ontology_workspace(model, use_ollama, semantic, embedding_model)
     with relation_tab:
+        st.markdown("### 관계·계보 검토 및 보완")
+        st.caption("온톨로지가 Type 수준의 구조를 제공하므로, 여기서는 승인 지식카드 사이의 근거·반박·보완 관계와 출처 계보를 확인하고 필요한 부분만 수정합니다.")
         cards = memory.all()
         cards_by_id = {card["card_id"]: card for card in cards}
         all_approved_relations = ledger.active_knowledge_relations()
@@ -3162,6 +3937,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 st.subheader("계보 종합 의견")
                 st.markdown(overview)
     with search_tab:
+        st.markdown("### 승인 지식 검색")
         st.caption("연구 질문과 관련된 승인 지식을 찾습니다. 기본 결과는 상위 3개 카드 전체를 보여 줍니다.")
         query = st.text_input("승인 지식 검색", key="p3-search-query", placeholder="예: agent specification evaluation")
         if st.button("P3 검색", disabled=not query.strip(), type="primary"):
@@ -3176,8 +3952,9 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                     st.session_state["p3-detailed"] = True
                     st.rerun()
     with queue_tab:
-        st.subheader("연구 Intent 탐색 작업 큐")
-        st.caption("승인된 연구 Intent가 탐색 프로필로 대기합니다. 실행 결과는 논문 후보 서재함으로 보내며, 이 단계에서는 지식카드를 만들지 않습니다.")
+        st.divider()
+        st.subheader("큐 상세 · 정책 및 실행 이력")
+        st.caption("상단에서 전체 큐를 먼저 확인하고 Intent를 선택합니다. 여기서는 개별 Intent의 주기 정책, 외부 LLM 계획, 실행 로그와 후속 처리를 관리합니다.")
         if selected_llm_provider("internal") == "gemini" or selected_llm_provider("paper") == "gemini":
             destinations = []
             if selected_llm_provider("internal") == "gemini":
@@ -3186,6 +3963,10 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 destinations.append("공개 arXiv 본문 비교")
             st.caption("Gemini 외부 API로 전송: " + " · ".join(destinations))
         ready_intents = ledger.phenomena(recipient="m1", type_="curation_intent", status="ready")
+        pending_intent_requests = [
+            item for item in ledger.phenomena(recipient="researcher", type_="decision_request", status="proposed")
+            if item.get("subject_type")=="curation_intent"
+        ]
         profiles = ledger.search_profiles()
         all_profiles = ledger.search_profiles(include_deleted=True)
         queued_profiles = [profile for profile in profiles if profile["is_active"]]
@@ -3195,7 +3976,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
         registered_count = len(profiles)
         deleted_count = len(all_profiles) - registered_count
         st.caption(
-            f"승인 Intent {len(ready_intents)}건 · 등록됨 {registered_count}건 · "
+            f"승인 대기 {len(pending_intent_requests)}건 · 승인 Intent {len(ready_intents)}건 · 등록됨 {registered_count}건 · "
             f"새 등록 가능 {len(missing)}건 · 큐에서 삭제됨 {deleted_count}건"
         )
         migrate_label = f"승인 Intent {len(ready_intents)}건 중 새 {len(missing)}건을 M1 탐색 큐에 등록"
@@ -3203,8 +3984,19 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             for intent in missing:
                 ledger.create_search_profile(intent["payload"])
             st.rerun()
+        if pending_intent_requests:
+            st.markdown(f"**승인 대기 Intent · {len(pending_intent_requests)}건**")
+            st.caption("아직 실행 큐는 아닙니다. 연구자 홈의 검토·승인함에서 승인하면 같은 제목으로 실행 프로필이 생성됩니다.")
+            for request in pending_intent_requests:
+                intent=(request.get("payload") or {}).get("intent") or {}
+                title=str(intent.get("title") or "M1 탐색 Intent")
+                with st.expander(f"승인 대기 · {title}"):
+                    st.markdown(f"**등록 예정 제목**  \n{title}")
+                    st.write(f"탐색 질문: {intent.get('question','')}")
+                    st.caption(f"요청 ID: {request.get('phenomenon_id','')} · 승인 위치: 연구자 홈 > 연구자 검토·승인함")
+            st.divider()
         if not profiles:
-            st.info("아직 승인된 탐색 프로필이 없습니다. M2가 제안한 Intent를 연구자 홈에서 승인하면 이곳에 나타납니다.")
+            st.info("아직 승인되어 실행 가능한 탐색 프로필이 없습니다. 위 승인 대기 Intent를 연구자 홈에서 승인하면 동일 제목으로 이곳에 등록됩니다.")
         if queued_profiles:
             st.markdown(f"**대기 큐 · {len(queued_profiles)}건**")
         for profile_index, profile in enumerate(queued_profiles + completed_profiles):
@@ -3213,66 +4005,73 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 st.markdown(f"**완료된 탐색 이력 · {len(completed_profiles)}건**")
                 st.caption("한 번 실행된 Intent는 큐와 주기 실행 대상에서 제거됩니다. 아래에는 로그·PDF·P1 후보 카드 검토만 남습니다.")
             state_label = "대기" if profile["is_active"] else "완료"
-            with st.expander(f"{state_label} · {profile['title']} · {profile['cadence']}", expanded=profile["is_active"]):
+            with st.expander(f"{state_label} · {profile['title']} · {profile['cadence']}", expanded=False):
                 st.caption(f"원래 연구 질문: {profile['question']}")
+                render_origin_labels(profile)
+                if profile["is_active"] and st.button(
+                    "직접 문헌 탐색으로 가져오기",
+                    key=f"load-profile-into-direct-discovery-{profile['profile_id']}",
+                    help="이 Intent의 연구질문과 맥락을 상단 문헌 탐색 작업공간에 채웁니다.",
+                ):
+                    st.session_state["m1-discovery-pending-profile-id"] = str(profile["profile_id"])
+                    st.rerun()
                 if profile["is_active"] and st.button("이 Intent를 탐색 큐에서 삭제", key=f"delete-profile-{profile['profile_id']}"):
                     ledger.delete_search_profile(profile["profile_id"])
                     st.success("탐색 큐에서 삭제했습니다. 기존 실행 로그는 감사 기록으로 보존됩니다.")
                     st.rerun()
                 if not profile["is_active"]:
                     if st.button("이 Intent를 다시 탐색 큐에 넣기", key=f"requeue-profile-{profile['profile_id']}"):
-                        ledger.update_search_profile(profile["profile_id"], context=profile["context"], keywords=profile["keywords"], core_terms=profile.get("core_terms", []), cadence=profile["cadence"], is_active=True)
+                        ledger.update_search_profile_policy(profile["profile_id"], context=profile["context"], cadence=profile["cadence"], is_active=True)
                         st.rerun()
                 with st.form(f"search-profile-form-{profile['profile_id']}"):
                     context = st.text_area("탐색 맥락", value=profile["context"], height=150)
-                    keywords_text = st.text_area("선정 키워드 (한 줄에 하나 · 위가 더 중요)", value="\n".join(profile["keywords"]), height=120)
-                    core_terms_text = st.text_input("핵심 5개어 AND (공백 또는 쉼표로 구분)", value=" ".join(profile.get("core_terms", [])), help="정확 구문 검색과 별도로 실행할, 유사어·불용어를 뺀 판별력 높은 5개어입니다.")
-                    st.caption("검색은 각 정확 구문을 우선순위대로 따로 호출해 합치며, 전체 중복 제거어 AND와 핵심 5개어 AND를 별도 호출합니다. 여섯 구문을 한 식으로 AND 하지 않습니다.")
                     cadence = st.selectbox("주기", ["daily", "weekly", "manual"], index=["daily", "weekly", "manual"].index(profile["cadence"]))
-                    is_active = st.checkbox("주기 탐색 활성화", value=profile["is_active"], disabled=cadence == "manual")
-                    left, right = st.columns(2)
-                    save = left.form_submit_button("맥락·키워드 저장")
-                    regenerate = right.form_submit_button("저장한 맥락으로 영문 키워드 만들기")
-                keywords = _lines(keywords_text)
-                core_terms = [term for term in re.split(r"[\\s,]+", core_terms_text.strip()) if term]
-                if save or regenerate:
-                    try:
-                        if regenerate:
-                            refreshed = {**profile, "context": context, "keywords": keywords, "core_terms": core_terms}
-                            generated = llm_draft(keyword_prompt(refreshed), model, use_ollama)
-                            generated_keywords, generated_core_terms = parse_keyword_plan(generated or "")
-                            if generated_keywords:
-                                ledger.update_search_profile(profile["profile_id"], context=context, keywords=generated_keywords, core_terms=generated_core_terms, cadence=cadence, is_active=is_active)
-                            else:
-                                st.warning("영문 키워드 초안을 만들지 못했습니다. Ollama 응답을 확인하세요.")
-                        else:
-                            ledger.update_search_profile(profile["profile_id"], context=context, keywords=keywords, core_terms=core_terms, cadence=cadence, is_active=is_active)
-                        st.rerun()
-                    except ValueError as error:
-                        st.error(str(error))
+                    is_active = st.checkbox("탐색 프로필 활성화", value=profile["is_active"])
+                    save = st.form_submit_button("LLM Task 정책 저장")
+                if save:
+                    ledger.update_search_profile_policy(profile["profile_id"], context=context, cadence=cadence, is_active=is_active)
+                    st.rerun()
                 current = next(item for item in ledger.search_profiles() if item["profile_id"] == profile["profile_id"])
-                invalid_keywords = [keyword for keyword in current["keywords"] if not is_english_search_term(keyword)]
-                if not current["keywords"] or invalid_keywords:
-                    st.warning("arXiv 탐색에는 영문 키워드가 필요합니다. 맥락을 저장한 뒤 ‘영문 키워드 만들기’를 실행하거나, 영문 키워드를 직접 입력하세요.")
-                if st.button("지금 탐색·초록 100편 검토·상위 5편 본문 비교", key=f"run-profile-{profile['profile_id']}", disabled=not current["is_active"] or not current["keywords"] or bool(invalid_keywords)):
+                task_sources = list(INTERNAL_SEARCH_SOURCES)
+                task_count = st.slider("이번 Run의 검토 논문 수", 5, 20, 12, key=f"intent-task-count-{profile['profile_id']}")
+                previous_runs = ledger.search_runs(profile["profile_id"], limit=5)
+                task_prompt = intent_discovery_task_prompt(current, previous_runs, task_count)
+                if st.button("내부 LLM으로 Discovery Run 실행", key=f"run-profile-{profile['profile_id']}", disabled=not current["is_active"]):
                     running = st.empty()
-                    running.markdown('<div class="rf-running">🟠 수행 중 · arXiv 검색과 논문 본문 비교를 진행하고 있습니다</div>', unsafe_allow_html=True)
-                    outcome = run_profile(ledger, current, "manual", reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"))
+                    running.markdown('<div class="rf-running">🟠 수행 중 · LLM 탐색 계획 → 다중 학술소스 검색 → 초록 맥락 평가</div>', unsafe_allow_html=True)
+                    outcome = run_intent_discovery_task(
+                        ledger, current, trigger="manual_llm_task",
+                        planner=lambda prompt: llm_draft(prompt, model, use_ollama, profile="search_strategy"),
+                        triage_drafter=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                        sources=task_sources, max_results=task_count,
+                    )
                     if outcome["status"] == "completed":
-                        processed = process_top_papers(current, outcome["candidates"], DATA, lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text, make_cards=False)
-                        merged = {item["source_id"]: item for item in outcome["candidates"]}
-                        merged.update({item["source_id"]: item for item in processed})
-                        ledger.update_search_run_candidates(outcome["run_id"], list(merged.values()))
-                        st.success(f"초록 후보 {len(outcome['candidates'])}건을 기록하고, 상위 후보의 본문 비교 정보를 준비했습니다. 읽을 논문은 서재함에 추가하세요.")
+                        st.success(f"LLM Task가 탐색 계획을 만들고 관련 논문 {len(outcome['candidates'])}편을 기록했습니다.")
                     elif outcome["status"] == "completed_no_candidates":
-                        st.warning("arXiv 호출은 완료됐지만 이번 검색 전략으로는 후보가 없었습니다. 실행 이력에서 각 단계의 결과 수를 확인하세요. 이는 관련 논문이 없다는 뜻은 아닙니다.")
+                        st.warning("이번 LLM 탐색 계획에서는 후보를 찾지 못했습니다. 다음 Run에서는 이전 전략을 참고해 다른 검색식을 생성합니다.")
                     else:
                         st.error(outcome["error"])
                     running.empty()
                     st.rerun()
+                with st.expander("외부 LLM으로 Discovery Task 계획 만들기", expanded=False):
+                    st.text_area("외부 LLM용 편집 가능한 프롬프트", value=task_prompt, height=420, key=f"intent-external-prompt-{profile['profile_id']}")
+                    external_task_response = st.text_area("외부 LLM JSON 응답", height=260, key=f"intent-external-response-{profile['profile_id']}")
+                    if st.button("외부 계획 검증 · Discovery Run 실행", key=f"intent-external-run-{profile['profile_id']}", disabled=not external_task_response.strip()):
+                        try:
+                            external_plan = parse_discovery_search_plan(external_task_response)
+                            outcome = run_intent_discovery_plan(
+                                ledger, current, external_plan, trigger="external_llm_task",
+                                triage_drafter=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+                                sources=task_sources, max_results=task_count,
+                            )
+                            if outcome["status"] == "failed": st.error(outcome["error"])
+                            else: st.success(f"외부 LLM 계획으로 Discovery Run을 완료했습니다: {len(outcome['candidates'])}편")
+                            st.rerun()
+                        except ValueError as error: st.error(str(error))
                 runs = ledger.search_runs(profile["profile_id"], limit=5)
                 if runs:
-                    st.markdown("**탐색·논문 관련성 로그**")
+                    st.markdown("**최근 실행 상세**")
+                    st.caption("아래 실행은 상단 통합 탐색 이력에도 같은 Discovery Run으로 표시됩니다. 이 영역은 후보 재검토와 PDF 처리용 상세 도구입니다.")
                     for run in runs:
                         with st.expander(f"{_fmt_local_time(run.get('created_at'))} · {run['trigger']} · {run['status']} · 후보 {len(run['candidates'])}"):
                             st.caption(f"검색 전략: {run['query']}")
@@ -3287,6 +4086,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 st.info("이전 실행입니다. 아래에서 초록 적합성 검토를 실행하면 상위 5편을 다시 선정합니다.")
                             for candidate in shortlist:
                                 st.write(f"- **{candidate['title']}** ({candidate['published'][:10]})")
+                                render_origin_labels(candidate, prefix="탐색 시작지점")
                                 citations = candidate.get("citation_count")
                                 citation_text = "확인 불가" if citations is None else f"{int(citations):,}회"
                                 st.caption(f"arXiv · {', '.join(candidate['authors'][:4])} · 인용 {citation_text} · {candidate['url']}")
@@ -3301,6 +4101,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                         "publication_year": candidate.get("published", "")[:4], "source_url": candidate.get("url", ""),
                                         "source_id": candidate.get("source_id", ""), "abstract": candidate.get("summary", ""), "pdf_path": candidate.get("pdf_path", ""),
                                         "shelf_status": "reference", "reading_status": "unread", "asset_type": "paper", "intake_source": "search",
+                                        "origin_links": candidate.get("origin_links", profile.get("origin_links", [])),
                                     })
                                     st.success(f"서재함에 추가했습니다: {saved['title']}")
                                 scopes = " · ".join(candidate.get("query_scopes", [candidate.get("query_scope", "기존 실행")]))
@@ -3341,6 +4142,9 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 for rank, candidate in enumerate(sorted(completed, key=lambda item: item.get("full_text_similarity", 0), reverse=True), start=1):
                                     st.caption(f"{rank}위 · 본문 맥락 적합성 {candidate.get('full_text_similarity', 0)}/100 · {candidate['title']}")
     with memory_tab:
+        st.divider()
+        st.markdown("### 전체 승인 지식카드")
+        st.caption("검색하지 않은 경우의 전체 목록입니다. 카드의 관계·계보 보완은 위의 접힌 영역에서 수행합니다.")
         for card in memory.all():
             st.markdown(f"**{card['title']}** — {card['claim']}")
             st.caption(" · ".join(card.get("labels", [])))
@@ -3821,8 +4625,8 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
                         st.caption(f"참고논문 · {paper_title}")
 
     st.divider()
-    st.markdown("### M2 Knowledge Review")
-    st.caption("질문과 선택적 연구자 코멘트를 기준으로 관련 승인 지식카드를 고르고 M2 Report를 만듭니다. 제약·미결사항·지식공백은 보고서가 산출합니다.")
+    st.markdown("### 연구 판단안 작성")
+    st.caption("연구 논점과 적용 맥락을 기준으로 승인 지식을 연결하여, 권고·선택지·반론·다음 행동을 갖춘 연구 판단안을 만듭니다. 지식공백은 M1 근거보강 요청으로 이어집니다.")
     default_context = str(rq.get("research_context", ""))
     context = st.text_area("이번 검토 코멘트 / 적용 맥락 (선택)", value=default_context, key=f"thread-context-{rq_id}", height=110)
     query = st.text_input("근거 지식카드 검색", value=str(rq.get("question", "")), key=f"thread-search-{rq_id}")
@@ -3837,7 +4641,7 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
         for cid in candidate_ids
     }
     selected_ids = st.multiselect(
-        "이번 M2 Report에 사용할 지식카드", candidate_ids,
+        "이번 판단안에 사용할 승인 지식카드", candidate_ids,
         default=source_ids[:8] if source_ids else candidate_ids[:6],
         format_func=lambda cid: options.get(cid, cid), key=f"thread-evidence-{rq_id}",
     )
@@ -3855,20 +4659,20 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
     )
     run_col, external_col = st.columns(2)
     with run_col:
-        if st.button("현재 LLM으로 M2 Report 만들기", key=f"thread-report-internal-{rq_id}", type="primary"):
+        if st.button("현재 LLM으로 연구 판단안 만들기", key=f"thread-report-internal-{rq_id}", type="primary"):
             result = llm_draft_result(prompt, model, use_ollama)
             if result.text:
                 report = _save_m2_thread_report(rq, context, selected_ids, result.text, "internal_llm")
                 _update_rq_current_state(rq_id, model, use_ollama)
                 st.session_state[f"thread-latest-report-{rq_id}"] = report["report_id"]
-                st.success("M2 Report를 저장하고 Current State를 갱신했습니다.")
+                st.success("연구 판단안을 저장하고 Current State를 갱신했습니다.")
                 st.rerun()
             else:
                 st.warning(f"M2 Report 생성에 실패했습니다: {result.error}")
     with external_col:
         st.caption("로컬/무료 LLM이 불안정하거나 여러 지식카드로 긴 프롬프트가 필요한 경우 외부 LLM을 사용할 수 있습니다.")
 
-    with st.expander("외부 LLM으로 수동 M2 Review", expanded=False):
+    with st.expander("외부 LLM으로 수동 연구 판단안 작성", expanded=False):
         prompt_key = f"thread-external-prompt-{rq_id}-{abs(hash(tuple(selected_ids))) % 100000}"
         st.text_area(
             "외부 LLM용 프롬프트", value=prompt, key=prompt_key, height=360,
@@ -3876,23 +4680,23 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
         )
         manual_response = st.text_area(
             "외부 LLM 응답 붙여넣기", key=f"thread-external-response-{rq_id}", height=280,
-            placeholder="외부 LLM이 작성한 M2 Report 전체를 붙여넣으세요."
+            placeholder="외부 LLM이 작성한 연구 판단안 전체를 붙여넣으세요."
         )
-        if st.button("외부 응답 검증 · M2 Report로 반영", key=f"thread-external-apply-{rq_id}", disabled=not manual_response.strip()):
+        if st.button("외부 응답 검증 · 연구 판단안으로 반영", key=f"thread-external-apply-{rq_id}", disabled=not manual_response.strip()):
             ok, message = validate_manual_m2_report(manual_response, valid_card_ids=set(selected_ids))
             if not ok:
                 st.error(message)
             else:
                 report = _save_m2_thread_report(rq, context, selected_ids, manual_response, "manual_external_llm")
                 _update_rq_current_state(rq_id, model, use_ollama)
-                st.success(message + " M2 Report로 저장하고 Current State를 갱신했습니다.")
+                st.success(message + " 연구 판단안으로 저장하고 Current State를 갱신했습니다.")
                 st.session_state[f"thread-latest-report-{rq_id}"] = report["report_id"]
                 st.rerun()
 
     reports = ledger.m2_reports(rq_id, include_archived=True, limit=20)
     if reports:
         latest = reports[0]
-        st.divider(); st.markdown("### 최신 M2 Report")
+        st.divider(); st.markdown("### 최신 연구 판단안")
         st.caption(f"{_fmt_local_time(latest.get('created_at'))} · {latest['generation_mode']} · 근거 카드 {len(latest['evidence_card_ids'])}건")
         st.markdown(latest["report_text"])
         if latest.get("knowledge_gaps"):
@@ -3905,7 +4709,7 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
         default_refine = refined or str(rq.get("question", ""))
         with st.expander("질문 보강·구체화", expanded=bool(refined)):
             new_question = st.text_area("구체화된 질문", value=default_refine, key=f"thread-refine-{rq_id}", height=90)
-            reason = st.text_input("변경 이유", value="M2 Report와 보강된 지식을 반영한 질문 구체화", key=f"thread-refine-reason-{rq_id}")
+            reason = st.text_input("변경 이유", value="연구 판단안과 보강된 지식을 반영한 질문 구체화", key=f"thread-refine-reason-{rq_id}")
             if st.button("질문 새 버전으로 반영", key=f"thread-refine-apply-{rq_id}", disabled=not new_question.strip() or new_question.strip() == str(rq.get("question", "")).strip()):
                 ledger.refine_research_question(rq_id, new_question, reason)
                 _update_rq_current_state(rq_id, model, use_ollama)
@@ -4904,33 +5708,1771 @@ def sensemaking_screen(model: str, use_ollama: bool, semantic: bool, embedding_m
             st.info(ui_text("왼쪽에서 기존 Thread를 열거나 새 Sensemaking Thread를 시작하세요.", "Open an existing thread on the left or start a new Sensemaking Thread."))
 
 
+def _paper_project_for_research_question(projects: list[dict[str, Any]], rq_id: str) -> dict[str, Any] | None:
+    """Return the paper project already created from an RQ, if any."""
+    for project in projects:
+        for event in project.get("events", []):
+            payload = event.get("payload") or {}
+            if event.get("event_type") == "project_origin" and str(payload.get("source_rq_id")) == rq_id:
+                return project
+    return None
+
+
+def _create_paper_project_from_research_question(rq: dict[str, Any], title: str) -> dict[str, Any]:
+    """Create a Short Paper project while preserving the RQ's evidence and derivation context."""
+    rq_id = str(rq.get("rq_id", ""))
+    source_card_ids = list(dict.fromkeys(str(item) for item in rq.get("source_card_ids", []) if str(item)))
+    thread = ledger.research_question_thread(rq_id) or rq
+    project = ledger.create_paper_project(
+        title=title.strip(), research_question=str(rq.get("question", "")).strip(),
+        origin_type="research_question", origin_ids=source_card_ids,
+    )
+    ledger.add_paper_project_event(project["project_id"], "project_origin", {
+        "source_rq_id": rq_id,
+        "source_type": str(thread.get("source_type", "m1_knowledge")),
+        "rationale": str(rq.get("rationale", "")),
+        "research_context": str(rq.get("research_context", "")),
+        "gap_or_tension": str(rq.get("gap_or_tension", "")),
+        "exploration_need": str(rq.get("exploration_need", "")),
+        "source_card_ids": source_card_ids,
+        "source_payload": thread.get("source_payload") or {},
+    })
+    return ledger.paper_project(project["project_id"]) or project
+
+
+PAPER_EVIDENCE_SOURCE_LABELS = {
+    "inherited_rq": "기존 질문 연결",
+    "hybrid_search": "키워드·임베딩",
+    "ontology_same_type": "동일 타입 확장",
+    "ontology_related_type": "관계 타입 확장",
+}
+
+
+def _discover_paper_evidence(
+    title: str, research_question: str, inherited_ids: list[str],
+    semantic: bool, embedding_model: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    query = paper_evidence_query(title, research_question)
+    cards = memory.all()
+    search_hits = search_knowledge(query, semantic, embedding_model, limit=12)
+    hit_rows = [
+        {"card_id": hit.card["card_id"], "score": hit.score, "method": hit.method}
+        for hit in search_hits
+    ]
+    seed_ids = list(dict.fromkeys([*inherited_ids, *(row["card_id"] for row in hit_rows)]))
+    seed_types = {card_id: ledger.ontology_types_for_card(card_id) for card_id in seed_ids}
+    seed_type_ids = {
+        str(item["type_id"])
+        for rows in seed_types.values() for item in rows if item.get("type_id")
+    }
+    type_rows = ledger.ontology_types()
+    type_names = {
+        str(item["type_id"]): str(item.get("name", item["type_id"])) for item in type_rows
+    }
+    relations = ledger.ontology_type_relations()
+    related_type_ids = set(seed_type_ids)
+    for relation in relations:
+        source_id = str(relation.get("source_type_id", ""))
+        target_id = str(relation.get("target_type_id", ""))
+        if source_id in seed_type_ids and target_id:
+            related_type_ids.add(target_id)
+        if target_id in seed_type_ids and source_id:
+            related_type_ids.add(source_id)
+    card_ids_by_type = {
+        type_id: ledger.ontology_card_ids(type_id) for type_id in related_type_ids
+    }
+    candidates = assemble_paper_evidence_candidates(
+        query=query,
+        cards=cards,
+        search_hits=hit_rows,
+        inherited_card_ids=inherited_ids,
+        seed_type_ids=seed_type_ids,
+        type_names=type_names,
+        type_relations=relations,
+        card_ids_by_type=card_ids_by_type,
+        max_candidates=24,
+    )
+    for candidate in candidates:
+        candidate["type_names"] = [
+            str(item.get("name", ""))
+            for item in ledger.ontology_types_for_card(candidate["card_id"])
+            if item.get("name")
+        ]
+    return query, candidates
+
+
+def _render_paper_evidence_selector(
+    *,
+    title: str,
+    research_question: str,
+    inherited_ids: list[str],
+    card_by_id: dict[str, dict[str, Any]],
+    semantic: bool,
+    embedding_model: str,
+    key_prefix: str,
+) -> list[str]:
+    result_key, selected_key = f"{key_prefix}-results", f"{key_prefix}-selected"
+    disabled = not title.strip() or not research_question.strip()
+    if st.button("관련 지식카드 자동 탐색", disabled=disabled, key=f"{key_prefix}-discover"):
+        with st.spinner("제목·연구질문 검색 후 온톨로지 1-hop 관계를 확장하고 있습니다."):
+            query, candidates = _discover_paper_evidence(
+                title, research_question, inherited_ids, semantic, embedding_model,
+            )
+        st.session_state[result_key] = {"query": query, "candidates": candidates}
+        st.session_state[selected_key] = [item["card_id"] for item in candidates]
+        st.rerun()
+    result = st.session_state.get(result_key) or {}
+    candidates = list(result.get("candidates") or [])
+    current_query = paper_evidence_query(title, research_question)
+    if candidates and result.get("query") != current_query:
+        st.warning("제목 또는 연구질문이 변경되었습니다. 관련 지식카드를 다시 탐색해 주세요.")
+    if not candidates:
+        if inherited_ids:
+            st.caption(
+                f"기존 연구질문 연결 카드 {len(inherited_ids)}건이 있습니다. 버튼을 누르면 "
+                "제목·질문 검색과 온톨로지 확장을 함께 수행합니다."
+            )
+        else:
+            st.caption(
+                "제목과 연구질문을 입력한 뒤 버튼을 누르면 키워드·임베딩 검색과 "
+                "온톨로지 1-hop 확장을 수행합니다."
+            )
+        return []
+    candidate_by_id = {item["card_id"]: item for item in candidates}
+    options = [item["card_id"] for item in candidates if item["card_id"] in card_by_id]
+    selected = st.multiselect(
+        "논문 프로젝트 출발 근거 카드",
+        options,
+        key=selected_key,
+        format_func=lambda card_id: (
+            f"[{PAPER_EVIDENCE_SOURCE_LABELS.get(candidate_by_id[card_id]['source'], candidate_by_id[card_id]['source'])}] "
+            f"{card_by_id.get(card_id, {}).get('title') or card_id}"
+        ),
+    )
+    counts: dict[str, int] = {}
+    for item in candidates:
+        label = PAPER_EVIDENCE_SOURCE_LABELS.get(item["source"], item["source"])
+        counts[label] = counts.get(label, 0) + 1
+    st.caption(" · ".join(f"{label} {count}건" for label, count in counts.items()))
+    with st.expander("탐색 근거·온톨로지 경로 확인", expanded=False):
+        rows = []
+        for item in candidates:
+            card = card_by_id.get(item["card_id"], {})
+            rows.append({
+                "선택": "✓" if item["card_id"] in selected else "",
+                "카드": card.get("title") or item["card_id"],
+                "유입 경로": PAPER_EVIDENCE_SOURCE_LABELS.get(item["source"], item["source"]),
+                "타입": ", ".join(item.get("type_names", [])),
+                "온톨로지 경로": " | ".join(item.get("ontology_paths", [])),
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    return list(selected)
+
+
+def _record_paper_evidence_selection(project_id: str, key_prefix: str, selected_ids: list[str]) -> None:
+    result = st.session_state.get(f"{key_prefix}-results") or {}
+    if not result:
+        return
+    selected_set = set(selected_ids)
+    candidates = [
+        {
+            "card_id": item.get("card_id", ""),
+            "source": item.get("source", ""),
+            "origins": item.get("origins", []),
+            "ontology_paths": item.get("ontology_paths", []),
+            "selected": item.get("card_id") in selected_set,
+        }
+        for item in result.get("candidates", [])
+    ]
+    ledger.add_paper_project_event(project_id, "evidence_selection", {
+        "query": result.get("query", ""),
+        "selected_card_ids": selected_ids,
+        "candidates": candidates,
+    })
+
+
+def _paper_diagnostic_rows(
+    manuscript: dict[str, Any], card_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    labels = {row["마크업"]: row["표시"] for row in annotation_legend()}
+    rows = []
+    for sentence in manuscript_sentences(manuscript):
+        evidence_ids = [str(item) for item in sentence.get("evidence_card_ids", [])]
+        open_annotations = [
+            item for item in sentence.get("annotations", []) if item.get("status") == "open"
+        ]
+        rows.append({
+            "문장 ID": sentence.get("sentence_id", ""),
+            "문장 내용": sentence.get("text", ""),
+            "역할": sentence.get("role", ""),
+            "연결 근거": ", ".join(
+                str((card_by_id.get(card_id) or {}).get("title") or card_id)
+                for card_id in evidence_ids
+            ) or "없음",
+            "보완점": ", ".join(labels.get(str(item.get("type", "")), str(item.get("type", ""))) for item in open_annotations) or "완료",
+            "진단 내용": " | ".join(str(item.get("comment", "")) for item in open_annotations if item.get("comment")) or "-",
+        })
+    return rows
+
+
+def _apply_targeted_paper_revision(
+    response: str, manuscript: dict[str, Any], *, valid_card_ids: set[str],
+    version: int, sentence_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Apply one-sentence revision with a safe fallback for older local modules."""
+    try:
+        return apply_revisions(
+            response, manuscript, valid_card_ids=valid_card_ids, version=version,
+            allowed_sentence_ids={sentence_id},
+        )
+    except TypeError as error:
+        if "allowed_sentence_ids" not in str(error):
+            raise
+        revised, diff = apply_revisions(
+            response, manuscript, valid_card_ids=valid_card_ids, version=version,
+        )
+        unexpected = [item for item in diff if str(item.get("sentence_id", "")) != sentence_id]
+        if unexpected:
+            raise ValueError("선택한 문장 이외의 수정이 포함되어 반영하지 않았습니다.")
+        return revised, diff
+
+
+def _matches_revision_origin(value: dict[str, Any], project_id: str, todo_id: str) -> bool:
+    return any(
+        str(link.get("origin_type")) == "paper_writing"
+        and str(link.get("origin_id")) == project_id
+        and str(link.get("origin_sub_id")) == todo_id
+        for link in normalize_origin_links(value.get("origin_links", []))
+    )
+
+
+def _revision_todo_assets(
+    project_id: str, todo_id: str, cards: list[dict[str, Any]], papers: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Find M1 outputs that preserve the exact paper-project/To-do lineage."""
+    todo_cards = [card for card in cards if _matches_revision_origin(card, project_id, todo_id)]
+    todo_papers = [paper for paper in papers if _matches_revision_origin(paper, project_id, todo_id)]
+    paper_ids_from_cards = {
+        str((card.get("provenance") or {}).get("paper_id") or "") for card in todo_cards
+    }
+    known_paper_ids = {str(paper.get("paper_id") or "") for paper in todo_papers}
+    todo_papers.extend(
+        paper for paper in papers
+        if str(paper.get("paper_id") or "") in paper_ids_from_cards
+        and str(paper.get("paper_id") or "") not in known_paper_ids
+    )
+    return todo_cards, todo_papers
+
+
+def _latest_revision_evidence_link(events: list[dict[str, Any]], todo_id: str) -> dict[str, Any]:
+    return next((
+        event.get("payload") or {} for event in reversed(events)
+        if event.get("event_type") == "revision_todo_evidence_link"
+        and str((event.get("payload") or {}).get("todo_id") or "") == todo_id
+    ), {})
+
+
+def _paper_project_references(project_id: str) -> list[dict[str, Any]]:
+    return [
+        reference for reference in ledger.literature_references(limit=1000)
+        if str((reference.get("paper") or {}).get("paper_project_id") or "") == project_id
+    ]
+
+
+def _reference_display(reference: dict[str, Any]) -> str:
+    paper = reference.get("paper") or {}
+    authors = ", ".join(str(item) for item in paper.get("authors", []) if str(item).strip())
+    year = str(paper.get("publication_year") or paper.get("published") or "")[:4]
+    prefix = "; ".join(part for part in [authors, year] if part)
+    return f"{prefix + '. ' if prefix else ''}{paper.get('title') or '제목 없음'}"
+
+
+def _revision_todos_with_events(manuscript: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") != "revision_todo_update":
+            continue
+        payload = event.get("payload") or {}
+        if payload.get("todo_id"):
+            latest[str(payload["todo_id"])] = payload
+    result = []
+    for item in revision_todos(manuscript):
+        update = latest.get(item["todo_id"], {})
+        update_status = str(update.get("status") or "")
+        if update_status == "resolved":
+            continue
+        if update_status in {"open", "ready", "revised_pending_review"}:
+            item["status"] = update_status
+        if update.get("recommended_action"):
+            item["recommended_action"] = str(update["recommended_action"])
+        if update.get("problem"):
+            item["problem"] = str(update["problem"])
+        if update.get("search_guide"):
+            item["search_guide"] = str(update["search_guide"])
+        item["latest_update"] = update
+        result.append(item)
+    return result
+
+
+def _revision_todo_history_with_events(
+    manuscript: dict[str, Any], events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return active and completed To-dos as one durable project checklist."""
+    latest_updates: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") == "revision_todo_update":
+            payload = event.get("payload") or {}
+            if payload.get("todo_id"):
+                latest_updates[str(payload["todo_id"])] = payload
+    active = _revision_todos_with_events(manuscript, events)
+    return revision_todo_timeline(active, list(latest_updates.values()))
+
+
+def _record_resolved_revision_todos(
+    project_id: str, before_todos: list[dict[str, Any]], annotations: list[dict[str, Any]], source: str,
+) -> None:
+    remaining_ids = {str(item.get("annotation_id", "")) for item in annotations}
+    for todo in before_todos:
+        if todo["todo_id"] and todo["todo_id"] not in remaining_ids:
+            ledger.add_paper_project_event(project_id, "revision_todo_update", {
+                **todo, "status": "resolved", "resolution_source": source,
+            })
+
+
+def _review_result_payload(
+    *, source: str, before_todos: list[dict[str, Any]], annotations: list[dict[str, Any]],
+    reviewed_from_version: int, result_version: int, response_text: str = "",
+) -> dict[str, Any]:
+    type_counts: dict[str, int] = {}
+    for item in annotations:
+        kind = str(item.get("type", ""))
+        type_counts[kind] = type_counts.get(kind, 0) + 1
+    changes = review_change_set(before_todos, annotations)
+    return {
+        "source": source,
+        "reviewed_from_version": reviewed_from_version,
+        "result_version": result_version,
+        "todo_count": len(annotations),
+        "retained_count": len(changes["retained_todos"]),
+        "new_count": len(changes["new_todos"]),
+        "resolved_count": len(changes["resolved_todos"]),
+        **changes,
+        "type_counts": type_counts,
+        "response_digest": hashlib.sha256(response_text.strip().encode("utf-8")).hexdigest() if response_text.strip() else "",
+    }
+
+
+def _render_review_result(payload: dict[str, Any], *, latest: bool = False) -> None:
+    source_label = {
+        "external_llm": "외부 LLM", "internal_llm": "내부 LLM",
+        "internal_llm_recheck": "내부 LLM 재검증",
+    }.get(str(payload.get("source", "")), str(payload.get("source", "")))
+    prefix = "최근 검증 반영" if latest else "검증 반영 완료"
+    st.success(
+        f"{prefix} · {source_label} · 원고 v{payload.get('reviewed_from_version','?')} → "
+        f"v{payload.get('result_version','?')}"
+    )
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("현재 To-do",int(payload.get("todo_count",0)))
+    c2.metric("유지",int(payload.get("retained_count",0)))
+    c3.metric("신규",int(payload.get("new_count",0)))
+    c4.metric("해결",int(payload.get("resolved_count",0)))
+    counts=payload.get("type_counts") or {}
+    if counts:
+        labels={row["마크업"]:row["표시"] for row in annotation_legend()}
+        st.caption("반영된 마크업 · " + " · ".join(f"{labels.get(kind,kind)} {count}건" for kind,count in counts.items()))
+    changes=[]
+    for key in ("new_todos", "resolved_todos", "retained_todos"):
+        changes.extend(payload.get(key) or [])
+    if changes:
+        st.dataframe([{
+            "변경": item.get("change", ""), "To-do": item.get("todo_id", ""),
+            "문장": item.get("sentence_id", ""), "보완점": item.get("label", ""),
+            "판정 내용": item.get("problem", ""),
+        } for item in changes], use_container_width=True, hide_index=True)
+    elif any(key in payload for key in ("new_todos", "resolved_todos", "retained_todos")):
+        st.caption("이번 검증에서 추가·유지·해결된 To-do가 없습니다.")
+
+
+def _render_revision_todo_progress(manuscript: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    timeline = _revision_todo_history_with_events(manuscript, events)
+    total = len(timeline)
+    resolved = sum(1 for item in timeline if item.get("status") == "resolved")
+    progress = resolved / total if total else 1.0
+    st.progress(progress, text=f"Revision 진행률 · {resolved}/{total} 완료 ({progress:.0%})")
+    if not timeline:
+        return
+    with st.expander("전체 To-do 체크리스트", expanded=True):
+        status_labels = {
+            "open": "진단됨", "ready": "보완 준비", "revised_pending_review": "재검증 대기",
+            "resolved": "검증 완료",
+        }
+        for item in timeline:
+            label = f"[{item.get('priority','P1')}] {item.get('label','')} · {item.get('sentence_id','')}"
+            status = status_labels.get(str(item.get("status", "")), str(item.get("status", "")))
+            if item.get("status") == "resolved":
+                st.markdown(f"- [x] ~~{label}~~ — **{status}**")
+            else:
+                st.markdown(f"- [ ] {label} — **{status}**")
+
+
+def _render_manuscript_revision_history(
+    version_events: list[dict[str, Any]], events: list[dict[str, Any]],
+) -> None:
+    revisions=[event for event in version_events if (event.get("payload") or {}).get("diff")]
+    st.divider();st.subheader("문장 변경 이력")
+    if not revisions:
+        st.caption("아직 문장 리비전 이력이 없습니다. Revision To-do에서 문장을 수정하면 이전·수정 문장이 여기에 기록됩니다.")
+        return
+    todo_updates=[
+        event for event in events
+        if event.get("event_type")=="revision_todo_update"
+        and (event.get("payload") or {}).get("status")=="revised_pending_review"
+    ]
+    source_labels={
+        "targeted_revision":"내부 LLM 문장 리비전","external_revision":"외부 LLM 문장 리비전",
+        "todo_full_revision":"내부 LLM 전체 원고 영향 리비전",
+        "external_todo_full_revision":"외부 LLM 전체 원고 영향 리비전",
+        "appendix_refresh":"내부 LLM Appendix 후보 갱신",
+        "external_appendix_refresh":"외부 LLM Appendix 후보 갱신",
+        "researcher_approved_resolution":"연구자 확인 후 To-do 해결 반영",
+    }
+    st.caption(f"총 {sum(len((event.get('payload') or {}).get('diff') or []) for event in revisions)}개 본문·Appendix 변경 · 최신 변경부터 표시")
+    for index,event in enumerate(reversed(revisions)):
+        payload=event.get("payload") or {}; manuscript_at_version=payload.get("manuscript") or {}
+        version=manuscript_at_version.get("version","?");diffs=list(payload.get("diff") or [])
+        sentence_ids={str(item.get("sentence_id","")) for item in diffs}
+        matching_update=next((
+            update.get("payload") or {} for update in reversed(todo_updates)
+            if str(update.get("created_at", ""))<=str(event.get("created_at", ""))
+            and str((update.get("payload") or {}).get("sentence_id", "")) in sentence_ids
+        ),{})
+        todo_label=str(payload.get("todo_label") or matching_update.get("label") or "")
+        todo_id=str(payload.get("todo_id") or matching_update.get("todo_id") or "")
+        source=source_labels.get(str(payload.get("source","")),str(payload.get("source", "리비전")))
+        heading=f"v{version} · {source} · {len(diffs)}개 문장"
+        if todo_label:heading+=f" · {todo_label}"
+        with st.expander(heading,expanded=index==0):
+            st.caption(f"{event.get('created_at','')}" + (f" · To-do `{todo_id}`" if todo_id else ""))
+            for diff in diffs:
+                scope_label="Appendix 주장" if diff.get("change_scope")=="appendix" else "문장"
+                st.markdown(f"**{scope_label} `{diff.get('sentence_id','')}`**" + (f" · {diff.get('reason')}" if diff.get("reason") else ""))
+                before_col,after_col=st.columns(2)
+                with before_col:
+                    st.caption("이전 내용")
+                    st.markdown(f"> {str(diff.get('before','')).replace(chr(10), ' ')}")
+                with after_col:
+                    st.caption("수정 내용")
+                    st.markdown(f"> {str(diff.get('after','')).replace(chr(10), ' ')}")
+                st.divider()
+
+
+def _request_paper_todo_literature_intent(
+    project_id: str, project: dict[str, Any], todo: dict[str, Any], candidate: dict[str, Any],
+) -> tuple[str, str]:
+    intent_id=f"intent-{uuid.uuid4().hex[:12]}"
+    priority={"P0":"높음","P1":"보통","P2":"낮음"}.get(str(todo.get("priority","P1")),"보통")
+    context="\n".join(filter(None,[
+        f"Paper project: {project.get('title','')}",
+        f"Research question: {project.get('research_question','')}",
+        f"Revision sentence ({todo.get('sentence_id','')}): {todo.get('sentence_text','')}",
+        f"Revision issue: {todo.get('problem','')}",
+        str(candidate.get("research_context", "")),
+    ]))
+    intent=CurationIntent(
+        intent_id=intent_id,
+        title=str(candidate.get("title") or f"논문 보완 탐색 · {todo.get('label','')}")[:120],
+        purpose=f"Revision To-do {todo.get('todo_id','')}의 완료 기준을 충족하기 위한 출처 기반 근거를 수집한다.",
+        question=str(candidate.get("target") or todo.get("search_guide") or todo.get("sentence_text")),
+        research_context=context,
+        labels=[],priority=priority,
+        expected_evidence=str(candidate.get("expected_evidence") or todo.get("search_guide") or "관련 선행연구의 방법, 결과, 조건, 한계 및 반대 근거"),
+        completion_condition=str(candidate.get("completion_condition") or todo.get("completion_criteria") or "출처가 확인된 탐색 결과를 Revision To-do에 보고한다."),
+        execution_mode="manual",created_by="m2",
+        origin_links=[{
+            "origin_type":"paper_writing","origin_id":project_id,
+            "origin_sub_id":str(todo.get("todo_id", "")),
+            "label":str(project.get("title") or "논문 프로젝트"),"source_card_ids":[],
+        }],
+    )
+    case_id=ledger.create_case("research",f"논문 Revision 문헌탐색 · {todo.get('label','')}")
+    request_id=ledger.record(
+        case_id,"decision_request","m2",["researcher"],"curation_intent",
+        {"title":f"M1 탐색 Intent 승인: {intent.title}","intent":intent.model_dump(mode="json"),
+         "next_action":"승인 시 M1 문헌탐색 작업 큐에 등록",
+         "paper_project_id":project_id,"revision_todo_id":todo.get("todo_id","")},
+        subject_id=intent_id,
+    )
+    ledger.add_paper_project_event(project_id,"revision_literature_intent",{
+        "todo_id":todo.get("todo_id", ""),"candidate_id":candidate.get("candidate_id", ""),
+        "intent_id":intent_id,"request_id":request_id,"status":"approval_requested",
+        "title":intent.title,"queue_title":intent.title,"target":intent.question,
+        "next_action":"연구자 홈의 검토·승인함에서 승인하면 동일 제목으로 M1 연구 Intent 탐색 작업 큐에 등록",
+    })
+    return intent_id,request_id
+
+
+def _queue_paper_todo_literature_intent(
+    project_id: str, project: dict[str,Any], todo: dict[str,Any], candidate: dict[str,Any],
+) -> dict[str,Any]:
+    """Researcher-confirmed M2 action: create, approve, and place an Intent in the M1 queue."""
+    intent_id,request_id=_request_paper_todo_literature_intent(project_id,project,todo,candidate)
+    request=ledger.phenomenon(request_id) or {}
+    if request.get("status")=="proposed":
+        ledger.transition(request_id,"proposed","approved")
+        ledger.add_decision(request_id,"approved","M2 Revision To-do 화면에서 연구자가 확인 후 M1 큐 등록")
+    intent=dict((request.get("payload") or {}).get("intent") or {})
+    profile=ledger.create_search_profile(intent)
+    ledger.add_paper_project_event(project_id,"revision_literature_queued",{
+        "todo_id":todo.get("todo_id",""),"candidate_id":candidate.get("candidate_id",""),
+        "intent_id":intent_id,"request_id":request_id,"profile_id":profile.get("profile_id",""),
+        "queue_title":profile.get("title") or intent.get("title") or "M1 탐색 Intent","status":"queued",
+    })
+    return profile
+
+
+def _approve_existing_revision_intent(event: dict[str,Any]) -> dict[str,Any] | None:
+    payload=event.get("payload") or {};request_id=str(payload.get("request_id") or "")
+    request=ledger.phenomenon(request_id) or {}
+    if request.get("status") in {"deferred","rejected"}:return None
+    if request.get("status")=="proposed":
+        ledger.transition(request_id,"proposed","approved")
+        ledger.add_decision(request_id,"approved","M2 Revision To-do 화면에서 연구자가 확인 후 M1 큐 등록")
+    intent=dict((request.get("payload") or {}).get("intent") or {})
+    if not intent:return None
+    return ledger.create_search_profile(intent)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _revision_paper_source(
+    paper_id: str, title: str, pdf_path: str, source_url: str,
+) -> dict[str,Any]:
+    """Load a selected shelf paper's extracted source text for a Revision To-do prompt."""
+    paper={"paper_id":paper_id,"title":title,"pdf_path":pdf_path,"source_url":source_url}
+    try:
+        path=Path(pdf_path) if pdf_path and Path(pdf_path).exists() else None
+        if path:
+            upload=document_from_shelf_path(str(path));source_kind="등록 PDF"
+        elif source_url:
+            upload=document_from_source_url(paper);source_kind="원문 URL"
+        else:
+            return {"source_text":"","source_status":"원문 없음 · PDF 또는 원문 URL을 서재함에 등록해야 합니다.","source_chars":0}
+        document=extract_document(upload,max_pages=60,chars_per_page=8000,cache_dir=EXTRACTION_CACHE)
+        source_text=extracted_document_text(document).strip()
+        truncated=document.original_page_count>len(document.pages) or any(page.truncated for page in document.pages)
+        status=(
+            f"{source_kind} · {len(document.pages)}/{document.original_page_count}개 구간 추출"
+            + (" · 추출 한도에 의해 일부 생략" if truncated else " · 전체 추출")
+        )
+        return {"source_text":source_text,"source_status":status,"source_chars":len(source_text)}
+    except Exception as error:
+        return {"source_text":"","source_status":f"원문 추출 실패 · {error}","source_chars":0}
+
+
+def _render_revision_group_workflow(
+    *, project_id: str, project: dict[str,Any], manuscript: dict[str,Any],
+    todos: list[dict[str,Any]], events: list[dict[str,Any]], cards: list[dict[str,Any]],
+    valid_card_ids: set[str], version_events: list[dict[str,Any]], model: str, use_ollama: bool,
+) -> None:
+    """Plan, confirm, resolve, and selectively apply a bounded group of related To-dos."""
+    manuscript_version=int(manuscript.get("version") or 0);todo_by_id={str(item["todo_id"]):item for item in todos}
+    st.markdown("### A. LLM 유사 To-do 그룹 제안")
+    st.caption("이 단계에는 논문 원문을 보내지 않습니다. 현재 숏페이퍼와 활성 To-do만으로 2~4개 묶음을 제안합니다.")
+    grouping_prompt=short_paper_todo_grouping_prompt(project,manuscript,todos)
+    current_plan_event=next((event for event in reversed(events) if event.get("event_type")=="revision_todo_group_plan" and int((event.get("payload") or {}).get("from_version") or -1)==manuscript_version),None)
+    plan=(current_plan_event or {}).get("payload",{}).get("plan") if current_plan_event else None
+    plan_col,manual_col=st.columns(2)
+    if plan_col.button("내부 LLM으로 그룹 제안",type="primary",key=f"m2-group-plan-{project_id}"):
+        raw=llm_draft(grouping_prompt,model,use_ollama,profile="writing") or ""
+        try:
+            parsed=parse_todo_group_plan(raw,todos)
+            ledger.add_paper_project_event(project_id,"revision_todo_group_plan",{"from_version":manuscript_version,"source":"internal_llm","plan":parsed})
+            st.rerun()
+        except ValueError as error:st.error(str(error))
+    with manual_col.expander("외부 LLM 그룹 제안"):
+        group_prompt_version=hashlib.sha256(grouping_prompt.encode("utf-8")).hexdigest()[:12]
+        st.text_area("그룹 제안 프롬프트",value=grouping_prompt,height=360,key=f"m2-group-plan-prompt-{project_id}-{group_prompt_version}")
+        external_plan=st.text_area("외부 LLM 그룹 제안 JSON",height=220,key=f"m2-group-plan-response-{project_id}")
+        if st.button("외부 그룹 제안 저장",disabled=not external_plan.strip(),key=f"m2-group-plan-save-{project_id}"):
+            try:
+                parsed=parse_todo_group_plan(external_plan,todos)
+                ledger.add_paper_project_event(project_id,"revision_todo_group_plan",{"from_version":manuscript_version,"source":"external_llm","plan":parsed})
+                st.rerun()
+            except ValueError as error:st.error(str(error))
+    if not plan:
+        st.info("그룹 제안을 생성하면 연구자가 구성원을 조정하고 확정할 수 있습니다.");return
+    groups=list(plan.get("groups") or [])
+    if not groups:
+        st.info("함께 처리할 만큼 유사한 To-do가 없습니다. 단일 To-do 처리 모드를 사용하세요.");return
+    for item in groups:
+        labels=[todo_by_id[todo_id].get("label",todo_id) for todo_id in item.get("todo_ids",[]) if todo_id in todo_by_id]
+        st.markdown(f"- **{item.get('title','')}** · {', '.join(labels)} · {item.get('reason','')}")
+
+    st.markdown("### B. 연구자 그룹 검토·확정")
+    proposed_group_id=st.selectbox("검토할 제안 그룹",[str(item["group_id"]) for item in groups],key=f"m2-group-select-{project_id}",format_func=lambda group_id:next(str(item.get("title") or group_id) for item in groups if str(item.get("group_id"))==group_id))
+    proposed=next(item for item in groups if str(item.get("group_id"))==proposed_group_id)
+    confirmed_event=next((event for event in reversed(events) if event.get("event_type")=="revision_todo_group_confirmed" and int((event.get("payload") or {}).get("from_version") or -1)==manuscript_version and str((event.get("payload") or {}).get("source_group_id") or "")==proposed_group_id),None)
+    confirmed=(confirmed_event or {}).get("payload") or {}
+    group_title=st.text_input("그룹 제목",value=str(confirmed.get("title") or proposed.get("title") or ""),key=f"m2-group-title-{project_id}-{proposed_group_id}")
+    default_members=[todo_id for todo_id in (confirmed.get("todo_ids") or proposed.get("todo_ids") or []) if todo_id in todo_by_id]
+    group_todo_ids=st.multiselect("함께 처리할 To-do · 2~4개",list(todo_by_id),default=default_members,max_selections=4,key=f"m2-group-members-{project_id}-{proposed_group_id}",format_func=lambda todo_id:f"[{todo_by_id[todo_id]['priority']}] {todo_by_id[todo_id]['label']} · {todo_by_id[todo_id]['sentence_text'][:65]}")
+    group_reason=st.text_area("함께 처리하는 이유",value=str(confirmed.get("reason") or proposed.get("reason") or ""),height=90,key=f"m2-group-reason-{project_id}-{proposed_group_id}")
+    shared_need=st.text_area("공통 근거·추론 필요",value=str(confirmed.get("shared_evidence_need") or proposed.get("shared_evidence_need") or ""),height=90,key=f"m2-group-need-{project_id}-{proposed_group_id}")
+    group_valid=2<=len(group_todo_ids)<=4 and bool(group_title.strip() and group_reason.strip())
+    if st.button("이 구성으로 그룹 확정",disabled=not group_valid,type="primary",key=f"m2-group-confirm-{project_id}-{proposed_group_id}"):
+        payload={"from_version":manuscript_version,"source_group_id":proposed_group_id,"group_id":str(confirmed.get("group_id") or f"{proposed_group_id}-confirmed"),"title":group_title.strip(),"reason":group_reason.strip(),"shared_evidence_need":shared_need.strip(),"todo_ids":group_todo_ids,"shared_search":proposed.get("shared_search") or {}}
+        ledger.add_paper_project_event(project_id,"revision_todo_group_confirmed",payload);st.rerun()
+    if not confirmed:
+        st.info("연구자가 그룹을 확정해야 공통 자료 선택과 그룹 리비전을 시작할 수 있습니다.");return
+    confirmed_ids=[todo_id for todo_id in confirmed.get("todo_ids",[]) if todo_id in todo_by_id]
+    if len(confirmed_ids)<2:
+        st.warning("현재 활성 To-do가 줄어 그룹 구성이 유효하지 않습니다. 그룹을 다시 확정하세요.");return
+    group={key:confirmed.get(key) for key in ("group_id","title","reason","shared_evidence_need","shared_search")};group_todos=[todo_by_id[todo_id] for todo_id in confirmed_ids]
+    st.success(f"확정 그룹 · **{group.get('title','')}** · To-do {len(group_todos)}건")
+
+    st.markdown("### C. 공통 M1 탐색 · 자료 선택")
+    shared_search=dict(group.get("shared_search") or {})
+    group_queue_events=[event for event in events if event.get("event_type") in {"revision_literature_intent","revision_literature_queued"} and str((event.get("payload") or {}).get("todo_id") or "")==str(group.get("group_id") or "")]
+    latest_queue_event=group_queue_events[-1] if group_queue_events else None
+    queue_payload=(latest_queue_event or {}).get("payload") or {};intent_id=str(queue_payload.get("intent_id") or "")
+    queue_profile=next((item for item in ledger.search_profiles(include_deleted=True) if str(item.get("intent_id") or "")==intent_id),None)
+    with st.expander("그룹 공통 M1 문헌탐색",expanded=not bool(queue_profile)):
+        if queue_profile:st.success(f"M1 탐색 큐 등록 완료 · **{queue_profile.get('title','')}**")
+        search_title=st.text_input("공통 탐색 제목",value=str(shared_search.get("title") or f"{group.get('title','')} 공통 근거 탐색"),key=f"m2-group-search-title-{project_id}-{group.get('group_id')}")
+        search_target=st.text_area("공통 탐색 대상",value=str(shared_search.get("target") or shared_need),height=80,key=f"m2-group-search-target-{project_id}-{group.get('group_id')}")
+        search_context=st.text_area("공통 탐색 맥락",value=str(shared_search.get("research_context") or f"논문: {project.get('title','')}\n그룹 To-do: {', '.join(confirmed_ids)}\n{group_reason}"),height=100,key=f"m2-group-search-context-{project_id}-{group.get('group_id')}")
+        search_evidence=st.text_area("기대 근거",value=str(shared_search.get("expected_evidence") or shared_need),height=75,key=f"m2-group-search-evidence-{project_id}-{group.get('group_id')}")
+        search_completion=st.text_area("완료 조건",value=str(shared_search.get("completion_condition") or "선택한 각 To-do의 완료 기준을 판단할 공통 근거가 확보됨"),height=75,key=f"m2-group-search-completion-{project_id}-{group.get('group_id')}")
+        candidate={"candidate_id":f"{group.get('group_id')}-shared","title":search_title.strip(),"target":search_target.strip(),"research_context":search_context.strip(),"expected_evidence":search_evidence.strip(),"completion_condition":search_completion.strip()}
+        candidate_valid=all(len(str(candidate.get(field) or ""))>=3 for field in ("title","target","research_context","expected_evidence","completion_condition"))
+        if st.button("그룹 공통 탐색을 M1 큐에 등록",disabled=bool(queue_profile) or not candidate_valid,key=f"m2-group-search-queue-{project_id}-{group.get('group_id')}"):
+            synthetic_todo={"todo_id":group.get("group_id"),"label":group.get("title"),"sentence_text":" / ".join(todo.get("sentence_text","") for todo in group_todos),"problem":group.get("reason"),"completion_criteria":candidate["completion_condition"]}
+            profile=_queue_paper_todo_literature_intent(project_id,project,synthetic_todo,candidate)
+            ledger.add_paper_project_event(project_id,"revision_todo_group_search_queued",{"from_version":manuscript_version,"group_id":group.get("group_id"),"todo_ids":confirmed_ids,"profile_id":profile.get("profile_id",""),"queue_title":profile.get("title","")});st.rerun()
+
+    cutoff=str((latest_queue_event or {}).get("created_at") or "");all_papers=ledger.shelf_papers()
+    recent_papers=([paper for paper in all_papers if str(paper.get("created_at") or paper.get("updated_at") or "")>=cutoff][:30] if cutoff else all_papers[:12])
+    ordered_cards=sorted(cards,key=lambda item:str(item.get("approved_at") or item.get("updated_at") or item.get("created_at") or ""),reverse=True)
+    recent_cards=([card for card in ordered_cards if str(card.get("approved_at") or card.get("updated_at") or card.get("created_at") or "")>=cutoff][:40] if cutoff else ordered_cards[:12])
+    latest_resolution_event=next((event for event in reversed(events) if event.get("event_type")=="revision_group_resolution_proposal" and str((event.get("payload") or {}).get("group_id") or "")==str(group.get("group_id") or "")),None)
+    prior=((latest_resolution_event or {}).get("payload") or {}) if latest_resolution_event and int(((latest_resolution_event or {}).get("payload") or {}).get("from_version") or -1)==manuscript_version else {}
+    asset_query=st.text_input("그룹 공통 논문·지식카드 검색",key=f"m2-group-asset-search-{project_id}-{group.get('group_id')}",placeholder="논문 제목, 저자, 주장, 개념, 조건")
+    search_papers,search_cards=search_revision_assets(asset_query,all_papers,cards,limit=30)
+    paper_options={str(item["paper_id"]):item for item in recent_papers};card_options={str(item["card_id"]):item for item in recent_cards}
+    for item in search_papers:paper_options.setdefault(str(item["paper_id"]),item)
+    for item in search_cards:card_options.setdefault(str(item["card_id"]),item)
+    all_paper_by_id={str(item.get("paper_id") or ""):item for item in all_papers};all_card_by_id={str(item.get("card_id") or ""):item for item in cards}
+    for paper_id in prior.get("selected_paper_ids",[]):
+        if paper_id in all_paper_by_id:paper_options.setdefault(paper_id,all_paper_by_id[paper_id])
+    for card_id in prior.get("selected_card_ids",[]):
+        if card_id in all_card_by_id:card_options.setdefault(card_id,all_card_by_id[card_id])
+    selected_paper_ids=st.multiselect("그룹 전체에 사용할 논문",list(paper_options),default=[value for value in prior.get("selected_paper_ids",[]) if value in paper_options],format_func=lambda value:paper_options[value].get("title",value),key=f"m2-group-papers-{project_id}-{group.get('group_id')}")
+    selected_card_ids=st.multiselect("그룹 전체에 사용할 지식카드",list(card_options),default=[value for value in prior.get("selected_card_ids",[]) if value in card_options],format_func=lambda value:card_options[value].get("title",value),key=f"m2-group-cards-{project_id}-{group.get('group_id')}")
+    connection_note=st.text_area("선택 자료가 그룹 To-do들을 해결하는 방식",value=str(prior.get("connection_note") or ""),height=110,key=f"m2-group-note-{project_id}-{group.get('group_id')}")
+    selected_papers=[]
+    for paper_id in selected_paper_ids:
+        paper=paper_options[paper_id];selected_papers.append({**paper,**_revision_paper_source(paper_id,str(paper.get("title") or ""),str(paper.get("pdf_path") or ""),str(paper.get("source_url") or ""))})
+    selected_cards=[card_options[card_id] for card_id in selected_card_ids]
+    if selected_papers:
+        with st.expander("그룹 프롬프트 원문 포함 상태",expanded=True):
+            for paper in selected_papers:
+                st.markdown(f"- {'✅' if paper.get('source_text') else '⚠️'} **{paper.get('title','')}** · {paper.get('source_status','')} · {int(paper.get('source_chars') or 0):,}자")
+    include_full=st.checkbox("전체 숏페이퍼도 그룹 일관성 확인용으로 포함",value=False,key=f"m2-group-full-{project_id}-{group.get('group_id')}")
+    resolution_prompt=short_paper_group_resolution_prompt(project,manuscript,group,group_todos,selected_papers,selected_cards,connection_note,include_full_manuscript=include_full)
+    usable_paper_ids={str(item.get("paper_id") or "") for item in selected_papers if item.get("source_text")};can_request=bool((selected_card_ids or usable_paper_ids) and connection_note.strip())
+    request_col,external_col=st.columns(2)
+    if request_col.button("내부 LLM에 그룹 해결 요청",type="primary",disabled=not can_request,key=f"m2-group-resolve-{project_id}-{group.get('group_id')}"):
+        raw=llm_draft(resolution_prompt,model,use_ollama,profile="writing") or ""
+        try:
+            result=parse_group_resolution(raw,group,group_todos,valid_card_ids=set(selected_card_ids),valid_paper_ids=usable_paper_ids)
+            ledger.add_paper_project_event(project_id,"revision_group_resolution_proposal",{"group_id":group.get("group_id"),"todo_ids":confirmed_ids,"from_version":manuscript_version,"source":"internal_llm","proposal":result,"selected_paper_ids":selected_paper_ids,"selected_card_ids":selected_card_ids,"connection_note":connection_note.strip()});st.rerun()
+        except ValueError as error:st.error(str(error))
+    with external_col.expander("외부 LLM 그룹 해결"):
+        resolution_digest=hashlib.sha256(resolution_prompt.encode("utf-8")).hexdigest()[:12]
+        st.caption(f"To-do {len(group_todos)}건 · 원문 {len(usable_paper_ids)}편 · {len(resolution_prompt):,}자")
+        st.text_area("그룹 해결 프롬프트",value=resolution_prompt,height=480,key=f"m2-group-resolution-prompt-{project_id}-{group.get('group_id')}-{resolution_digest}")
+        external_result=st.text_area("외부 LLM 그룹 해결 JSON",height=240,key=f"m2-group-resolution-response-{project_id}-{group.get('group_id')}")
+        if st.button("외부 그룹 해결 제안 저장",disabled=not can_request or not external_result.strip(),key=f"m2-group-resolution-save-{project_id}-{group.get('group_id')}"):
+            try:
+                result=parse_group_resolution(external_result,group,group_todos,valid_card_ids=set(selected_card_ids),valid_paper_ids=usable_paper_ids)
+                ledger.add_paper_project_event(project_id,"revision_group_resolution_proposal",{"group_id":group.get("group_id"),"todo_ids":confirmed_ids,"from_version":manuscript_version,"source":"external_llm","proposal":result,"selected_paper_ids":selected_paper_ids,"selected_card_ids":selected_card_ids,"connection_note":connection_note.strip()});st.rerun()
+            except ValueError as error:st.error(str(error))
+
+    st.markdown("### D. To-do별 판정 · 선택 적용")
+    if not latest_resolution_event:
+        st.info("그룹 해결 요청을 실행하면 각 To-do의 독립 판정과 변경 전후가 표시됩니다.");return
+    result_payload=(latest_resolution_event.get("payload") or {});group_result=result_payload.get("proposal") or {}
+    stale=int(result_payload.get("from_version") or -1)!=manuscript_version
+    consistency=group_result.get("cross_todo_consistency") or {}
+    if consistency.get("summary"):st.info(str(consistency.get("summary")))
+    for conflict in consistency.get("conflicts") or []:st.warning(f"그룹 충돌 · {conflict}")
+    resolved_ids=[]
+    for item in group_result.get("todo_results") or []:
+        todo_id=str(item.get("todo_id") or "");todo=todo_by_id.get(todo_id,{})
+        with st.container(border=True):
+            if item.get("verdict")=="resolved":resolved_ids.append(todo_id);st.success(f"해결 가능 · {todo.get('label',todo_id)}")
+            else:st.warning(f"추가 보완 필요 · {todo.get('label',todo_id)}")
+            st.write(item.get("reason") or "")
+            if item.get("verdict")!="resolved" and (item.get("next_search") or {}).get("title"):
+                st.caption(f"다음 M1 탐색: {(item.get('next_search') or {}).get('title')}")
+    apply_ids=st.multiselect("이번 원고 버전에 반영할 해결된 To-do",resolved_ids,default=resolved_ids,key=f"m2-group-apply-ids-{project_id}-{group.get('group_id')}",format_func=lambda value:todo_by_id.get(value,{}).get("label",value))
+    try:
+        revisions,appendix_updates=selected_group_revisions(group_result,set(apply_ids))
+        proposed_manuscript,diffs=apply_revisions(json.dumps({"revisions":revisions,"appendix_updates":appendix_updates},ensure_ascii=False),manuscript,valid_card_ids=valid_card_ids,version=len(version_events)+1)
+        merge_error=""
+    except ValueError as error:
+        proposed_manuscript,diffs=manuscript,[];merge_error=str(error);st.error(merge_error)
+    for diff in diffs:
+        st.markdown(f"**{'Appendix' if diff.get('change_scope')=='appendix' else '문장 '+str(diff.get('sentence_id',''))}** · {diff.get('reason','')}")
+        before_col,after_col=st.columns(2);before_col.caption("이전");before_col.markdown(f"> {diff.get('before','')}");after_col.caption("제안");after_col.markdown(f"> {diff.get('after','')}")
+    suggested_refs=list(dict.fromkeys(paper_id for item in group_result.get("todo_results") or [] if item.get("todo_id") in apply_ids for paper_id in item.get("suggested_reference_paper_ids") or [] if paper_id in all_paper_by_id))
+    reference_ids=st.multiselect("References에 포함할 선택 논문",[paper_id for paper_id in selected_paper_ids if paper_id in all_paper_by_id],default=suggested_refs,key=f"m2-group-reference-ids-{project_id}-{group.get('group_id')}",format_func=lambda value:all_paper_by_id[value].get("title",value))
+    if stale:st.error("그룹 제안 이후 원고 버전이 변경되었습니다. 현재 원고에서 그룹 해결 요청을 다시 실행하세요.")
+    if st.button("선택 To-do 변경 반영 · 완료 처리",type="primary",disabled=stale or bool(merge_error) or not apply_ids or not diffs,key=f"m2-group-apply-{project_id}-{group.get('group_id')}"):
+        saved_reference_ids=[]
+        for paper_id in reference_ids:
+            paper=all_paper_by_id[paper_id];reference=ledger.upsert_literature_reference(topic=f"{project.get('title','논문 프로젝트')} · References",research_context=f"Revision 그룹 {group.get('title','')}: {', '.join(apply_ids)}",paper={**paper,"paper_project_id":project_id,"revision_todo_group_id":group.get("group_id")},labels=list(paper.get("labels",[])) or build_paper_labels(paper),status="selected");saved_reference_ids.append(str(reference.get("reference_id") or ""))
+        ledger.add_paper_project_event(project_id,"manuscript_version",{"manuscript":proposed_manuscript,"source":"researcher_approved_group_resolution","diff":diffs,"group_id":group.get("group_id"),"todo_ids":apply_ids})
+        ledger.add_paper_project_event(project_id,"revision_group_resolution_applied",{"group_id":group.get("group_id"),"todo_ids":apply_ids,"from_version":manuscript_version,"to_version":proposed_manuscript.get("version"),"paper_ids":selected_paper_ids,"card_ids":selected_card_ids,"reference_ids":[value for value in saved_reference_ids if value]})
+        for todo_id in apply_ids:
+            todo=todo_by_id[todo_id];ledger.add_paper_project_event(project_id,"revision_todo_update",{**{key:value for key,value in todo.items() if key!="latest_update"},"status":"resolved","resolution_source":"researcher_approved_group_resolution","group_id":group.get("group_id"),"selected_card_ids":selected_card_ids,"selected_paper_ids":selected_paper_ids})
+        st.rerun()
+
+
+def _render_revision_resolution_workflow(
+    *, project_id: str, project: dict[str,Any], manuscript: dict[str,Any],
+    todos: list[dict[str,Any]], events: list[dict[str,Any]], cards: list[dict[str,Any]],
+    card_by_id: dict[str,dict[str,Any]], valid_card_ids: set[str], version_events: list[dict[str,Any]],
+    model: str, use_ollama: bool,
+) -> None:
+    st.dataframe([{
+        "우선순위":item["priority"],"상태":{"open":"대기","ready":"자료 선택","revised_pending_review":"해결안 검토"}.get(item["status"],item["status"]),
+        "문장 ID":item["sentence_id"],"대상 문장":item["sentence_text"],
+        "보완점":item["label"],"해야 할 일":item["problem"],"완료 기준":item["completion_criteria"],
+    } for item in todos],use_container_width=True,hide_index=True,column_config={
+        "대상 문장":st.column_config.TextColumn(width="large"),"해야 할 일":st.column_config.TextColumn(width="large"),
+        "완료 기준":st.column_config.TextColumn(width="large"),
+    })
+    modes=["유사 To-do 그룹 처리","단일 To-do 처리"] if len(todos)>=2 else ["단일 To-do 처리"]
+    mode=st.radio("처리 방식",modes,horizontal=True,key=f"m2-revision-mode-{project_id}")
+    if mode=="유사 To-do 그룹 처리":
+        _render_revision_group_workflow(
+            project_id=project_id,project=project,manuscript=manuscript,todos=todos,events=events,
+            cards=cards,valid_card_ids=valid_card_ids,version_events=version_events,model=model,use_ollama=use_ollama,
+        )
+        return
+    todo_ids=[item["todo_id"] for item in todos]
+    todo_id=st.selectbox("수행할 To-do",todo_ids,key=f"m2-resolution-todo-{project_id}",format_func=lambda value:next(f"[{item['priority']}] {item['label']} · {item['sentence_text'][:75]}" for item in todos if item["todo_id"]==value))
+    todo=next(item for item in todos if item["todo_id"]==todo_id)
+    with st.container(border=True):
+        st.markdown(f"**{todo['priority']} · {todo['label']}** · `{todo['sentence_id']}`")
+        st.write(todo["sentence_text"]);st.markdown(f"**문제 설명**  \n{todo['problem']}")
+        st.markdown(f"**완료 기준**  \n{todo['completion_criteria']}")
+
+    intent_events=[
+        event for event in events
+        if event.get("event_type") in {"revision_literature_intent","revision_literature_queued"}
+        and str((event.get("payload") or {}).get("todo_id") or "")==todo_id
+    ]
+    latest_intent_event=intent_events[-1] if intent_events else None
+    latest_intent_payload=(latest_intent_event or {}).get("payload") or {}
+    intent_id=str(latest_intent_payload.get("intent_id") or "")
+    profile=next((item for item in ledger.search_profiles(include_deleted=True) if str(item.get("intent_id") or "")==intent_id),None)
+
+    st.divider();st.markdown("### ① M1 문헌탐색 큐 등록")
+    if profile:
+        st.success(f"Done · M1 탐색 큐 등록 완료 · **{profile.get('title','')}**")
+        st.caption("큐 등록으로 1단계가 완료됩니다. M1 실행과 서재함·지식카드 등록은 이후 진행될 수 있습니다.")
+    else:
+        candidates=list(todo.get("literature_search_candidates") or [])
+        candidate=dict(candidates[0]) if candidates else {
+            "candidate_id":f"{todo_id}-initial","title":f"{todo.get('label','')}의 근거와 적용 조건",
+            "target":todo.get("search_guide") or todo.get("sentence_text"),
+            "research_context":f"논문: {project.get('title','')}\n대상 문장: {todo.get('sentence_text','')}\n보완점: {todo.get('problem','')}",
+            "expected_evidence":todo.get("search_guide",""),"completion_condition":todo.get("completion_criteria",""),
+        }
+        title=st.text_input("탐색 제목",value=str(candidate.get("title") or ""),key=f"m2-flow-title-{project_id}-{todo_id}")
+        target=st.text_area("탐색 대상",value=str(candidate.get("target") or ""),height=85,key=f"m2-flow-target-{project_id}-{todo_id}")
+        context=st.text_area("연구 맥락",value=str(candidate.get("research_context") or ""),height=105,key=f"m2-flow-context-{project_id}-{todo_id}")
+        expected=st.text_area("기대 근거",value=str(candidate.get("expected_evidence") or ""),height=80,key=f"m2-flow-evidence-{project_id}-{todo_id}")
+        completion=st.text_area("탐색 완료 조건",value=str(candidate.get("completion_condition") or ""),height=80,key=f"m2-flow-completion-{project_id}-{todo_id}")
+        edited={**candidate,"title":title.strip(),"target":target.strip(),"research_context":context.strip(),"expected_evidence":expected.strip(),"completion_condition":completion.strip()}
+        valid=all(len(str(edited.get(field) or ""))>=3 for field in ("title","target","research_context","expected_evidence","completion_condition"))
+        if latest_intent_event and latest_intent_event.get("event_type")=="revision_literature_intent":
+            st.info("기존 승인 요청이 있습니다. 아래 버튼으로 연구자가 확인하고 바로 M1 큐에 등록할 수 있습니다.")
+            if st.button("확인하고 M1 탐색 큐에 등록",type="primary",key=f"m2-flow-approve-{project_id}-{todo_id}"):
+                approved_profile=_approve_existing_revision_intent(latest_intent_event)
+                if approved_profile:
+                    ledger.add_paper_project_event(project_id,"revision_literature_queued",{
+                        **latest_intent_payload,"profile_id":approved_profile.get("profile_id",""),"queue_title":approved_profile.get("title",""),"status":"queued",
+                    });st.rerun()
+        elif st.button("확인하고 M1 탐색 큐에 등록",type="primary",disabled=not valid,key=f"m2-flow-queue-{project_id}-{todo_id}"):
+            _queue_paper_todo_literature_intent(project_id,project,todo,edited);st.rerun()
+
+    st.divider();st.markdown("### ② 최신 원문·지식카드 선택 및 해결 요청")
+    if not profile:
+        st.info("1단계에서 M1 탐색 큐 등록을 완료하면 자료 선택과 해결 요청이 활성화됩니다.")
+        return
+    cutoff=str((latest_intent_event or {}).get("created_at") or "")
+    all_papers=ledger.shelf_papers()
+    recent_papers=[paper for paper in all_papers if not cutoff or str(paper.get("created_at") or paper.get("updated_at") or "")>=cutoff][:30]
+    recent_cards=sorted([
+        card for card in cards if not cutoff or str(card.get("approved_at") or card.get("updated_at") or card.get("created_at") or "")>=cutoff
+    ],key=lambda item:str(item.get("approved_at") or item.get("updated_at") or item.get("created_at") or ""),reverse=True)[:40]
+    if recent_papers:
+        with st.expander(f"큐 등록 이후 서재함 논문 · 최신순 {len(recent_papers)}편",expanded=True):
+            for paper in recent_papers:
+                st.markdown(f"- **{paper.get('title','')}** · {paper.get('publication_year') or '연도 확인 필요'} · `{paper.get('paper_id','')}`")
+    if recent_cards:
+        with st.expander(f"큐 등록 이후 승인 지식카드 · 최신순 {len(recent_cards)}건",expanded=True):
+            for card in recent_cards:
+                st.markdown(f"- **{card.get('title','')}** · {card.get('claim','')} · `{card.get('card_id','')}`")
+    if not recent_papers and not recent_cards:
+        st.warning("마지막 큐 등록 이후 새로 등록된 서재함 논문이나 승인 지식카드가 없습니다. M1 탐색·논문 읽기·카드 등록을 먼저 완료하세요.")
+    latest_proposal_event=next((event for event in reversed(events) if event.get("event_type")=="revision_resolution_proposal" and str((event.get("payload") or {}).get("todo_id") or "")==todo_id),None)
+    proposal_is_current_cycle=bool(
+        latest_proposal_event and (
+            not latest_intent_event
+            or str(latest_proposal_event.get("created_at") or "")>=str(latest_intent_event.get("created_at") or "")
+        )
+    )
+    if proposal_is_current_cycle:
+        st.success("Done · 논문·지식카드 선택과 To-do 해결 요청이 저장되었습니다. 필요하면 자료나 설명을 바꿔 다시 요청할 수 있습니다.")
+    prior_payload=((latest_proposal_event or {}).get("payload") or {}) if proposal_is_current_cycle else {}
+
+    st.markdown("#### 기존 서재함·지식카드 검색")
+    asset_query=st.text_input(
+        "논문·지식카드 검색",
+        key=f"m2-flow-asset-search-{project_id}-{todo_id}",
+        placeholder="논문 제목, 저자, 주장, 개념, 조건을 입력하세요.",
+        help="전체 서재함과 승인 지식카드를 함께 검색합니다. 최근 자료는 검색 여부와 무관하게 기본 후보로 유지됩니다.",
+    )
+    search_papers,search_cards=search_revision_assets(asset_query,all_papers,cards,limit=30)
+    if asset_query.strip():
+        if search_papers:
+            with st.expander(f"기존 서재함 검색 결과 {len(search_papers)}편",expanded=True):
+                for paper in search_papers:
+                    st.markdown(f"- **{paper.get('title','')}** · {paper.get('publication_year') or '연도 확인 필요'} · `{paper.get('paper_id','')}`")
+        if search_cards:
+            with st.expander(f"기존 승인 지식카드 검색 결과 {len(search_cards)}건",expanded=True):
+                for card in search_cards:
+                    st.markdown(f"- **{card.get('title','')}** · {card.get('claim','')} · `{card.get('card_id','')}`")
+        if not search_papers and not search_cards:
+            st.info("일치하는 서재함 논문이나 승인 지식카드가 없습니다. 제목·저자·핵심 주장·개념으로 다시 검색해 보세요.")
+
+    recent_paper_ids={str(item.get("paper_id") or "") for item in recent_papers}
+    recent_card_ids={str(item.get("card_id") or "") for item in recent_cards}
+    paper_by_id={str(item["paper_id"]):item for item in recent_papers}
+    card_by_id={str(item["card_id"]):item for item in recent_cards}
+    for item in search_papers:paper_by_id.setdefault(str(item["paper_id"]),item)
+    for item in search_cards:card_by_id.setdefault(str(item["card_id"]),item)
+    all_paper_by_id={str(item.get("paper_id") or ""):item for item in all_papers}
+    all_card_by_id={str(item.get("card_id") or ""):item for item in cards}
+    for paper_id in prior_payload.get("selected_paper_ids",[]):
+        if paper_id in all_paper_by_id:paper_by_id.setdefault(paper_id,all_paper_by_id[paper_id])
+    for card_id in prior_payload.get("selected_card_ids",[]):
+        if card_id in all_card_by_id:card_by_id.setdefault(card_id,all_card_by_id[card_id])
+    st.caption("후보 출처: 신규 = 마지막 M1 큐 등록 이후 생성 · 기존 검색 = 전체 서재함/승인 카드 검색")
+    selected_paper_ids=st.multiselect(
+        "이 To-do를 처리할 논문",list(paper_by_id),
+        default=[pid for pid in prior_payload.get("selected_paper_ids",[]) if pid in paper_by_id],
+        format_func=lambda pid:f"[{'신규' if pid in recent_paper_ids else '기존 검색'}] {paper_by_id[pid].get('title',pid)}",
+        key=f"m2-flow-papers-{project_id}-{todo_id}",
+    )
+    selected_card_ids=st.multiselect(
+        "이 To-do를 처리할 지식카드",list(card_by_id),
+        default=[cid for cid in prior_payload.get("selected_card_ids",[]) if cid in card_by_id],
+        format_func=lambda cid:f"[{'신규' if cid in recent_card_ids else '기존 검색'}] {card_by_id[cid].get('title',cid)}",
+        key=f"m2-flow-cards-{project_id}-{todo_id}",
+    )
+    connection_note=st.text_area("선택한 논문·지식카드가 To-do 해결에 연결되는 이유",value=str(prior_payload.get("connection_note") or ""),height=120,key=f"m2-flow-note-{project_id}-{todo_id}",placeholder="어떤 주장·조건·반례를 보완하며 대상 문장을 어떻게 바꿔야 하는지 간단히 적습니다.")
+    selected_papers=[]
+    for paper_id in selected_paper_ids:
+        paper=paper_by_id[paper_id]
+        source=_revision_paper_source(
+            paper_id,str(paper.get("title") or ""),str(paper.get("pdf_path") or ""),str(paper.get("source_url") or ""),
+        )
+        selected_papers.append({**paper,**source})
+    selected_cards=[card_by_id[cid] for cid in selected_card_ids]
+    if selected_papers:
+        with st.expander("선택 논문 원문 포함 상태",expanded=True):
+            for paper in selected_papers:
+                icon="✅" if paper.get("source_text") else "⚠️"
+                st.markdown(f"- {icon} **{paper.get('title','')}** · {paper.get('source_status','')} · {int(paper.get('source_chars') or 0):,}자")
+            st.caption("원문을 읽지 못한 논문의 제목·초록은 참고 정보로만 전달되며 해결 근거로 인정하지 않습니다.")
+    include_full_manuscript=st.checkbox(
+        "전체 2페이지 숏페이퍼도 일관성 확인용으로 포함",
+        value=False,key=f"m2-flow-full-manuscript-{project_id}-{todo_id}",
+        help="기본 프롬프트에는 현재 To-do의 대상 문장과 해당 문단만 들어갑니다. 논문 전체에 미치는 영향까지 확인할 때만 선택하세요.",
+    )
+    proposal_prompt=short_paper_resolution_proposal_prompt(
+        project,manuscript,todo,selected_papers,selected_cards,connection_note,
+        include_full_manuscript=include_full_manuscript,
+    )
+    usable_paper_ids={str(paper.get("paper_id") or "") for paper in selected_papers if paper.get("source_text")}
+    can_request=bool((selected_card_ids or usable_paper_ids) and connection_note.strip())
+    if selected_paper_ids and not usable_paper_ids and not selected_card_ids:
+        st.warning("선택 논문에서 원문을 추출하지 못했습니다. 서재함에 PDF 또는 읽을 수 있는 원문 URL을 등록하거나 승인 지식카드를 선택하세요.")
+    if st.button("내부 LLM에 To-do 해결 요청",type="primary",disabled=not can_request,key=f"m2-flow-resolve-{project_id}-{todo_id}"):
+        raw=llm_draft(proposal_prompt,model,use_ollama,profile="writing") or ""
+        try:
+            proposal=parse_resolution_proposal(raw,todo,valid_card_ids=set(selected_card_ids),valid_paper_ids=usable_paper_ids)
+            ledger.add_paper_project_event(project_id,"revision_resolution_proposal",{
+                "todo_id":todo_id,"from_version":manuscript.get("version"),"source":"internal_llm","proposal":proposal,
+                "selected_paper_ids":selected_paper_ids,"selected_card_ids":selected_card_ids,"connection_note":connection_note.strip(),
+            })
+            ledger.add_paper_project_event(project_id,"revision_todo_update",{
+                **{key:value for key,value in todo.items() if key!="latest_update"},"status":"ready",
+                "selected_card_ids":selected_card_ids,"selected_paper_ids":selected_paper_ids,
+                "researcher_response":connection_note.strip(),
+            });st.rerun()
+        except ValueError as error:st.error(str(error))
+    with st.expander("외부 LLM으로 To-do 해결 요청"):
+        prompt_version=hashlib.sha256(proposal_prompt.encode("utf-8")).hexdigest()[:12]
+        st.caption(f"현재 To-do 중심 프롬프트 · 선택 원문 {len(usable_paper_ids)}편 · {len(proposal_prompt):,}자")
+        st.text_area("해결 요청 프롬프트",value=proposal_prompt,height=520,key=f"m2-flow-prompt-{project_id}-{todo_id}-{prompt_version}")
+        external=st.text_area("외부 LLM 해결 제안 JSON",height=260,key=f"m2-flow-response-{project_id}-{todo_id}")
+        if st.button("외부 해결 제안 저장",disabled=not can_request or not external.strip(),key=f"m2-flow-apply-proposal-{project_id}-{todo_id}"):
+            try:
+                proposal=parse_resolution_proposal(external,todo,valid_card_ids=set(selected_card_ids),valid_paper_ids=usable_paper_ids)
+                ledger.add_paper_project_event(project_id,"revision_resolution_proposal",{
+                    "todo_id":todo_id,"from_version":manuscript.get("version"),"source":"external_llm","proposal":proposal,
+                    "selected_paper_ids":selected_paper_ids,"selected_card_ids":selected_card_ids,"connection_note":connection_note.strip(),
+                })
+                ledger.add_paper_project_event(project_id,"revision_todo_update",{
+                    **{key:value for key,value in todo.items() if key!="latest_update"},"status":"ready",
+                    "selected_card_ids":selected_card_ids,"selected_paper_ids":selected_paper_ids,
+                    "researcher_response":connection_note.strip(),
+                });st.rerun()
+            except ValueError as error:st.error(str(error))
+
+    st.divider();st.markdown("### ③ 해결 확인 · 변경 검토 · 원고 반영")
+    if not latest_proposal_event:
+        st.caption("2단계의 해결 요청 결과가 생성되면 변경 전후 검토가 표시됩니다.")
+    else:
+        payload=latest_proposal_event.get("payload") or {};proposal=payload.get("proposal") or {}
+        newer_search_cycle=bool(latest_intent_event and str(latest_intent_event.get("created_at") or "")>str(latest_proposal_event.get("created_at") or ""))
+        stale=int(payload.get("from_version") or -1)!=int(manuscript.get("version") or -2) or newer_search_cycle
+        if proposal.get("verdict")=="resolved":st.success(f"LLM 해결 제안 · 완료 기준 충족 가능 · {proposal.get('reason','')}")
+        else:st.warning(f"LLM 판단 · 추가 근거 필요 · {proposal.get('reason','')}")
+        try:
+            proposed_manuscript,proposal_diff=apply_revisions(json.dumps({"revisions":proposal.get("revisions",[]),"appendix_updates":proposal.get("appendix_updates",[])},ensure_ascii=False),manuscript,valid_card_ids=valid_card_ids,version=len(version_events)+1)
+        except ValueError:
+            proposed_manuscript,proposal_diff=manuscript,[]
+        for diff in proposal_diff:
+            label="Appendix" if diff.get("change_scope")=="appendix" else f"문장 {diff.get('sentence_id','')}"
+            st.markdown(f"**{label}** · {diff.get('reason','')}")
+            before_col,after_col=st.columns(2);before_col.caption("이전");before_col.markdown(f"> {diff.get('before','')}");after_col.caption("제안");after_col.markdown(f"> {diff.get('after','')}")
+        selected_source_papers={str(paper.get("paper_id")):paper for paper in ledger.shelf_papers() if str(paper.get("paper_id")) in payload.get("selected_paper_ids",[])}
+        suggested_refs=[pid for pid in proposal.get("suggested_reference_paper_ids",[]) if pid in selected_source_papers]
+        reference_ids=st.multiselect("원고 References에 포함할 논문",list(selected_source_papers),default=suggested_refs,format_func=lambda pid:selected_source_papers[pid].get("title",pid),key=f"m2-flow-refs-{project_id}-{todo_id}")
+        if stale:st.error("이 해결 제안 이후 원고가 변경되었거나 추가 문헌탐색 주기가 시작되었습니다. 2단계에서 최신 자료와 현재 원고 기준으로 해결 요청을 다시 실행하세요.")
+        can_apply=proposal.get("verdict")=="resolved" and bool(proposal_diff) and not stale
+        if st.button("변경 확인 · 원고 반영 · To-do 완료",type="primary",disabled=not can_apply,key=f"m2-flow-complete-{project_id}-{todo_id}"):
+            saved_reference_ids=[]
+            for paper_id in reference_ids:
+                paper=selected_source_papers[paper_id]
+                reference=ledger.upsert_literature_reference(topic=f"{project.get('title','논문 프로젝트')} · References",research_context=f"Revision To-do {todo_id}: {todo.get('problem','')}",paper={**paper,"paper_project_id":project_id,"revision_todo_id":todo_id},labels=list(paper.get("labels",[])) or build_paper_labels(paper),status="selected")
+                saved_reference_ids.append(str(reference.get("reference_id") or ""))
+            ledger.add_paper_project_event(project_id,"manuscript_version",{"manuscript":proposed_manuscript,"source":"researcher_approved_resolution","diff":proposal_diff,"todo_id":todo_id,"todo_label":todo.get("label",""),"todo_priority":todo.get("priority","")})
+            ledger.add_paper_project_event(project_id,"revision_resolution_applied",{"todo_id":todo_id,"from_version":payload.get("from_version"),"to_version":proposed_manuscript.get("version"),"paper_ids":payload.get("selected_paper_ids",[]),"card_ids":payload.get("selected_card_ids",[]),"reference_ids":[item for item in saved_reference_ids if item],"connection_note":payload.get("connection_note","")})
+            ledger.add_paper_project_event(project_id,"revision_todo_update",{**{key:value for key,value in todo.items() if key!="latest_update"},"status":"resolved","resolution_source":"researcher_approved_resolution","selected_card_ids":payload.get("selected_card_ids",[])})
+            st.rerun()
+
+    st.divider();st.markdown("### ④ 해결 어려움 · 추가 문헌탐색")
+    if not latest_proposal_event:
+        st.caption("해결 요청 결과가 부족하다고 판단되면 다음 탐색 제목과 맥락을 검토해 다시 M1 큐에 넣습니다.")
+        return
+    payload=latest_proposal_event.get("payload") or {};proposal=payload.get("proposal") or {};next_search=proposal.get("next_search") or {}
+    followup_already_queued=bool(latest_intent_event and str(latest_intent_event.get("created_at") or "")>str(latest_proposal_event.get("created_at") or ""))
+    if followup_already_queued:
+        st.success(f"Done · 추가 문헌탐색 큐 등록 완료 · **{(profile or {}).get('title') or latest_intent_payload.get('queue_title','')}**")
+    next_title=st.text_input("추가 탐색 제목",value=str(next_search.get("title") or f"{todo.get('label','')} 추가 근거와 반례"),key=f"m2-follow-title-{project_id}-{todo_id}")
+    next_target=st.text_area("추가 탐색 대상",value=str(next_search.get("target") or todo.get("search_guide") or ""),height=85,key=f"m2-follow-target-{project_id}-{todo_id}")
+    next_context=st.text_area("추가 탐색 맥락",value=str(next_search.get("research_context") or f"이전 해결 요청으로 남은 공백: {proposal.get('reason','')}"),height=105,key=f"m2-follow-context-{project_id}-{todo_id}")
+    next_evidence=st.text_area("추가로 필요한 근거",value=str(next_search.get("expected_evidence") or todo.get("search_guide") or ""),height=80,key=f"m2-follow-evidence-{project_id}-{todo_id}")
+    next_completion=st.text_area("재검토 가능 조건",value=str(next_search.get("completion_condition") or todo.get("completion_criteria") or ""),height=80,key=f"m2-follow-completion-{project_id}-{todo_id}")
+    followup={"candidate_id":f"{todo_id}-followup-{uuid.uuid4().hex[:6]}","title":next_title.strip(),"target":next_target.strip(),"research_context":next_context.strip(),"expected_evidence":next_evidence.strip(),"completion_condition":next_completion.strip()}
+    followup_valid=all(len(str(followup.get(field) or ""))>=3 for field in ("title","target","research_context","expected_evidence","completion_condition"))
+    if st.button("확인하고 추가 문헌탐색 큐에 등록",type="primary",disabled=not followup_valid or followup_already_queued,key=f"m2-follow-queue-{project_id}-{todo_id}"):
+        _queue_paper_todo_literature_intent(project_id,project,todo,followup);st.rerun()
+
+
+def _record_paper_todo_verification(
+    project_id: str, todo: dict[str, Any], result: dict[str, Any], *, source: str,
+    response_text: str = "",
+) -> None:
+    durable_todo={key:value for key,value in todo.items() if key!="latest_update"}
+    verdict = str(result.get("verdict") or "needs_more_work")
+    next_action = str(result.get("next_action") or "revise_again")
+    action_map = {
+        "researcher_input":"researcher_input", "knowledge_search":"knowledge_search",
+        "literature_search":"literature_search", "revise_again":"researcher_input",
+    }
+    payload = {
+        **result, "source":source,
+        "response_digest":hashlib.sha256(response_text.strip().encode("utf-8")).hexdigest() if response_text.strip() else "",
+    }
+    ledger.add_paper_project_event(project_id,"revision_todo_verification",payload)
+    ledger.add_paper_project_event(project_id,"revision_todo_update",{
+        **durable_todo,
+        "status":"resolved" if verdict=="resolved" else "open",
+        "resolution_source":source if verdict=="resolved" else "",
+        "recommended_action":action_map.get(next_action,str(todo.get("recommended_action") or "researcher_input")),
+        "problem":str(result.get("remaining_gap") or todo.get("problem") or ""),
+        "verification":payload,
+    })
+
+
+def _render_paper_todo_verification_result(payload: dict[str, Any]) -> None:
+    resolved = payload.get("verdict") == "resolved"
+    (st.success if resolved else st.warning)(
+        f"{'해결 완료' if resolved else '추가 보완 필요'} · To-do `{payload.get('todo_id','')}` · "
+        f"문장 `{payload.get('sentence_id','')}`"
+    )
+    if payload.get("reason"):
+        st.write(payload["reason"])
+    checks = payload.get("criteria_checks") or []
+    if checks:
+        st.dataframe([{
+            "충족": "✓" if item.get("satisfied") else "✗",
+            "검증 기준": item.get("criterion", ""), "판단 근거": item.get("evidence", ""),
+        } for item in checks],use_container_width=True,hide_index=True)
+    if payload.get("remaining_gap"):
+        st.markdown(f"**남은 보완점**  \n{payload['remaining_gap']}")
+    action_labels={
+        "close":"To-do 종료","researcher_input":"연구자 입력 보완",
+        "knowledge_search":"지식카드 보완","literature_search":"M1 문헌탐색",
+        "revise_again":"문장 재수정",
+    }
+    st.caption(f"다음 행동 · {action_labels.get(str(payload.get('next_action','')),payload.get('next_action',''))}")
+
+
+def render_m2_coauthor_workspace(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
+    st.header("M2 · Short Paper Co-author")
+    st.caption("새 지식 또는 기존 연구질문에서 출발해 2페이지 논문을 만들고, 문장별 근거·보완점을 표시하며 연구자와 반복 수정합니다.")
+    projects=ledger.paper_projects(); cards=memory.all(); card_by_id={str(c["card_id"]):c for c in cards}; valid_ids=set(card_by_id)
+    with st.expander("+ 연구질문 선택·논문 프로젝트 시작", expanded=not bool(projects)):
+        st.caption("질문을 새로 도출하거나, 이전에 정의한 질문과 연결 지식카드를 그대로 승계하거나, 연구자가 직접 입력할 수 있습니다.")
+        new_knowledge_tab, existing_rq_tab, direct_tab = st.tabs([
+            "새 지식에서 질문 도출", "기존 연구질문 선택", "연구자 직접 입력",
+        ])
+        with new_knowledge_tab:
+            st.info("최근 검토한 논문에서 생성된 미처리 지식카드를 묶어 연구질문 후보를 만듭니다. 저장된 질문은 ‘기존 연구질문 선택’에서 논문 프로젝트로 전환할 수 있습니다.")
+            _render_m1_new_information(model, use_ollama, semantic, embedding_model)
+        with existing_rq_tab:
+            questions = ledger.research_question_backlog(limit=500)
+            include_rejected = st.checkbox("제외한 질문도 보기", value=False, key="m2pp-include-rejected")
+            visible_questions = [item for item in questions if include_rejected or item.get("status") != "rejected"]
+            if not visible_questions:
+                st.info("저장된 연구질문이 없습니다. ‘새 지식에서 질문 도출’ 또는 ‘연구자 직접 입력’에서 시작하세요.")
+            else:
+                rq_ids = [str(item["rq_id"]) for item in visible_questions]
+                selected_rq_id = st.selectbox(
+                    "이전에 정의된 연구질문", rq_ids, key="m2pp-existing-rq-id",
+                    format_func=lambda value: next(
+                        f"[{RQ_STATUS_LABELS.get(str(item.get('status','candidate')), item.get('status','candidate'))}] {item.get('question','')}"
+                        for item in visible_questions if str(item["rq_id"]) == value
+                    ),
+                )
+                selected_rq = next(item for item in visible_questions if str(item["rq_id"]) == selected_rq_id)
+                selected_thread = ledger.research_question_thread(selected_rq_id) or selected_rq
+                with st.container(border=True):
+                    st.markdown(f"**{selected_rq.get('question', '')}**")
+                    st.caption(
+                        f"{M2_SOURCE_LABELS.get(str(selected_thread.get('source_type','m1_knowledge')), selected_thread.get('source_type','m1_knowledge'))}"
+                        f" · {RQ_STATUS_LABELS.get(str(selected_rq.get('status','candidate')), selected_rq.get('status','candidate'))}"
+                        f" · 연결 카드 {len(selected_rq.get('source_card_ids', []))}건"
+                    )
+                    if selected_rq.get("rationale"):
+                        st.markdown(f"**도출 이유**  \n{selected_rq['rationale']}")
+                    if selected_rq.get("research_context"):
+                        st.markdown(f"**연구 맥락**  \n{selected_rq['research_context']}")
+                    if selected_rq.get("gap_or_tension"):
+                        st.markdown(f"**공백·긴장**  \n{selected_rq['gap_or_tension']}")
+                    linked_ids = [cid for cid in selected_rq.get("source_card_ids", []) if cid in card_by_id]
+                    if linked_ids:
+                        with st.expander(f"승계할 지식카드 {len(linked_ids)}건", expanded=False):
+                            for card_id in linked_ids:
+                                card = card_by_id[card_id]
+                                st.markdown(f"- **{card.get('title') or card_id}** · {card.get('claim','')}")
+                default_title = str(selected_rq.get("question", "")).strip()[:80]
+                project_title = st.text_input(
+                    "논문 프로젝트 제목", value=default_title,
+                    key=f"m2pp-existing-title-{selected_rq_id}",
+                )
+                rq_lineage_cards = cards_for_origin(card_by_id.values(), [selected_rq_id])
+                inherited_rq_card_ids = list(dict.fromkeys([
+                    *list(selected_rq.get("source_card_ids", [])),
+                    *[card["card_id"] for card in rq_lineage_cards],
+                ]))
+                if rq_lineage_cards:
+                    st.caption(f"이 연구질문에서 시작한 문헌탐색을 통해 생성된 승인 지식카드 {len(rq_lineage_cards)}건을 자동 연결했습니다.")
+                selected_evidence = _render_paper_evidence_selector(
+                    title=project_title,
+                    research_question=str(selected_rq.get("question", "")),
+                    inherited_ids=inherited_rq_card_ids,
+                    card_by_id=card_by_id,
+                    semantic=semantic,
+                    embedding_model=embedding_model,
+                    key_prefix=f"m2pp-existing-evidence-{selected_rq_id}",
+                )
+                linked_project = _paper_project_for_research_question(projects, selected_rq_id)
+                if linked_project:
+                    st.warning(f"이 질문에서 시작한 프로젝트가 이미 있습니다: {linked_project.get('title','')}")
+                    if st.button("기존 논문 프로젝트 열기", type="primary", key=f"m2pp-open-{selected_rq_id}"):
+                        st.session_state["m2-paper-project-id"] = linked_project["project_id"]
+                        st.rerun()
+                elif st.button(
+                    "이 질문으로 논문 프로젝트 구성", type="primary",
+                    disabled=not project_title.strip(), key=f"m2pp-create-from-rq-{selected_rq_id}",
+                ):
+                    project_source = dict(selected_rq)
+                    project_source["source_card_ids"] = (
+                        selected_evidence or inherited_rq_card_ids
+                    )
+                    project = _create_paper_project_from_research_question(project_source, project_title)
+                    _record_paper_evidence_selection(
+                        project["project_id"],
+                        f"m2pp-existing-evidence-{selected_rq_id}",
+                        list(project_source["source_card_ids"]),
+                    )
+                    st.session_state["m2-paper-project-id"] = project["project_id"]
+                    st.rerun()
+        with direct_tab:
+            title=st.text_input("프로젝트 제목",key="m2pp-title"); rq=st.text_area("확정 연구질문",key="m2pp-rq")
+            selected = _render_paper_evidence_selector(
+                title=title,
+                research_question=rq,
+                inherited_ids=[],
+                card_by_id=card_by_id,
+                semantic=semantic,
+                embedding_model=embedding_model,
+                key_prefix="m2pp-direct-evidence",
+            )
+            if st.button("프로젝트 생성",type="primary",disabled=not title.strip() or not rq.strip(),key="m2pp-direct-create"):
+                p=ledger.create_paper_project(title=title,research_question=rq,origin_type="knowledge_cards" if selected else "researcher_input",origin_ids=selected)
+                _record_paper_evidence_selection(p["project_id"], "m2pp-direct-evidence", selected)
+                st.session_state["m2-paper-project-id"]=p["project_id"]; st.rerun()
+    if not projects:return
+    ids=[p["project_id"] for p in projects]; current_id=st.selectbox("프로젝트",ids,format_func=lambda x:next(p["title"] for p in projects if p["project_id"]==x),key="m2-paper-project-id")
+    project=ledger.paper_project(current_id) or {}; events=project.get("events",[])
+    origin_event=next((e for e in reversed(events) if e.get("event_type")=="project_origin"),None)
+    lineage_origin_ids=[current_id]
+    if origin_event and str((origin_event.get("payload") or {}).get("source_rq_id", "")).strip():
+        lineage_origin_ids.append(str((origin_event.get("payload") or {}).get("source_rq_id")))
+    lineage_cards=cards_for_origin(card_by_id.values(),lineage_origin_ids)
+    evidence_ids=list(dict.fromkeys([*project.get("origin_ids",[]),*[card["card_id"] for card in lineage_cards]]))
+    evidence=[card_by_id[x] for x in evidence_ids if x in card_by_id]
+    if origin_event:
+        origin=origin_event.get("payload") or {}
+        with st.expander("출발 연구질문·승계 맥락",expanded=False):
+            st.caption(f"Research Question · {origin.get('source_rq_id','')} · {M2_SOURCE_LABELS.get(str(origin.get('source_type','m1_knowledge')),origin.get('source_type','m1_knowledge'))}")
+            if origin.get("rationale"):st.markdown(f"**도출 이유**  \n{origin['rationale']}")
+            if origin.get("research_context"):st.markdown(f"**연구 맥락**  \n{origin['research_context']}")
+            if origin.get("gap_or_tension"):st.markdown(f"**공백·긴장**  \n{origin['gap_or_tension']}")
+            st.caption(f"승계된 지식카드 {len(project.get('origin_ids',[]))}건")
+    if lineage_cards:
+        with st.expander(f"문헌탐색 계보로 다시 연결된 지식카드 · {len(lineage_cards)}건",expanded=False):
+            st.caption("이 논문 프로젝트 또는 출발 연구질문에서 시작한 M1 탐색을 거쳐 생성된 승인 지식입니다.")
+            for card in lineage_cards:
+                st.markdown(f"- **{card.get('title', card.get('card_id',''))}** · {card.get('claim','')}")
+                render_origin_labels(card)
+    version_events=[e for e in events if e["event_type"]=="manuscript_version"]; manuscript=version_events[-1]["payload"].get("manuscript") if version_events else None
+    manuscript_evidence_ids={str(card["card_id"]) for card in evidence}
+    if manuscript:
+        manuscript_evidence_ids.update(
+            str(card_id) for sentence in manuscript_sentences(manuscript)
+            for card_id in sentence.get("evidence_card_ids",[]) if str(card_id) in card_by_id
+        )
+    review_evidence=[card_by_id[card_id] for card_id in manuscript_evidence_ids if card_id in card_by_id]
+    project_references=_paper_project_references(current_id)
+    draft_tab,review_tab,revise_tab,history_tab=st.tabs(["2페이지 초안","진단 · 문장 검증","실행 · Revision To-do","버전·SOP 이력"])
+    with draft_tab:
+        st.info(project.get("research_question")); prompt=short_paper_draft_prompt(project,evidence)
+        c1,c2=st.columns(2)
+        if c1.button("내부 LLM 초안 생성",type="primary"):
+            raw=llm_draft(prompt,model,use_ollama,profile="writing") or ""
+            try:m=parse_manuscript(raw,valid_card_ids=valid_ids,version=len(version_events)+1); ledger.add_paper_project_event(current_id,"manuscript_version",{"manuscript":m,"source":"internal_draft","diff":[]}); st.rerun()
+            except ValueError as error:st.error(str(error))
+        with st.expander("외부 LLM으로 초안 생성"):
+            st.text_area("편집 가능한 프롬프트",value=prompt,height=380,key=f"m2-draft-prompt-{current_id}"); external=st.text_area("외부 LLM JSON 응답",height=260,key=f"m2-draft-response-{current_id}")
+            if st.button("외부 초안 검증·저장",disabled=not external.strip()):
+                try:m=parse_manuscript(external,valid_card_ids=valid_ids,version=len(version_events)+1); ledger.add_paper_project_event(current_id,"manuscript_version",{"manuscript":m,"source":"external_draft","diff":[]}); st.rerun()
+                except ValueError as error:st.error(str(error))
+        if manuscript:
+            st.markdown(manuscript_markdown(manuscript,markup=True))
+            if project_references:
+                st.markdown("## References")
+                for index, reference in enumerate(project_references, start=1):
+                    paper = reference.get("paper") or {}
+                    source_url = str(paper.get("source_url") or paper.get("html_url") or paper.get("url") or "").strip()
+                    citation = _reference_display(reference)
+                    st.markdown(f"{index}. [{citation}]({source_url})" if source_url else f"{index}. {citation}")
+            with st.expander("Appendix · Full Paper 확장 후보 갱신",expanded=False):
+                appendix_count=len(manuscript.get("appendix_claims") or [])
+                st.caption(
+                    f"현재 후보 {appendix_count}건 · 2페이지 본문을 늘리지 않고, 빠진 중요 주장을 최대 8건까지 보존합니다. "
+                    "본문과 중복되거나 승인 지식카드 근거가 없는 주장은 저장하지 않습니다."
+                )
+                appendix_task_prompt=short_paper_appendix_prompt(project,manuscript,evidence)
+                if st.button("내부 LLM으로 Appendix 후보 갱신",key=f"m2-appendix-refresh-{current_id}"):
+                    raw=llm_draft(appendix_task_prompt,model,use_ollama,profile="writing") or ""
+                    try:
+                        refreshed,diff=apply_appendix_refresh(raw,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1)
+                        if not diff:
+                            st.info("현재 본문과 근거 기준에서 Appendix 후보 변경이 없습니다.")
+                        else:
+                            ledger.add_paper_project_event(current_id,"manuscript_version",{
+                                "manuscript":refreshed,"source":"appendix_refresh","diff":diff,
+                            })
+                            st.rerun()
+                    except ValueError as error:st.error(str(error))
+                st.text_area("Appendix 후보 갱신 프롬프트",value=appendix_task_prompt,height=380,key=f"m2-appendix-prompt-{current_id}")
+                appendix_external=st.text_area("외부 LLM Appendix JSON",height=240,key=f"m2-appendix-response-{current_id}")
+                if st.button("외부 Appendix 후보 반영",disabled=not appendix_external.strip(),key=f"m2-appendix-apply-{current_id}"):
+                    try:
+                        refreshed,diff=apply_appendix_refresh(appendix_external,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1)
+                        if not diff:
+                            st.info("외부 응답에 반영할 Appendix 변경이 없습니다.")
+                        else:
+                            ledger.add_paper_project_event(current_id,"manuscript_version",{
+                                "manuscript":refreshed,"source":"external_appendix_refresh","diff":diff,
+                            })
+                            st.rerun()
+                    except ValueError as error:st.error(str(error))
+            _render_manuscript_revision_history(version_events,events)
+    with review_tab:
+        if not manuscript:st.info("초안을 먼저 생성하세요.")
+        else:
+            st.info("문장 검증·마크업은 원고의 문제를 진단합니다. Revision To-do는 각 진단을 보완·수정·재검증하는 실행 작업입니다.")
+            review_flash=st.session_state.pop(f"m2-review-flash-{current_id}",None)
+            latest_review_event=next((event for event in reversed(events) if event.get("event_type")=="revision_review"),None)
+            latest_review_payload=(latest_review_event or {}).get("payload") or {}
+            current_version_reviewed=(
+                bool(latest_review_event)
+                and int(latest_review_payload.get("result_version") or -1)==int(manuscript.get("version") or -2)
+            )
+            if review_flash:
+                _render_review_result(review_flash)
+                st.info("반영된 항목은 아래 진단표와 `실행 · Revision To-do` 탭에서 확인할 수 있습니다.")
+            elif latest_review_event:
+                with st.expander("최근 검증 반영 결과",expanded=False):
+                    _render_review_result(latest_review_event.get("payload") or {},latest=True)
+            with st.expander("마크업 의미 보기", expanded=False):
+                st.dataframe(annotation_legend(),use_container_width=True,hide_index=True)
+            st.dataframe(
+                _paper_diagnostic_rows(manuscript,card_by_id),
+                use_container_width=True,hide_index=True,
+                column_config={"문장 내용":st.column_config.TextColumn(width="large"),"진단 내용":st.column_config.TextColumn(width="large")},
+            )
+            todos=_revision_todos_with_events(manuscript,events)
+            if todos:
+                st.warning(f"열린 Revision To-do {sum(1 for item in todos if item['status']=='open')}건 · 보완 정보 준비 {sum(1 for item in todos if item['status']=='ready')}건 · 수정 후 재검증 대기 {sum(1 for item in todos if item['status']=='revised_pending_review')}건")
+            else:
+                st.success("현재 열린 보완점이 없습니다.")
+            if current_version_reviewed:
+                st.info(
+                    f"현재 원고 v{manuscript.get('version','?')}의 문장 검증은 반영 완료되어 이 화면은 읽기 전용입니다. "
+                    "다음 작업은 `실행 · Revision To-do`에서 수행하세요. 문장이 수정되어 새 버전이 생기면 검증 기능이 다시 활성화됩니다."
+                )
+            prompt=short_paper_review_prompt(project,manuscript,review_evidence)
+            if st.button("내부 LLM 문장 검증 실행",disabled=current_version_reviewed):
+                raw=llm_draft(prompt,model,use_ollama,profile="review") or ""
+                try:
+                    result_version=len(version_events)+1
+                    anns=parse_review(raw,manuscript); reviewed=apply_review(manuscript,anns); reviewed["version"]=result_version
+                    review_result=_review_result_payload(
+                        source="internal_llm",before_todos=todos,annotations=anns,
+                        reviewed_from_version=int(manuscript.get("version") or len(version_events)),result_version=result_version,
+                    )
+                    _record_resolved_revision_todos(current_id,todos,anns,"internal_llm_review")
+                    ledger.add_paper_project_event(current_id,"manuscript_version",{"manuscript":reviewed,"source":"llm_review","diff":[]})
+                    ledger.add_paper_project_event(current_id,"revision_review",review_result)
+                    st.session_state[f"m2-review-flash-{current_id}"]=review_result
+                    st.rerun()
+                except ValueError as error:st.error(str(error))
+            with st.expander("외부 LLM 문장 검증",expanded=False):
+                st.text_area("검증 프롬프트",value=prompt,height=350,key=f"m2-review-prompt-{current_id}",disabled=current_version_reviewed)
+                response=st.text_area("외부 검증 JSON",height=240,key=f"m2-review-response-{current_id}",disabled=current_version_reviewed)
+                response_digest=hashlib.sha256(response.strip().encode("utf-8")).hexdigest() if response.strip() else ""
+                already_applied=next((
+                    event.get("payload") or {} for event in reversed(events)
+                    if event.get("event_type")=="revision_review"
+                    and (event.get("payload") or {}).get("source")=="external_llm"
+                    and (event.get("payload") or {}).get("response_digest")==response_digest
+                ),None) if response_digest else None
+                if already_applied:
+                    st.success(f"이 외부 검증 응답은 원고 v{already_applied.get('result_version')}에 이미 반영되었습니다.")
+                    _render_review_result(already_applied,latest=True)
+                    st.caption("같은 응답은 다시 반영할 수 없습니다. 새 검증 JSON을 입력하면 버튼이 다시 활성화됩니다.")
+                if st.button("외부 검증 반영",disabled=current_version_reviewed or not response.strip() or bool(already_applied),key=f"m2-apply-external-review-{current_id}"):
+                    try:
+                        result_version=len(version_events)+1
+                        anns=parse_review(response,manuscript); reviewed=apply_review(manuscript,anns); reviewed["version"]=result_version
+                        review_result=_review_result_payload(
+                            source="external_llm",before_todos=todos,annotations=anns,
+                            reviewed_from_version=int(manuscript.get("version") or len(version_events)),result_version=result_version,response_text=response,
+                        )
+                        _record_resolved_revision_todos(current_id,todos,anns,"external_llm_review")
+                        ledger.add_paper_project_event(current_id,"manuscript_version",{"manuscript":reviewed,"source":"external_review","diff":[]})
+                        ledger.add_paper_project_event(current_id,"revision_review",review_result)
+                        st.session_state[f"m2-review-flash-{current_id}"]=review_result
+                        st.rerun()
+                    except ValueError as error:st.error(str(error))
+    with revise_tab:
+        if not manuscript:
+            st.info("초안을 먼저 생성하세요.")
+        else:
+            todos=_revision_todos_with_events(manuscript,events)
+            _render_revision_todo_progress(manuscript,events)
+            open_count=sum(1 for item in todos if item["status"]=="open")
+            ready_count=sum(1 for item in todos if item["status"]=="ready")
+            pending_count=sum(1 for item in todos if item["status"]=="revised_pending_review")
+            timeline=_revision_todo_history_with_events(manuscript,events)
+            resolved_count=sum(1 for item in timeline if item.get("status")=="resolved")
+            c1,c2,c3,c4=st.columns(4);c1.metric("진단됨",open_count);c2.metric("보완 준비",ready_count);c3.metric("재검증 대기",pending_count);c4.metric("검증 완료",resolved_count)
+            latest_todo_verification=next((
+                event for event in reversed(events) if event.get("event_type")=="revision_todo_verification"
+            ),None)
+            if latest_todo_verification:
+                with st.expander("최근 To-do 해결 여부 검증",expanded=False):
+                    _render_paper_todo_verification_result(latest_todo_verification.get("payload") or {})
+            workflow_rendered=False
+            if todos:
+                _render_revision_resolution_workflow(
+                    project_id=current_id,project=project,manuscript=manuscript,todos=todos,events=events,
+                    cards=cards,card_by_id=card_by_id,valid_card_ids=valid_ids,version_events=version_events,
+                    model=model,use_ollama=use_ollama,
+                )
+                workflow_rendered=True
+            if not todos:
+                st.success("모든 Revision To-do가 해소되었습니다. 필요하면 문장 검증을 다시 실행해 새로운 보완점을 확인하세요.")
+            elif not workflow_rendered:
+                st.dataframe([{
+                    "우선순위":item["priority"],"상태":{"open":"Open","ready":"보완 준비","revised_pending_review":"재검증 대기"}.get(item["status"],item["status"]),
+                    "문장 ID":item["sentence_id"],"대상 문장":item["sentence_text"],
+                    "보완점":item["label"],"해야 할 일":item["problem"],"완료 기준":item["completion_criteria"],
+                } for item in todos],use_container_width=True,hide_index=True,column_config={
+                    "대상 문장":st.column_config.TextColumn(width="large"),
+                    "해야 할 일":st.column_config.TextColumn(width="large"),
+                    "완료 기준":st.column_config.TextColumn(width="large"),
+                })
+                todo_ids=[item["todo_id"] for item in todos]
+                todo_id=st.selectbox("수행할 To-do",todo_ids,key=f"m2-todo-{current_id}",format_func=lambda value:next(f"[{item['priority']}] {item['label']} · {item['sentence_text'][:75]}" for item in todos if item["todo_id"]==value))
+                todo=next(item for item in todos if item["todo_id"]==todo_id)
+                with st.container(border=True):
+                    st.markdown(f"**{todo['priority']} · {todo['label']}** · `{todo['sentence_id']}`")
+                    st.write(todo["sentence_text"])
+                    st.markdown(f"**문제 설명**  \n{todo['problem']}")
+                    if todo["question_for_researcher"]:st.markdown(f"**연구자에게 묻는 질문**  \n{todo['question_for_researcher']}")
+                    st.markdown(f"**정보 탐색 가이드**  \n{todo['search_guide']}")
+                    st.markdown(f"**완료 기준**  \n{todo['completion_criteria']}")
+                st.divider()
+                st.markdown("### ① 근거·연구자 정보 보완")
+                requires_m1=todo.get("recommended_action")=="literature_search"
+                if requires_m1:
+                    st.warning("이 To-do는 문헌 근거 보완이 선행되어야 합니다. M1 탐색을 완료하고 결과 지식카드를 연결한 뒤 문장을 리비전하세요.")
+                else:
+                    st.caption("현재 권장 경로는 연구자 입력 또는 기존 지식카드 보완입니다. 추가 문헌이 필요하다고 판단하면 M1 탐색 요청을 사용할 수 있습니다.")
+                submitted_event=None;request_status="";m1_run_complete=False
+                literature_candidates=list(todo.get("literature_search_candidates") or [])
+                if literature_candidates:
+                    st.markdown("#### M1 문헌탐색 승인 요청")
+                    st.caption("아래 내용이 그대로 M1 탐색 Intent 승인 요청에 전달됩니다.")
+                    candidate_ids=[str(item["candidate_id"]) for item in literature_candidates]
+                    candidate_id=(candidate_ids[0] if len(candidate_ids)==1 else st.selectbox(
+                        "승인 요청 후보 선택",candidate_ids,key=f"m2-lit-candidate-{current_id}-{todo_id}",
+                        format_func=lambda value:next(item.get("title") or item.get("target") for item in literature_candidates if str(item["candidate_id"])==value),
+                    ))
+                    candidate=next(dict(item) for item in literature_candidates if str(item["candidate_id"])==candidate_id)
+                    candidate_title=st.text_input("승인 요청 제목",value=str(candidate.get("title","")),key=f"m2-lit-title-{current_id}-{todo_id}-{candidate_id}")
+                    candidate_target=st.text_area("탐색 대상",value=str(candidate.get("target","")),height=90,key=f"m2-lit-target-{current_id}-{todo_id}-{candidate_id}")
+                    candidate_context=st.text_area("연구 맥락",value=str(candidate.get("research_context","")),height=110,key=f"m2-lit-context-{current_id}-{todo_id}-{candidate_id}")
+                    candidate_evidence=st.text_area("기대 근거",value=str(candidate.get("expected_evidence","")),height=90,key=f"m2-lit-evidence-{current_id}-{todo_id}-{candidate_id}")
+                    candidate_completion=st.text_area("완료 조건",value=str(candidate.get("completion_condition","")),height=90,key=f"m2-lit-completion-{current_id}-{todo_id}-{candidate_id}")
+                    submitted_event=next((event for event in reversed(events) if event.get("event_type")=="revision_literature_intent" and (event.get("payload") or {}).get("todo_id")==todo_id and (event.get("payload") or {}).get("candidate_id")==candidate_id),None)
+                    if submitted_event:
+                        submitted_payload=submitted_event.get("payload") or {};request=ledger.phenomenon(str(submitted_payload.get("request_id","")))
+                        request_status=str((request or {}).get("status") or submitted_payload.get("status") or "approval_requested")
+                        intent_id=str(submitted_payload.get("intent_id",""))
+                        profile=next((item for item in ledger.search_profiles(include_deleted=True) if str(item.get("intent_id",""))==intent_id),None)
+                        runs=ledger.search_runs(str(profile.get("profile_id")),limit=20) if profile else []
+                        m1_run_complete=any(str(item.get("status","")) in {"completed","completed_no_candidates"} for item in runs)
+                        queue_title=str((profile or {}).get("title") or submitted_payload.get("queue_title") or submitted_payload.get("title") or "M1 탐색 Intent")
+                        if m1_run_complete:
+                            st.success(f"M1 탐색 수행 완료 · **{queue_title}**")
+                        elif profile:
+                            st.success(f"M1 연구 Intent 큐 등록 완료 · **{queue_title}**")
+                            st.caption(f"Intent `{intent_id}` · M1 > 연구 Intent 탐색 작업 큐에서 실행할 수 있습니다.")
+                        elif request_status in {"proposed","approval_requested"}:
+                            st.info(f"승인 요청 완료 · M1 승인 대기 목록의 등록 예정 제목은 **{queue_title}**입니다.")
+                            st.caption("연구자 홈 > 연구자 검토·승인함에서 승인하면 같은 제목으로 M1 실행 큐에 등록됩니다.")
+                        elif request_status=="approved":
+                            st.warning(f"**{queue_title}** 승인 완료 · 아직 M1 실행 프로필이 확인되지 않습니다. M1 큐의 ‘새 Intent 등록’ 기능을 확인하세요.")
+                        else:
+                            status_label={"deferred":"보완 요청","rejected":"반려"}.get(request_status,request_status)
+                            st.warning(f"M1 탐색 승인 상태 · {status_label} · **{queue_title}**")
+                    edited_candidate={
+                        **candidate,"title":candidate_title.strip(),"target":candidate_target.strip(),
+                        "research_context":candidate_context.strip(),"expected_evidence":candidate_evidence.strip(),
+                        "completion_condition":candidate_completion.strip(),
+                    }
+                    valid_candidate=all(len(str(edited_candidate.get(field,"")))>=3 for field in ("title","target","research_context","expected_evidence","completion_condition"))
+                    if st.button(
+                        "이 후보를 M1 탐색 승인 요청으로 보내기",type="primary",
+                        disabled=bool(submitted_event) or not valid_candidate,
+                        key=f"m2-lit-submit-{current_id}-{todo_id}-{candidate_id}",
+                    ):
+                        _request_paper_todo_literature_intent(current_id,project,todo,edited_candidate)
+                        st.rerun()
+                latest_update=todo.get("latest_update") or {}
+                linked_evidence=_latest_revision_evidence_link(events,todo_id)
+                if link_flash:=st.session_state.pop(f"m2-todo-link-flash-{current_id}-{todo_id}",""):
+                    st.success(str(link_flash))
+                todo_source_cards,todo_source_papers=_revision_todo_assets(
+                    current_id,todo_id,cards,ledger.shelf_papers(),
+                )
+                if m1_run_complete or todo_source_cards or todo_source_papers:
+                    st.markdown("#### M1 탐색 산출물 → To-do 근거 연결")
+                    st.caption("이 To-do의 계보가 붙은 원문과 승인 지식카드만 표시합니다. 원문은 References 채택 여부를 별도로 결정할 수 있습니다.")
+                    if not todo_source_cards and not todo_source_papers:
+                        st.info("탐색은 완료됐지만 아직 이 To-do 계보의 서재함 원문 또는 승인 지식카드가 없습니다. M1에서 논문을 서재함에 추가하고 읽기·지식카드 등록을 완료하세요.")
+                    else:
+                        todo_paper_by_id={str(item["paper_id"]):item for item in todo_source_papers}
+                        todo_card_by_id={str(item["card_id"]):item for item in todo_source_cards}
+                        if todo_source_papers:
+                            for paper_index,paper in enumerate(todo_source_papers):
+                                source_url=str(paper.get("source_url") or "").strip()
+                                paper_col,source_col=st.columns([8,1.5])
+                                paper_col.markdown(f"- **{paper.get('title','제목 없음')}** · {paper.get('publication_year') or '연도 확인 필요'}")
+                                if source_url:
+                                    source_col.link_button("원문",source_url,key=f"m2-todo-source-{current_id}-{todo_id}-{paper_index}")
+                        selected_paper_ids=st.multiselect(
+                            "To-do에 연결할 원문",list(todo_paper_by_id),
+                            default=[pid for pid in linked_evidence.get("paper_ids",[]) if pid in todo_paper_by_id],
+                            format_func=lambda pid:todo_paper_by_id[pid].get("title",pid),
+                            key=f"m2-todo-source-papers-{current_id}-{todo_id}",
+                        )
+                        selected_lineage_card_ids=st.multiselect(
+                            "To-do에 연결할 승인 지식카드",list(todo_card_by_id),
+                            default=[cid for cid in linked_evidence.get("card_ids",[]) if cid in todo_card_by_id],
+                            format_func=lambda cid:todo_card_by_id[cid].get("title",cid),
+                            key=f"m2-todo-source-cards-{current_id}-{todo_id}",
+                        )
+                        reference_paper_ids=st.multiselect(
+                            "논문 References에 채택할 원문",selected_paper_ids,
+                            default=[pid for pid in linked_evidence.get("reference_paper_ids",[]) if pid in selected_paper_ids],
+                            format_func=lambda pid:todo_paper_by_id[pid].get("title",pid),
+                            key=f"m2-todo-reference-papers-{current_id}-{todo_id}",
+                            help="선택한 원문만 이 논문 프로젝트의 References에 등록합니다.",
+                        )
+                        if st.button(
+                            "원문·지식카드를 To-do에 연결",type="primary",
+                            disabled=not selected_paper_ids and not selected_lineage_card_ids,
+                            key=f"m2-todo-link-evidence-{current_id}-{todo_id}",
+                        ):
+                            reference_ids=[]
+                            for paper_id in reference_paper_ids:
+                                paper=todo_paper_by_id[paper_id]
+                                saved_reference=ledger.upsert_literature_reference(
+                                    topic=f"{project.get('title','논문 프로젝트')} · References",
+                                    research_context=f"Revision To-do {todo_id}: {todo.get('problem','')}",
+                                    paper={**paper,"paper_project_id":current_id,"revision_todo_id":todo_id},
+                                    labels=list(paper.get("labels",[])) or build_paper_labels(paper),
+                                    status="selected",
+                                )
+                                reference_ids.append(str(saved_reference.get("reference_id") or ""))
+                            merged_card_ids=list(dict.fromkeys([
+                                *[str(item) for item in latest_update.get("selected_card_ids",[])],
+                                *selected_lineage_card_ids,
+                            ]))
+                            link_payload={
+                                "todo_id":todo_id,"sentence_id":todo.get("sentence_id",""),
+                                "paper_ids":selected_paper_ids,"card_ids":selected_lineage_card_ids,
+                                "reference_paper_ids":reference_paper_ids,"reference_ids":[item for item in reference_ids if item],
+                            }
+                            ledger.add_paper_project_event(current_id,"revision_todo_evidence_link",link_payload)
+                            ledger.add_paper_project_event(current_id,"revision_todo_update",{
+                                **{key:value for key,value in todo.items() if key!="latest_update"},
+                                "researcher_response":str(latest_update.get("researcher_response") or ""),
+                                "selected_card_ids":merged_card_ids,"status":"ready",
+                            })
+                            st.session_state[f"m2-todo-link-flash-{current_id}-{todo_id}"]=(
+                                f"To-do에 원문 {len(selected_paper_ids)}편과 지식카드 {len(selected_lineage_card_ids)}건을 연결했고, "
+                                f"이 중 원문 {len(reference_paper_ids)}편을 References에 등록했습니다."
+                            )
+                            st.rerun()
+                response_key=f"m2-todo-response-{current_id}-{todo_id}"
+                researcher_response=st.text_area("연구자의 답변·판단·추가 정보",value=str(latest_update.get("researcher_response", "")),key=response_key,height=130)
+                search_context="\n".join(filter(None,[str(project.get("research_question","")),todo["sentence_text"],todo["search_guide"],researcher_response]))
+                hits_key=f"m2-todo-hits-{current_id}-{todo_id}"
+                if st.button("보완 지식카드 자동 탐색",key=f"m2-todo-search-{current_id}-{todo_id}"):
+                    sentence_row=next((row for row in manuscript_sentences(manuscript) if row["sentence_id"]==todo["sentence_id"]),{})
+                    _,todo_candidates=_discover_paper_evidence(
+                        str(project.get("title","")),search_context,list(sentence_row.get("evidence_card_ids",[])),semantic,embedding_model,
+                    )
+                    st.session_state[hits_key]=[item["card_id"] for item in todo_candidates[:12]]
+                    st.rerun()
+                linked_card_ids=[str(cid) for cid in linked_evidence.get("card_ids",[]) if str(cid) in card_by_id]
+                hit_ids=list(dict.fromkeys(list(st.session_state.get(hits_key,[]))+[str(cid) for cid in latest_update.get("selected_card_ids",[]) if str(cid) in card_by_id]+[str(card.get("card_id")) for card in todo_source_cards if str(card.get("card_id")) in card_by_id]+linked_card_ids))
+                default_added_ids=list(dict.fromkeys([str(cid) for cid in latest_update.get("selected_card_ids",[]) if str(cid) in hit_ids]+[cid for cid in linked_card_ids if cid in hit_ids]))
+                added_ids=st.multiselect("추가 근거 카드",hit_ids,default=default_added_ids,format_func=lambda x:card_by_id.get(x,{}).get("title",x),key=f"m2-todo-cards-{current_id}-{todo_id}")
+                added=[card_by_id[x] for x in added_ids if x in card_by_id]
+                task_payload={**{key:value for key,value in todo.items() if key!="latest_update"},"researcher_response":researcher_response,"selected_card_ids":added_ids}
+                if st.button("보완 정보 저장",disabled=not researcher_response.strip() and not added_ids,key=f"m2-todo-save-{current_id}-{todo_id}"):
+                    ledger.add_paper_project_event(current_id,"revision_todo_update",{**task_payload,"status":"ready"})
+                    st.rerun()
+                st.divider()
+                st.markdown("### ② 선택 문장 리비전")
+                comments=[task_payload]
+                revision_prompt=short_paper_revision_prompt(project,manuscript,comments,added)
+                literature_ready=not requires_m1 or ((m1_run_complete or bool(todo_source_cards)) and bool(added_ids))
+                can_revise=bool(researcher_response.strip() or added_ids) and literature_ready and todo.get("status")!="revised_pending_review"
+                if requires_m1 and not literature_ready:
+                    st.info("리비전 대기 · M1 탐색 완료와 결과 지식카드 연결이 모두 필요합니다.")
+                elif todo.get("status")=="revised_pending_review":
+                    st.info("문장 리비전이 반영되었습니다. 아래 해결 여부 검증을 수행하세요.")
+                if st.button("내부 LLM으로 해당 문장 리비전",type="primary",disabled=not can_revise,key=f"m2-todo-revise-{current_id}-{todo_id}"):
+                    raw=llm_draft(revision_prompt,model,use_ollama,profile="writing") or ""
+                    try:
+                        revised,diff=_apply_targeted_paper_revision(raw,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1,sentence_id=todo["sentence_id"])
+                        if not diff:st.warning("수정된 문장을 찾지 못했습니다. LLM 응답 형식을 확인하세요.")
+                        else:
+                            ledger.add_paper_project_event(current_id,"researcher_comment",task_payload)
+                            ledger.add_paper_project_event(current_id,"revision_todo_update",{**task_payload,"status":"revised_pending_review","diff":diff})
+                            ledger.add_paper_project_event(current_id,"manuscript_version",{
+                                "manuscript":revised,"source":"targeted_revision","diff":diff,
+                                "todo_id":todo_id,"todo_label":todo["label"],"todo_priority":todo["priority"],
+                            })
+                            st.rerun()
+                    except ValueError as error:st.error(str(error))
+                with st.expander("외부 LLM으로 선택 문장만 리비전"):
+                    st.caption("선택한 To-do의 대상 문장 1개만 수정합니다. 앞뒤 문장은 읽기 전용 문맥이며 논문 전체를 다시 작성하지 않습니다.")
+                    st.text_area("선택 문장 리비전 프롬프트",value=revision_prompt,height=380,key=f"m2-revision-prompt-{current_id}-{todo_id}")
+                    external_response=st.text_area("외부 리비전 JSON",height=220,key=f"m2-revision-response-{current_id}-{todo_id}")
+                    if st.button("외부 리비전 반영",disabled=not can_revise or not external_response.strip(),key=f"m2-external-revise-{current_id}-{todo_id}"):
+                        try:
+                            revised,diff=_apply_targeted_paper_revision(external_response,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1,sentence_id=todo["sentence_id"])
+                            if not diff:st.warning("수정된 문장을 찾지 못했습니다. 외부 LLM 응답 형식을 확인하세요.")
+                            else:
+                                ledger.add_paper_project_event(current_id,"researcher_comment",task_payload)
+                                ledger.add_paper_project_event(current_id,"revision_todo_update",{**task_payload,"status":"revised_pending_review","diff":diff})
+                                ledger.add_paper_project_event(current_id,"manuscript_version",{
+                                    "manuscript":revised,"source":"external_revision","diff":diff,
+                                    "todo_id":todo_id,"todo_label":todo["label"],"todo_priority":todo["priority"],
+                                })
+                                st.rerun()
+                        except ValueError as error:st.error(str(error))
+                st.divider()
+                st.markdown("### ③ 전체 원고 영향 검토·리비전")
+                todo_references=[
+                    reference for reference in project_references
+                    if str((reference.get("paper") or {}).get("revision_todo_id") or "")==todo_id
+                ]
+                full_revision_prompt=short_paper_full_revision_prompt(
+                    project,manuscript,task_payload,added,todo_references,
+                )
+                full_revision_version=int(latest_update.get("full_revision_applied_version") or -1)
+                full_revision_done=full_revision_version==int(manuscript.get("version") or -2)
+                can_full_revise=(
+                    todo.get("status")=="revised_pending_review"
+                    and bool(added or todo_references) and not full_revision_done
+                )
+                if todo.get("status")!="revised_pending_review":
+                    st.caption("선택 문장 리비전 후, 새 근거가 논문의 다른 문장·결론·용어에도 영향을 주는지 검토합니다.")
+                elif full_revision_done:
+                    st.success(f"현재 원고 v{manuscript.get('version')}에 전체 원고 영향 검토가 반영되었습니다.")
+                elif not added and not todo_references:
+                    st.info("전체 원고 영향 검토에는 이 To-do에 연결된 지식카드 또는 References가 필요합니다.")
+                if st.button(
+                    "내부 LLM으로 전체 원고 영향 리비전",type="primary",disabled=not can_full_revise,
+                    key=f"m2-todo-full-revise-{current_id}-{todo_id}",
+                ):
+                    raw=llm_draft(full_revision_prompt,model,use_ollama,profile="writing") or ""
+                    try:
+                        revised,diff=apply_revisions(raw,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1)
+                        if not diff:
+                            current_version=int(manuscript.get("version") or len(version_events))
+                            ledger.add_paper_project_event(current_id,"revision_full_impact_review",{
+                                "todo_id":todo_id,"source":"internal_llm","result":"no_additional_changes",
+                                "manuscript_version":current_version,
+                            })
+                            ledger.add_paper_project_event(current_id,"revision_todo_update",{
+                                **task_payload,"status":"revised_pending_review",
+                                "full_revision_applied_version":current_version,"full_revision_diff":[],
+                            })
+                            st.rerun()
+                        else:
+                            result_version=len(version_events)+1
+                            ledger.add_paper_project_event(current_id,"revision_todo_update",{
+                                **task_payload,"status":"revised_pending_review",
+                                "full_revision_applied_version":result_version,"full_revision_diff":diff,
+                            })
+                            ledger.add_paper_project_event(current_id,"manuscript_version",{
+                                "manuscript":revised,"source":"todo_full_revision","diff":diff,
+                                "todo_id":todo_id,"todo_label":todo["label"],"todo_priority":todo["priority"],
+                            })
+                            st.rerun()
+                    except ValueError as error:st.error(str(error))
+                with st.expander("외부 LLM으로 전체 원고 영향 리비전"):
+                    st.caption("새 근거가 목표 문장 외의 주장·결론·용어에 미치는 영향만 수정합니다. 문체 개선만을 위한 전체 재작성은 허용하지 않습니다.")
+                    st.text_area("전체 원고 영향 리비전 프롬프트",value=full_revision_prompt,height=420,key=f"m2-full-revision-prompt-{current_id}-{todo_id}")
+                    full_external_response=st.text_area("외부 전체 리비전 JSON",height=240,key=f"m2-full-revision-response-{current_id}-{todo_id}")
+                    if st.button(
+                        "외부 전체 리비전 반영",
+                        disabled=not can_full_revise or not full_external_response.strip(),
+                        key=f"m2-external-full-revise-{current_id}-{todo_id}",
+                    ):
+                        try:
+                            revised,diff=apply_revisions(full_external_response,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1)
+                            if not diff:
+                                current_version=int(manuscript.get("version") or len(version_events))
+                                ledger.add_paper_project_event(current_id,"revision_full_impact_review",{
+                                    "todo_id":todo_id,"source":"external_llm","result":"no_additional_changes",
+                                    "manuscript_version":current_version,
+                                })
+                                ledger.add_paper_project_event(current_id,"revision_todo_update",{
+                                    **task_payload,"status":"revised_pending_review",
+                                    "full_revision_applied_version":current_version,"full_revision_diff":[],
+                                })
+                                st.rerun()
+                            else:
+                                result_version=len(version_events)+1
+                                ledger.add_paper_project_event(current_id,"revision_todo_update",{
+                                    **task_payload,"status":"revised_pending_review",
+                                    "full_revision_applied_version":result_version,"full_revision_diff":diff,
+                                })
+                                ledger.add_paper_project_event(current_id,"manuscript_version",{
+                                    "manuscript":revised,"source":"external_todo_full_revision","diff":diff,
+                                    "todo_id":todo_id,"todo_label":todo["label"],"todo_priority":todo["priority"],
+                                })
+                                st.rerun()
+                        except ValueError as error:st.error(str(error))
+                st.divider()
+                st.markdown("### ④ To-do 해결 여부 검증")
+                current_sentence=next((row for row in manuscript_sentences(manuscript) if row.get("sentence_id")==todo["sentence_id"]),{})
+                linked_ids=list(dict.fromkeys([str(cid) for cid in current_sentence.get("evidence_card_ids",[])]+added_ids))
+                verification_cards=[card_by_id[cid] for cid in linked_ids if cid in card_by_id]
+                verification_todo=dict(task_payload)
+                verification_prompt=short_paper_todo_verification_prompt(project,verification_todo,current_sentence,verification_cards)
+                impact_review_required=bool(added or todo_references)
+                can_verify=(
+                    todo.get("status")=="revised_pending_review"
+                    and (not impact_review_required or full_revision_done)
+                )
+                latest_verification=next((
+                    event.get("payload") or {} for event in reversed(events)
+                    if event.get("event_type")=="revision_todo_verification"
+                    and (event.get("payload") or {}).get("todo_id")==todo_id
+                ),None)
+                if latest_verification:
+                    _render_paper_todo_verification_result(latest_verification)
+                if not can_verify:
+                    st.caption("문장 리비전과 필요한 전체 원고 영향 검토를 마치면 해결 여부 검증 Task가 활성화됩니다.")
+                if st.button("내부 LLM으로 해결 여부 검증",type="primary",disabled=not can_verify,key=f"m2-todo-verify-{current_id}-{todo_id}"):
+                    raw=llm_draft(verification_prompt,model,use_ollama,profile="review") or ""
+                    try:
+                        verification=parse_todo_verification(raw,todo)
+                        _record_paper_todo_verification(current_id,verification_todo,verification,source="internal_llm")
+                        st.rerun()
+                    except ValueError as error:st.error(str(error))
+                with st.expander("외부 LLM으로 해결 여부 검증"):
+                    st.caption("수정된 한 문장이 원래 문제와 완료 기준을 충족했는지만 판정합니다. 이 Task는 문장을 다시 작성하지 않습니다.")
+                    st.text_area("해결 여부 검증 프롬프트",value=verification_prompt,height=360,key=f"m2-verify-prompt-{current_id}-{todo_id}")
+                    verification_response=st.text_area("외부 검증 JSON",height=220,key=f"m2-verify-response-{current_id}-{todo_id}")
+                    verification_digest=hashlib.sha256(verification_response.strip().encode("utf-8")).hexdigest() if verification_response.strip() else ""
+                    verification_applied=next((
+                        event.get("payload") or {} for event in reversed(events)
+                        if event.get("event_type")=="revision_todo_verification"
+                        and (event.get("payload") or {}).get("todo_id")==todo_id
+                        and (event.get("payload") or {}).get("response_digest")==verification_digest
+                    ),None) if verification_digest else None
+                    if verification_applied:
+                        st.success("이 해결 여부 검증 응답은 이미 반영되었습니다.")
+                    if st.button("외부 해결 여부 검증 반영",disabled=not can_verify or not verification_response.strip() or bool(verification_applied),key=f"m2-external-verify-{current_id}-{todo_id}"):
+                        try:
+                            verification=parse_todo_verification(verification_response,todo)
+                            _record_paper_todo_verification(current_id,verification_todo,verification,source="external_llm",response_text=verification_response)
+                            st.rerun()
+                        except ValueError as error:st.error(str(error))
+    with history_tab:
+        for event in reversed(events):
+            st.caption(f"{event['created_at']} · {event['event_type']} · {event['payload'].get('source','')}")
+            if event["event_type"]=="revision_todo_evidence_link":
+                payload=event.get("payload") or {}
+                st.write(
+                    f"To-do `{payload.get('todo_id','')}` · 원문 {len(payload.get('paper_ids') or [])}편 · "
+                    f"지식카드 {len(payload.get('card_ids') or [])}건 · References {len(payload.get('reference_ids') or [])}편"
+                )
+            if event["event_type"]=="revision_literature_queued":
+                payload=event.get("payload") or {}
+                st.write(f"To-do `{payload.get('todo_id','')}` · M1 탐색 큐 등록 · {payload.get('queue_title','')}")
+            if event["event_type"]=="revision_resolution_proposal":
+                payload=event.get("payload") or {};proposal=payload.get("proposal") or {}
+                st.write(
+                    f"To-do `{payload.get('todo_id','')}` · 해결 제안 {proposal.get('verdict','')} · "
+                    f"논문 {len(payload.get('selected_paper_ids') or [])}편 · 카드 {len(payload.get('selected_card_ids') or [])}건"
+                )
+            if event["event_type"]=="revision_resolution_applied":
+                payload=event.get("payload") or {}
+                st.write(
+                    f"To-do `{payload.get('todo_id','')}` 완료 · 원고 v{payload.get('from_version','?')} → v{payload.get('to_version','?')} · "
+                    f"References {len(payload.get('reference_ids') or [])}편"
+                )
+            if event["event_type"]=="revision_full_impact_review":
+                payload=event.get("payload") or {}
+                st.write(f"To-do `{payload.get('todo_id','')}` · 전체 원고 영향 검토 · 추가 변경 없음 · 원고 v{payload.get('manuscript_version','?')}")
+            if event["event_type"]=="revision_review":
+                payload=event.get("payload") or {}
+                st.write(
+                    f"원고 v{payload.get('reviewed_from_version','?')} → v{payload.get('result_version','?')} · "
+                    f"To-do {payload.get('todo_count',0)}건 · 유지 {payload.get('retained_count',0)} · "
+                    f"신규 {payload.get('new_count',0)} · 해결 {payload.get('resolved_count',0)}"
+                )
+                review_changes=[]
+                for key in ("new_todos","resolved_todos","retained_todos"):
+                    review_changes.extend(payload.get(key) or [])
+                if review_changes:
+                    st.dataframe([{
+                        "변경":item.get("change",""),"To-do":item.get("todo_id",""),
+                        "문장":item.get("sentence_id",""),"보완점":item.get("label",""),
+                        "판정 내용":item.get("problem",""),
+                    } for item in review_changes],use_container_width=True,hide_index=True)
+            if event["event_type"]=="revision_todo_verification":
+                _render_paper_todo_verification_result(event.get("payload") or {})
+            if event["event_type"]=="manuscript_version" and event["payload"].get("diff"):st.dataframe(event["payload"]["diff"],use_container_width=True,hide_index=True)
+
+
 def m2_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
-    st.header(ui_text("M2 · 지식 기반 자문 작업실", "M2 · Knowledge-based Advisory Workspace"))
-    st.caption(ui_text("질문 진입점은 별도 페이지로 관리하고, 질문이 정의된 이후의 검토·보고·M1 보강·질문 구체화 흐름은 동일한 Research Question Thread로 수행합니다.", "Question entry points are managed separately. Once a question is defined, review, reporting, M1 supplementation, and refinement continue in the same Research Question Thread."))
+    render_m2_coauthor_workspace(model, use_ollama, semantic, embedding_model)
+    return
+    st.header(ui_text("M2 · 연구 방향·논증 자문", "M2 · Research Direction & Argument Advisory"))
+    st.caption(ui_text("새 지식·연구자 논점·외부 요청을 하나의 연구 논점으로 관리합니다. 각 논점은 승인 지식에 근거한 연구 판단안, 필요한 M1 근거보강, 연구자의 결정으로 이어집니다.", "Manage new knowledge, researcher issues, and external requests as one research issue. Each issue leads to an evidence-grounded decision brief, M1 supplementation when needed, and a researcher decision."))
     pages = [
-        "전체 질문",
-        "M1 새 지식 기반",
-        "연구자 직접 질문",
+        "전체 연구 논점",
+        "M1 지식 변화",
+        "연구 논점 등록",
         "외부 자문 요청",
-        "M2 Report History",
+        "연구 판단안 이력",
     ]
     page = st.radio(
         ui_text("M2 작업", "M2 Work"),
         pages, horizontal=True, key="m2-work-page",
         format_func=lambda v: {
-            "전체 질문": ui_text("전체 질문", "All Questions"),
-            "M1 새 지식 기반": ui_text("M1 새 지식 기반", "M1 New Knowledge"),
-            "연구자 직접 질문": ui_text("연구자 직접 질문", "Researcher Questions"),
+            "전체 연구 논점": ui_text("전체 연구 논점", "All Research Issues"),
+            "M1 지식 변화": ui_text("M1 지식 변화", "M1 Knowledge Changes"),
+            "연구 논점 등록": ui_text("연구 논점 등록", "Create Research Issue"),
             "외부 자문 요청": ui_text("외부 자문 요청", "External Advisory"),
-            "M2 Report History": ui_text("M2 Report History", "M2 Report History"),
+            "연구 판단안 이력": ui_text("연구 판단안 이력", "Decision Brief History"),
         }.get(v, v),
     )
     st.divider()
-    if page == "전체 질문":
+    if page == "전체 연구 논점":
         _render_all_question_threads(model, use_ollama, semantic, embedding_model)
-    elif page == "M1 새 지식 기반":
+    elif page == "M1 지식 변화":
         _render_m1_new_information(model, use_ollama, semantic, embedding_model)
-    elif page == "연구자 직접 질문":
+    elif page == "연구 논점 등록":
         _render_researcher_question_page(model, use_ollama, semantic, embedding_model)
     elif page == "외부 자문 요청":
         _render_external_advisory_page(model, use_ollama, semantic, embedding_model)
@@ -5188,9 +7730,8 @@ def main() -> None:
         st.session_state["main-workspace"] = pending_workspace
     workspace_items = [
         ("연구위원 데스크", ui_text("연구위원 데스크", "Research Fellow Desk")),
-        ("Research Sensemaking", ui_text("Research Sensemaking", "Research Sensemaking")),
         ("M1 · 문헌조사·지식화", ui_text("M1 · 문헌조사·지식화", "M1 · Literature & Knowledge")),
-        ("M2 · 지식 기반 자문", ui_text("M2 · 지식 기반 자문", "M2 · Knowledge-based Advisory")),
+        ("M2 · 지식 기반 자문", ui_text("M2 · 연구 방향·논증 자문", "M2 · Research Direction & Argument Advisory")),
         ("지식 베이스·운영", ui_text("지식 베이스·운영", "Knowledge Base & Operations")),
         ("개발·프롬프트", ui_text("개발·프롬프트", "Development & Prompts")),
     ]
@@ -5205,8 +7746,6 @@ def main() -> None:
         home(model, use_ollama, semantic, embedding_model)
     elif screen == "M1 · 문헌조사·지식화":
         m1_screen(model, use_ollama, semantic, embedding_model)
-    elif screen == "Research Sensemaking":
-        sensemaking_screen(model, use_ollama, semantic, embedding_model)
     elif screen == "M2 · 지식 기반 자문":
         m2_screen(model, use_ollama, semantic, embedding_model)
     elif screen == "지식 베이스·운영":

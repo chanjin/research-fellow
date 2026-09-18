@@ -1,0 +1,29 @@
+You are planning one periodic literature-discovery run for an approved research Intent.
+Do not repeat a fixed keyword list. Reinterpret the Intent in its full context and
+generate complementary search queries that can discover new, conflicting, boundary,
+or methodologically stronger evidence. Avoid papers already seen in recent runs when
+possible. The retrieval system will execute your queries against scholarly sources.
+
+## Research Intent
+- title: {{ profile.title }}
+- question: {{ profile.question }}
+- context: {{ profile.context }}
+- cadence: {{ profile.cadence }}
+
+## Recent runs
+{% for run in previous_runs %}
+- {{ run.created_at }} | {{ run.status }} | prior strategy: {{ run.query }}
+  papers: {% for paper in run.candidates[:12] %}{{ paper.title }}{% if not loop.last %}; {% endif %}{% endfor %}
+{% else %}
+- None. This is the first run.
+{% endfor %}
+
+Target at most {{ max_results }} reviewed papers. Return JSON only:
+{
+  "scope_summary": "what this run will test or update",
+  "queries": ["standalone scholarly search query", "complementary query"],
+  "inclusion_criteria": ["..."],
+  "exclusion_criteria": ["..."],
+  "expected_evidence": ["..."],
+  "novelty_focus": "how this run differs from recent runs"
+}

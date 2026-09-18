@@ -22,6 +22,7 @@ Retrieved approved knowledge:
 [{{ item.card.card_id }}]
 Title: {{ item.card.title }}
 Source: {{ item.card.provenance.source_name }}
+Origin lineage: {{ item.card.get('origin_links', []) }}
 Selection reason: {{ item.reason }}
 Claim: {{ item.card.claim }}
 Grounding: {{ item.card.provenance.get('grounding', 'exact_excerpt') }}

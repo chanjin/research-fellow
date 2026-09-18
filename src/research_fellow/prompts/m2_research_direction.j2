@@ -28,6 +28,7 @@ Retrieved approved knowledge:
 {% for item in evidence %}
 [{{ item.card.card_id }}] {{ item.card.title }}
 Source: {{ item.card.provenance.source_name }}
+Origin lineage: {{ item.card.get('origin_links', []) }}
 Claim: {{ item.card.claim }}
 Grounding: {{ item.card.provenance.get('grounding', 'exact_excerpt') }}
 {% if item.card.evidence_excerpt %}Exact excerpt: {{ item.card.evidence_excerpt }}{% else %}Exact excerpt: not captured{% endif %}

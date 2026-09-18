@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+from research_fellow.origin_lineage import origin_labels
 
 
 INDEX_SCHEMA_VERSION = 1
@@ -66,6 +67,7 @@ def _card_text(card: dict[str, Any]) -> str:
         " ".join(card.get("labels", [])), " ".join(card.get("concepts", [])),
         " ".join(card.get("applies_to", [])), " ".join(card.get("excludes", [])),
         " ".join(card.get("supports_question_types", [])), card.get("conditions", ""), card.get("limits", ""),
+        " ".join(origin_labels(card.get("origin_links", []))),
     ])
 
 

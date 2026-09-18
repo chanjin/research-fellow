@@ -1,0 +1,52 @@
+You are M2 acting as a research co-author. Resolve one researcher-confirmed group of related Revision To-dos in a single evidence pass, but do not apply changes.
+
+Use only the supplied focused paragraphs, selected paper full texts, approved Knowledge Cards, and researcher connection note. A paper may directly support a revision only when source text is available and the supporting content occurs in that text. Judge every To-do independently: a group may be only partially resolved. Do not mark one To-do resolved merely because another in the group is resolved. Avoid unrelated revisions. When two To-dos affect the same sentence, return one consistent sentence text in both results. Preserve sentence IDs.
+
+PROJECT: {{ project.title }}
+RESEARCH QUESTION: {{ project.research_question }}
+GROUP: {{ group.group_id }} · {{ group.title }}
+GROUP REASON: {{ group.reason }}
+SHARED EVIDENCE NEED: {{ group.shared_evidence_need }}
+RESEARCHER CONNECTION NOTE: {{ connection_note }}
+
+GROUP TO-DOS:
+{% for todo in todos %}
+=== {{ todo.todo_id }} ===
+Target: [{{ todo.sentence_id }}] {{ todo.sentence_text }}
+Problem: {{ todo.problem }}
+Completion criterion: {{ todo.completion_criteria }}
+Search guide: {{ todo.search_guide }}
+{% endfor %}
+
+FOCUSED MANUSCRIPT PARAGRAPHS:
+{% for focus in contexts %}
+Section: {{ focus.section_title }} ({{ focus.section_id }}) · Paragraph: {{ focus.paragraph_id }}
+{% for sentence in focus.sentences %}[{{ sentence.sentence_id }}] {{ sentence.text }}
+{% endfor %}
+{% endfor %}
+
+{% if include_full_manuscript %}FULL TWO-PAGE MANUSCRIPT FOR GLOBAL CONSISTENCY ONLY:
+{% for sentence in full_manuscript_sentences %}[{{ sentence.sentence_id }}] {{ sentence.text }}
+{% endfor %}
+{% endif %}
+
+SELECTED PAPER SOURCES:
+{% for paper in papers %}
+=== PAPER {{ paper.paper_id }} ===
+Title: {{ paper.title }}
+Year: {{ paper.publication_year }}
+Authors: {{ paper.authors | join(', ') }}
+Source text available: {{ 'yes' if paper.source_text else 'no' }}
+Source status: {{ paper.source_status }}
+Abstract: {{ paper.abstract }}
+{% if paper.source_text %}BEGIN SOURCE TEXT
+{{ paper.source_text }}
+END SOURCE TEXT{% endif %}
+{% endfor %}
+
+SELECTED APPROVED KNOWLEDGE CARDS:
+{% for card in cards %}[{{ card.card_id }}] {{ card.title }} | Claim: {{ card.claim }} | Conditions: {{ card.conditions }} | Limits: {{ card.limits }}
+{% endfor %}
+
+Return JSON only. Include exactly one todo_results entry for every supplied To-do:
+{"group_id":"{{ group.group_id }}","group_verdict":"resolved|partial|needs_more_work","todo_results":[{"todo_id":"todo-...","verdict":"resolved|needs_more_work","reason":"criterion-level judgment","evidence_connections":[{"asset_type":"paper|knowledge_card","asset_id":"paper-...|kc-...","connection":"specific connection"}],"revisions":[{"sentence_id":"s-...","after":"proposed sentence","reason":"evidence-based reason","new_evidence_card_ids":["kc-..."],"new_reference_paper_ids":["paper-..."]}],"appendix_updates":[],"suggested_reference_paper_ids":["paper-..."],"next_search":{"title":"empty when resolved","target":"remaining question","research_context":"remaining gap","expected_evidence":"needed evidence","completion_condition":"condition for reconsideration"}}],"cross_todo_consistency":{"summary":"how the proposed changes fit together","conflicts":["remaining conflict, if any"]}}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from research_fellow.origin_lineage import origin_labels
 
 
 def build_m2_thread_review_prompt(
@@ -25,13 +26,14 @@ def build_m2_thread_review_prompt(
                     f"Conditions: {card.get('conditions', '')}",
                     f"Limits: {card.get('limits', '')}",
                     f"Source: {provenance.get('source_name', provenance.get('source_id', ''))}",
+                    f"Origin lineage: {'; '.join(origin_labels(card.get('origin_links', []))) or 'none'}",
                 ]
             )
         )
     source_note = json.dumps(source_payload, ensure_ascii=False, indent=2) if source_payload else "{}"
-    return f"""# M2 Knowledge-based Review
+    return f"""# M2 Research Decision Brief
 
-You are the M2 domain advisory agent. Answer the research question using ONLY the approved knowledge cards below as factual evidence.
+You are the M2 Research Direction and Argument Advisor. Create a Research Decision Brief using ONLY the approved knowledge cards below as factual evidence.
 Separate supported findings from your interpretation. If the evidence is insufficient, say exactly what is missing and propose literature supplementation topics.
 
 ## Question
@@ -47,23 +49,26 @@ Separate supported findings from your interpretation. If the evidence is insuffi
 ## Approved Knowledge Cards
 {chr(10).join(evidence_lines) if evidence_lines else '(no approved evidence selected)'}
 
-## Required Report Structure
-### Current Answer
-A concise answer to the question based on the selected cards.
+## Required Brief Structure
+### 판단할 논점
+State the decision or clarification needed now, not merely the incoming question.
 
-### Evidence
-For each important point, cite the supporting card ID such as [kc-...].
+### 현시점 권고
+Give one concise, qualified recommendation. If evidence is insufficient, explicitly recommend withholding judgment.
 
-### Interpretation and Implications
-Explain what follows from the evidence for the current research context. Clearly mark inference as interpretation.
+### 확인된 근거
+For each important point, cite supporting card IDs such as [kc-...]. Separate facts from interpretation.
 
-### Constraints and Unresolved Issues
-List conditions, limitations, contradictions, or unresolved issues.
+### 해석과 선택지
+Explain implications for the current research context and present viable alternatives where relevant.
 
-### Knowledge Gaps / M1 Supplementation Need
-If more literature is required, state concrete missing evidence and search directions. If no supplementation is needed, write "None".
+### 반론·한계·숨은 가정
+List conditions, limitations, contradictions, counterarguments, and hidden assumptions.
 
-### Question Refinement
+### 다음 행동
+Choose one: researcher confirmation, M1 evidence supplementation, external fact checking, or no further action. If M1 supplementation is needed, state concrete missing evidence and search directions. If it is not needed, write "None".
+
+### 질문 구체화
 If the question should be narrowed, split, or made more precise, propose one refined question. Otherwise write "No change".
 """
 
@@ -72,7 +77,7 @@ def validate_manual_m2_report(text: str, *, valid_card_ids: set[str] | None = No
     cleaned = (text or "").strip()
     if len(cleaned) < 120:
         return False, "응답이 너무 짧습니다. 질문에 대한 답변·근거·한계가 포함된 전체 보고서를 붙여넣으세요."
-    required_any = ["Current Answer", "현재", "Evidence", "근거"]
+    required_any = ["Current Answer", "현재", "Evidence", "근거", "판단할 논점", "현시점 권고"]
     if not any(token.lower() in cleaned.lower() for token in required_any):
         return False, "답변 또는 근거 섹션을 확인할 수 없습니다. 제공된 복구 프롬프트의 보고서 구조를 유지해주세요."
     if valid_card_ids:

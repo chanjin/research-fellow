@@ -1,8 +1,37 @@
 import sqlite3
 from pathlib import Path
+from urllib.error import HTTPError
 
 from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, promote_question
+from research_fellow.application.paper_shelf import pasted_paper_text_upload
 from research_fellow.storage import Ledger
+
+
+def test_pasted_paper_text_becomes_a_storable_source_document() -> None:
+    body="A full-text paragraph with methods, results, and limitations. "*12
+    upload=pasted_paper_text_upload("Agent safety: evidence / review",body)
+    assert upload.name.endswith(".txt")
+    assert "/" not in upload.name
+    decoded=upload.getvalue().decode("utf-8")
+    assert "Paper title: Agent safety" in decoded
+    assert body.strip() in decoded
+    try:pasted_paper_text_upload("Too short","abstract only")
+    except ValueError as error:assert "최소" in str(error)
+    else:raise AssertionError("short pasted text must be rejected")
+
+
+def test_blocked_source_url_explains_manual_source_fallback(monkeypatch) -> None:
+    from research_fellow.application import paper_shelf
+    def blocked(*args,**kwargs):
+        raise HTTPError("https://publisher.example/paper",403,"Forbidden",None,None)
+    monkeypatch.setattr(paper_shelf,"urlopen",blocked)
+    try:paper_shelf.document_from_source_url({"title":"Blocked paper","source_url":"https://publisher.example/paper"})
+    except ValueError as error:
+        message=str(error)
+        assert "HTTP 403" in message
+        assert "PDF/TXT/MD" in message
+        assert "붙여" in message
+    else:raise AssertionError("HTTP 403 must be converted to an actionable source-registration error")
 
 
 def test_paper_asset_keeps_reading_and_promotion_history(tmp_path: Path) -> None:

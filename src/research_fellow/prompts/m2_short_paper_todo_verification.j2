@@ -1,0 +1,16 @@
+You are M2 acting as a strict completion checker for one Revision To-do. Do not rewrite the sentence. Decide whether the revised sentence now satisfies the original problem and every observable completion criterion using only the current sentence and linked evidence. A fluent rewrite is not sufficient. If evidence is still missing, return needs_more_work and choose literature_search or knowledge_search as the next action. If a researcher judgment is missing, choose researcher_input. If evidence is sufficient but wording still fails, choose revise_again.
+
+PAPER TITLE: {{ project.title }}
+RESEARCH QUESTION: {{ project.research_question }}
+TODO ID: {{ todo.todo_id }}
+SENTENCE ID: {{ todo.sentence_id }}
+ORIGINAL PROBLEM: {{ todo.problem }}
+COMPLETION CRITERION: {{ todo.completion_criteria }}
+RESEARCHER RESPONSE: {{ todo.researcher_response }}
+CURRENT REVISED SENTENCE: {{ current_sentence.text }}
+LINKED EVIDENCE CARDS:
+{% for card in evidence_cards %}- {{ card.card_id }} | {{ card.title }} | {{ card.claim }} | conditions={{ card.conditions }} | limits={{ card.limits }}
+{% endfor %}
+
+Return JSON only:
+{"todo_id":"{{ todo.todo_id }}","sentence_id":"{{ todo.sentence_id }}","verdict":"resolved|needs_more_work","reason":"decision grounded in the completion criterion","criteria_checks":[{"criterion":"observable test","satisfied":true,"evidence":"sentence text or card ID"}],"remaining_gap":"empty when resolved; otherwise exact missing information or revision","next_action":"close|researcher_input|knowledge_search|literature_search|revise_again"}

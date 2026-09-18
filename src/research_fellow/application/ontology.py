@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import math
 
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever, RetrievalResult
 
@@ -75,13 +76,24 @@ def ontology_dot(
     types: list[dict[str, Any]],
     relations: list[dict[str, Any]],
     facets: list[dict[str, Any]] | None = None,
+    type_highlights: dict[str, str] | None = None,
 ) -> str:
-    """Graphviz projection of the ontology schema, grouped by facet when available."""
+    """Graphviz projection, with optional version-change status colours."""
     facets = facets or []
+    type_highlights = type_highlights or {}
+    status_colours = {"new": "#C6F6D5", "changed": "#FDE68A"}
+
+    def node_line(item: dict[str, Any], base_colour: str = "#F5F7FA", indent: str = "  ") -> str:
+        type_id = str(item["type_id"])
+        status = type_highlights.get(type_id, "")
+        fill = status_colours.get(status, base_colour)
+        border = "#15803D" if status == "new" else "#B45309" if status == "changed" else "#667085"
+        penwidth = "2.8" if status else "1"
+        return f'{indent}"{type_id}" [label="{_escape(item["name"])}", fillcolor="{fill}", color="{border}", penwidth="{penwidth}"];'
     lines = [
         "digraph ontology {",
         '  graph [rankdir="LR", bgcolor="transparent", pad="0.2", compound="true"];',
-        '  node [shape="box", style="rounded", fontname="Arial", fontsize="11"];',
+        '  node [shape="box", style="rounded,filled", fillcolor="#F5F7FA", fontname="Arial", fontsize="11"];',
         '  edge [fontname="Arial", fontsize="10"];',
     ]
     type_ids = {str(item["type_id"]) for item in types}
@@ -94,14 +106,14 @@ def ontology_dot(
             facet = facet_by_id[str(facet_id)]
             cluster_id = "cluster_" + str(facet_id).replace("-", "_")
             lines.append(f'  subgraph "{cluster_id}" {{')
-            lines.append(f'    label="{_escape(facet["name"])}";')
-            lines.append('    style="rounded,dashed";')
+            lines.append(f'    label="FACET · {_escape(facet["name"])}"; labelloc="t"; labeljust="l"; fontsize="13"; fontname="Arial Bold";')
+            lines.append(f'    style="rounded,dashed"; color="{_escape(facet.get("color") or "#9AA4B2")}"; penwidth="2"; margin="18";')
             for item in members:
-                lines.append(f'    "{item["type_id"]}" [label="{_escape(item["name"])}"];')
+                lines.append(node_line(item, str(facet.get("color") or "#F5F7FA"), "    "))
             lines.append("  }")
         else:
             for item in members:
-                lines.append(f'  "{item["type_id"]}" [label="{_escape(item["name"])}"];')
+                lines.append(node_line(item))
     for relation in relations:
         source = str(relation["source_type_id"]); target = str(relation["target_type_id"])
         if source in type_ids and target in type_ids:
@@ -158,3 +170,42 @@ def ontology_context_dot(
         lines.append(f'  "{relation["source_type_id"]}" -> "{relation["target_type_id"]}" [label="{_escape(relation["relation_name"])}"];')
     lines.append("}")
     return "\n".join(lines)
+
+
+def ontology_plotly_figure(
+    types: list[dict[str, Any]], relations: list[dict[str, Any]],
+    facets: list[dict[str, Any]] | None = None,
+    type_highlights: dict[str, str] | None = None,
+) -> Any | None:
+    """Zoomable/pannable Type graph. Returns None when Plotly is unavailable."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+    facets = facets or []; type_highlights = type_highlights or {}
+    facet_by_id = {str(item["facet_id"]): item for item in facets}
+    ordered = sorted(types, key=lambda item: (str(item.get("facet_name") or ""), str(item.get("name") or "")))
+    count = max(1, len(ordered)); positions: dict[str, tuple[float, float]] = {}
+    for index, item in enumerate(ordered):
+        angle = (2 * math.pi * index / count) - math.pi / 2
+        radius = 1.0 + 0.16 * (index % 3)
+        positions[str(item["type_id"])] = (radius * math.cos(angle), radius * math.sin(angle))
+    traces: list[Any] = []
+    for relation in relations:
+        source = positions.get(str(relation.get("source_type_id"))); target = positions.get(str(relation.get("target_type_id")))
+        if not source or not target: continue
+        traces.append(go.Scatter(x=[source[0], target[0]], y=[source[1], target[1]], mode="lines", line={"color":"#98A2B3","width":1.5}, hoverinfo="text", text=[str(relation.get("description") or relation.get("relation_name") or ""), ""], showlegend=False))
+        mx, my = (source[0]+target[0])/2, (source[1]+target[1])/2
+        traces.append(go.Scatter(x=[mx], y=[my], mode="text", text=[str(relation.get("relation_name") or "")], textfont={"size":10,"color":"#475467"}, hoverinfo="text", hovertext=[str(relation.get("description") or "")], showlegend=False))
+    x=[]; y=[]; labels=[]; colours=[]; borders=[]; hover=[]
+    for item in ordered:
+        type_id=str(item["type_id"]); px,py=positions[type_id]; status=type_highlights.get(type_id, "")
+        facet=facet_by_id.get(str(item.get("facet_id") or ""), {})
+        colours.append("#C6F6D5" if status=="new" else "#FDE68A" if status=="changed" else str(facet.get("color") or "#E4E7EC"))
+        borders.append("#15803D" if status=="new" else "#B45309" if status=="changed" else "#667085")
+        x.append(px); y.append(py); labels.append(str(item.get("name") or type_id))
+        hover.append(f"<b>{item.get('name')}</b><br>Facet: {item.get('facet_name') or '미지정'}<br>{item.get('description') or '설명 없음'}<br>Cards: {item.get('card_count', 0)}")
+    traces.append(go.Scatter(x=x,y=y,mode="markers+text",text=labels,textposition="top center",customdata=[str(item["type_id"]) for item in ordered],hovertext=hover,hoverinfo="text",marker={"size":34,"color":colours,"line":{"color":borders,"width":3}},showlegend=False))
+    figure=go.Figure(data=traces)
+    figure.update_layout(height=650, margin={"l":20,"r":20,"t":20,"b":20}, dragmode="pan", hovermode="closest", xaxis={"visible":False}, yaxis={"visible":False,"scaleanchor":"x","scaleratio":1}, plot_bgcolor="#FFFFFF")
+    return figure

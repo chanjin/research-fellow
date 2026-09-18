@@ -8,7 +8,8 @@ from pathlib import Path
 from research_fellow.application.meaning_summary import (
     delta_inputs, delta_meaning_summary_prompt, deterministic_delta_summary, latest_summary, record_delta_summary,
 )
-from research_fellow.application.search_profiles import run_profile, scheduled_profiles
+from research_fellow.application.search_profiles import run_intent_discovery_task, scheduled_profiles
+from research_fellow.search_configuration import configured_search_sources
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.claim_curation import submit_claim_cards
 from research_fellow.llm import ollama_draft_result, set_llm_audit_logger
@@ -27,8 +28,16 @@ def main() -> None:
     memory = KnowledgeMemory(args.data_dir / "knowledge_cards.jsonl")
     relations = RelationMemory(args.data_dir / "knowledge_relations.jsonl")
     for profile in scheduled_profiles(ledger):
-        draft_for = lambda prompt: ollama_draft_result(prompt, args.model, not args.without_ollama, profile="abstract_triage").text
-        outcome = run_profile(ledger, profile, "nightly", reviewer=draft_for)
+        try:
+            outcome = run_intent_discovery_task(
+                ledger, profile, trigger="scheduled",
+                planner=lambda prompt: ollama_draft_result(prompt, args.model, not args.without_ollama, profile="search_strategy").text,
+                triage_drafter=lambda prompt: ollama_draft_result(prompt, args.model, not args.without_ollama, profile="abstract_triage").text,
+                sources=configured_search_sources(), max_results=12,
+            )
+        except Exception as error:
+            run_id = ledger.record_search_run(profile["profile_id"], "scheduled", "", [], "failed", str(error))
+            outcome = {"run_id": run_id, "status": "failed", "candidates": [], "error": str(error)}
         if outcome["status"] == "completed" and outcome["candidates"]:
             processed = process_top_papers(profile, outcome["candidates"], args.data_dir, lambda prompt: ollama_draft_result(prompt, args.model, not args.without_ollama, profile="full_text_similarity").text, make_cards=False)
             top_three = sorted(processed, key=lambda item: item.get("full_text_similarity", 0), reverse=True)[:3]

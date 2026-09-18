@@ -1,0 +1,12 @@
+Revise only the TARGET SENTENCE identified by the supplied Revision To-do. The previous and next sentences are read-only local context: do not return revisions for them. Preserve the target's stable sentence ID. Do not rewrite the paper or introduce claims unsupported by the supplied cards. A To-do may be marked resolved only when its completion criterion is actually met. Otherwise revise conservatively and leave its annotation unresolved.
+PAPER TITLE: {{ manuscript_title }}
+RESEARCH QUESTION: {{ project.research_question }}
+TARGET AND READ-ONLY LOCAL CONTEXT:
+{% for target in targets %}
+{% if target.previous_sentence %}PREVIOUS [READ ONLY] {{ target.previous_sentence.sentence_id }}: {{ target.previous_sentence.text }}{% endif %}
+TARGET [EDIT THIS ONLY] {{ target.sentence.sentence_id }}: {{ target.sentence.text }}
+{% if target.next_sentence %}NEXT [READ ONLY] {{ target.next_sentence.sentence_id }}: {{ target.next_sentence.text }}{% endif %}
+{% endfor %}
+REVISION TO-DOS AND RESEARCHER RESPONSES: {{ comments }}
+ADDED CARDS: {% for card in added_cards %}{{ card.card_id }}={{ card.claim }}; {% endfor %}
+Return JSON only. `revisions` must contain only the TARGET sentence_id: {"summary":"...","revisions":[{"sentence_id":"s-...","after":"revised target sentence","reason":"...","resolved_annotation_ids":["..."],"new_evidence_card_ids":["kc-..."]}]}

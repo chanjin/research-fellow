@@ -50,6 +50,10 @@ def request_curation_intent(ledger: Ledger, title: str, question: str, labels: l
         "priority": priority,
         "expected_evidence": "Methods, results, limitations, and contrary evidence directly relevant to the research question.",
         "completion_condition": "Record source-grounded findings and any unresolved evidence gap for the stated research question.",
+        "origin_links": [{
+            "origin_type": "researcher_question", "origin_id": case_id,
+            "label": title or question[:80], "source_card_ids": [],
+        }],
     }
     return ledger.record(
         case_id,

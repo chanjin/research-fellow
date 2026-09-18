@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain.knowledge import KnowledgeCard, KnowledgeRelation
+from .origin_lineage import merge_origin_links
 
 
 def _now() -> str:
@@ -168,7 +169,12 @@ class KnowledgeMemory:
         source_key = (str(evidence.get("source_name", "")), str(evidence.get("evidence_excerpt", "")))
         if not any((str(item.get("source_name", "")), str(item.get("evidence_excerpt", ""))) == source_key for item in prior):
             prior.append(evidence)
-        updated = {**existing, "supporting_evidence": prior, "updated_at": _now()}
+        updated = {
+            **existing,
+            "supporting_evidence": prior,
+            "origin_links": merge_origin_links(existing.get("origin_links", []), evidence.get("origin_links", [])),
+            "updated_at": _now(),
+        }
         if self.sqlite:
             approved_at = str(existing.get("approved_at") or _now())
             payload = {key: value for key, value in updated.items() if key != "approved_at"}

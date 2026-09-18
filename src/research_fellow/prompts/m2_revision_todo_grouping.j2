@@ -1,0 +1,23 @@
+You are M2 planning a short-paper revision. Propose groups of genuinely related active Revision To-dos.
+
+Use the whole two-page short paper to understand argument structure, but do not revise the manuscript. Do not request or infer paper full text at this stage. Group two to four To-dos only when they concern the same claim, require substantially shared evidence, or should be revised together for logical consistency. Annotation type alone is not a sufficient reason. Leave unrelated To-dos ungrouped. Each To-do may appear in at most one group.
+
+PROJECT: {{ project.title }}
+RESEARCH QUESTION: {{ project.research_question }}
+
+SHORT PAPER:
+{% for sentence in manuscript_sentences %}[{{ sentence.sentence_id }}] {{ sentence.text }}
+{% endfor %}
+
+ACTIVE REVISION TO-DOS:
+{% for todo in todos %}
+=== {{ todo.todo_id }} ===
+Sentence: [{{ todo.sentence_id }}] {{ todo.sentence_text }}
+Type: {{ todo.label }}
+Problem: {{ todo.problem }}
+Completion criterion: {{ todo.completion_criteria }}
+Search guide: {{ todo.search_guide }}
+{% endfor %}
+
+Return JSON only:
+{"groups":[{"group_id":"tg-01","title":"substantive group title","reason":"why these To-dos should be handled together","todo_ids":["todo-...","todo-..."],"shared_evidence_need":"common evidence or reasoning need","recommended_action":"literature_search|knowledge_review|researcher_input|revision","shared_search":{"title":"substantive M1 search title or empty","target":"shared question","research_context":"short-paper claim, included To-dos, and remaining gap","expected_evidence":"specific shared evidence","completion_condition":"observable completion condition"}}],"ungrouped_todo_ids":["todo-..."]}

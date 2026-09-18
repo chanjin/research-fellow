@@ -8,6 +8,7 @@ from typing import Any
 
 from research_fellow.domain.knowledge import KnowledgeCard
 from research_fellow.infrastructure.document_reader import ExtractedDocument
+from research_fellow.origin_lineage import origin_research_context
 from research_fellow.storage import Ledger
 
 
@@ -272,10 +273,12 @@ def parse_second_pass_reviews(text: str) -> list[dict[str, Any]]:
 
 def promote_question(ledger: Ledger, paper: dict[str, Any], item: dict[str, Any], comment: str) -> str:
     """Turn a reviewed reading interpretation into a claim candidate, not a question card."""
+    lineage_context = origin_research_context(paper.get("origin_links", []))
+    card_context = "\n\n".join(filter(None, [str(item.get("suggested_context") or item.get("question") or "").strip(), lineage_context]))
     card = KnowledgeCard(
         card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}", title=item["question"][:72], source_kind="external_paper",
         claim=item["tentative_answer"], explanation=comment,
-        context=str(item.get("suggested_context") or item.get("question") or ""),
+        context=card_context,
         implication=str(item.get("suggested_implication") or item.get("research_relevance") or ""),
         source_excerpt=str(item.get("suggested_source_excerpt") or "\n".join(item.get("evidence", [])))[:3200],
         labels=[], evidence_excerpt="\n".join(item["evidence"])[:1600],
@@ -284,6 +287,7 @@ def promote_question(ledger: Ledger, paper: dict[str, Any], item: dict[str, Any]
             "source_name": paper["title"], "paper_id": paper["paper_id"], "grounding": "paper_reading_review",
             "reading_question": item["question"],
         },
+        origin_links=list(paper.get("origin_links", [])),
     ).model_dump(mode="json")
     case_id = ledger.create_case("research", f"Paper reading promotion: {paper['title'][:72]}")
     return ledger.record(case_id, "decision_request", "m1", ["researcher"], "knowledge_card", {

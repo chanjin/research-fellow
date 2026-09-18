@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from research_fellow.infrastructure.prompt_renderer import render_prompt
+from research_fellow.origin_lineage import origin_labels
 
 
 def _card_view(card: dict[str, Any], reference: str) -> dict[str, Any]:
@@ -24,6 +25,7 @@ def _card_view(card: dict[str, Any], reference: str) -> dict[str, Any]:
         "conditions": str(card.get("conditions", "")),
         "limits": str(card.get("limits", "")),
         "source_name": str(provenance.get("source_name", "미상")),
+        "origin_labels": origin_labels(card.get("origin_links", [])),
     }
 
 

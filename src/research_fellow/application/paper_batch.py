@@ -35,6 +35,7 @@ def process_top_papers(profile: dict[str, Any], candidates: list[dict[str, Any]]
             cards = build_simple_claim_cards(document, "외부 논문", claims, profile["keywords"])
             for card in cards:
                 card["provenance"] = {"source_name": candidate["title"], "source_url": candidate["url"], "grounding": "full_text_extracted_pending"}
+                card["origin_links"] = list(candidate.get("origin_links", []))
             results.append({**candidate, "pdf_path": str(pdf_path), "full_text_status": "completed", "full_text_review": relevance, "full_text_similarity": similarity, "candidate_cards": cards, "evidence_status": "full_text_extracted_pending"})
         except Exception as error:
             results.append({**candidate, "full_text_status": "failed", "full_text_error": str(error), "candidate_cards": [], "evidence_status": "abstract_only_pending"})

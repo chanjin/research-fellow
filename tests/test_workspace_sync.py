@@ -104,7 +104,10 @@ class WorkspaceSyncTests(unittest.TestCase):
             Ledger(server_db)
             with local.connect() as conn:
                 conn.execute(
-                    "INSERT INTO paper_shelf VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    """INSERT INTO paper_shelf
+                       (paper_id,title,authors_json,publication_year,source_url,source_id,pdf_path,labels_json,
+                        shelf_status,reading_status,asset_type,intake_source,created_at,updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     ("p1", "Paper", "[]", "2026", "", "doi:x", "/local/paper.pdf", "[]", "reference", "read", "paper", "manual", "2026-01-01", "2026-01-01"),
                 )
             WorkspaceSync(local_db, server_db).apply()

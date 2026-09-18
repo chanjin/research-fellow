@@ -172,6 +172,17 @@ def create_exploration_intent_for_rq(ledger: Ledger, rq: dict[str, Any], priorit
     gap = str(rq.get("gap_or_tension", "")).strip()
     context = str(rq.get("research_context", "")).strip()
     need = str(rq.get("exploration_need", "")).strip()
+    rq_id = str(rq.get("rq_id") or intent_id)
+    source_card_ids = [str(value) for value in rq.get("source_card_ids", []) if str(value)]
+    origin_links = [{
+        "origin_type": "researcher_question", "origin_id": rq_id,
+        "label": question[:100], "source_card_ids": source_card_ids,
+    }]
+    if source_card_ids:
+        origin_links.append({
+            "origin_type": "m2_knowledge", "origin_id": rq_id,
+            "label": f"{question[:80]} 관련 지식 보완", "source_card_ids": source_card_ids,
+        })
     intent = CurationIntent(
         intent_id=intent_id,
         title=f"RQ 탐색 · {question[:45]}",
@@ -187,6 +198,7 @@ def create_exploration_intent_for_rq(ledger: Ledger, rq: dict[str, Any], priorit
         expected_evidence=need or "질문의 전제, 반대 근거, 적용 조건, 관련 방법 및 사례를 확인할 수 있는 출처 기반 근거",
         completion_condition="질문의 핵심 공백에 대해 출처가 확인된 지식카드 또는 명시적인 미해결 지식 공백을 M2에 보고한다.",
         execution_mode="manual", created_by="m2",
+        origin_links=origin_links,
     )
     case_id = ledger.create_case("research", question[:80])
     request_id = ledger.record(
@@ -312,6 +324,17 @@ def create_auto_exploration_intent_for_rq(
             "phenomenon_id": duplicate["phenomenon_id"], "case_id": duplicate["case_id"], "reused": True,
         }
 
+    rq_id = str(rq.get("rq_id") or intent_id)
+    source_card_ids = [str(value) for value in rq.get("source_card_ids", []) if str(value)]
+    origin_links = [{
+        "origin_type": "researcher_question", "origin_id": rq_id,
+        "label": question[:100], "source_card_ids": source_card_ids,
+    }]
+    if source_card_ids:
+        origin_links.append({
+            "origin_type": "m2_knowledge", "origin_id": rq_id,
+            "label": f"{question[:80]} 관련 지식 보완", "source_card_ids": source_card_ids,
+        })
     intent = CurationIntent(
         intent_id=intent_id, title=f"자동 RQ 탐색 · {question[:45]}",
         purpose=need or f"이 연구질문의 핵심 지식 공백을 선행연구에서 확인한다: {rationale}",
@@ -327,6 +350,7 @@ def create_auto_exploration_intent_for_rq(
         expected_evidence=need or "질문의 전제, 반대 근거, 적용 조건, 관련 방법 및 사례를 확인할 수 있는 출처 기반 근거",
         completion_condition="질문의 핵심 공백에 대해 출처가 확인된 지식카드 또는 명시적인 미해결 지식 공백을 M2와 연구자에게 보고한다.",
         execution_mode="auto", created_by="m2_auto",
+        origin_links=origin_links,
     )
     case_id = ledger.create_case("research", f"AUTO · {question[:72]}")
     phenomenon_id = ledger.record(
@@ -457,10 +481,22 @@ def record_research_direction(
     )
     request_ids = []
     for intent in (draft.intents[:3] if create_intent_requests else []):
+        intent_payload = intent.model_dump(mode="json")
+        if not intent_payload.get("origin_links"):
+            evidence_card_ids = [str(item.card["card_id"]) for item in evidence]
+            intent_payload["origin_links"] = [{
+                "origin_type": "researcher_question", "origin_id": case_id,
+                "label": state.question[:100], "source_card_ids": evidence_card_ids,
+            }]
+            if evidence_card_ids:
+                intent_payload["origin_links"].append({
+                    "origin_type": "m2_knowledge", "origin_id": case_id,
+                    "label": f"{state.question[:80]} 관련 지식 보완", "source_card_ids": evidence_card_ids,
+                })
         request_ids.append(ledger.record(
             case_id, "decision_request", "m2", ["researcher"], "curation_intent",
             {
-                "title": f"M1 탐색 Intent 승인: {intent.title}", "intent": intent.model_dump(mode="json"),
+                "title": f"M1 탐색 Intent 승인: {intent.title}", "intent": intent_payload,
                 "next_action": "승인 시 M1 실행함으로 전달",
             },
             subject_id=intent.intent_id,

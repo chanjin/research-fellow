@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -59,6 +59,9 @@ class KnowledgeCard(BaseModel):
     # Additional source-specific evidence accumulated when a later paper supports
     # an existing Claim.  The first source remains in provenance/evidence_excerpt.
     supporting_evidence: list[dict[str, object]] = Field(default_factory=list)
+    # Structured task lineage remains queryable even though the UI presents it
+    # as compact labels. Legacy cards default to no origin links.
+    origin_links: list[dict[str, Any]] = Field(default_factory=list)
     conditions: str = ""
     limits: str = ""
     provenance: dict[str, str]

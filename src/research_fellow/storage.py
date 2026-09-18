@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain.phenomena import PhenomenonDraft, validate_payload
+from .origin_lineage import merge_origin_links, normalize_origin_links
 
 
 PHENOMENON_TYPES = {
@@ -93,7 +94,8 @@ class Ledger:
                     updated_at TEXT NOT NULL,
                     last_run_at TEXT,
                     deleted_at TEXT,
-                    deleted_note TEXT NOT NULL DEFAULT ''
+                    deleted_note TEXT NOT NULL DEFAULT '',
+                    origin_links_json TEXT NOT NULL DEFAULT '[]'
                 );
                 CREATE TABLE IF NOT EXISTS search_runs (
                     run_id TEXT PRIMARY KEY,
@@ -115,11 +117,17 @@ class Ledger:
                     search_plan_json TEXT NOT NULL DEFAULT '{}',
                     search_summary TEXT NOT NULL DEFAULT '',
                     results_json TEXT NOT NULL DEFAULT '[]',
+                    origin_card_ids_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_literature_discovery_sessions_created
                     ON literature_discovery_sessions(created_at DESC);
+                CREATE TABLE IF NOT EXISTS literature_discovery_workspace (
+                    workspace_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS literature_references (
                     reference_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL DEFAULT '',
@@ -131,6 +139,17 @@ class Ledger:
                     status TEXT NOT NULL DEFAULT 'selected',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_projects (
+                    project_id TEXT PRIMARY KEY, title TEXT NOT NULL, research_question TEXT NOT NULL,
+                    origin_type TEXT NOT NULL, origin_ids_json TEXT NOT NULL DEFAULT '[]',
+                    stage TEXT NOT NULL DEFAULT 'short_paper', status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_project_events (
+                    event_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES paper_projects(project_id)
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_literature_references_topic_key
                     ON literature_references(topic, canonical_key);
@@ -185,6 +204,7 @@ class Ledger:
                     reading_status TEXT NOT NULL DEFAULT 'unread',
                     asset_type TEXT NOT NULL DEFAULT 'paper',
                     intake_source TEXT NOT NULL DEFAULT 'manual',
+                    origin_links_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -238,6 +258,7 @@ class Ledger:
                     facet_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
+                    color TEXT NOT NULL DEFAULT '#DCEBFF',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     deleted_at TEXT
@@ -280,6 +301,28 @@ class Ledger:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_type_relation_unique
                     ON ontology_type_relations(source_type_id, target_type_id, lower(relation_name))
                     WHERE deleted_at IS NULL;
+                CREATE TABLE IF NOT EXISTS ontology_versions (
+                    version_id TEXT PRIMARY KEY,
+                    version_label TEXT NOT NULL UNIQUE,
+                    base_version_id TEXT,
+                    summary TEXT NOT NULL DEFAULT '',
+                    source_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                    snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    change_json TEXT NOT NULL DEFAULT '{}',
+                    approved_at TEXT NOT NULL,
+                    approved_by TEXT NOT NULL DEFAULT 'researcher'
+                );
+                CREATE TABLE IF NOT EXISTS ontology_change_reviews (
+                    review_id TEXT PRIMARY KEY,
+                    base_version_id TEXT,
+                    source_card_ids_json TEXT NOT NULL,
+                    proposal_json TEXT NOT NULL,
+                    researcher_comment TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    approved_version_id TEXT
+                );
                 CREATE TABLE IF NOT EXISTS research_questions (
                     rq_id TEXT PRIMARY KEY,
                     question TEXT NOT NULL,
@@ -540,6 +583,11 @@ class Ledger:
                 conn.execute("ALTER TABLE search_profiles ADD COLUMN deleted_at TEXT")
             if "deleted_note" not in columns:
                 conn.execute("ALTER TABLE search_profiles ADD COLUMN deleted_note TEXT NOT NULL DEFAULT ''")
+            if "origin_links_json" not in columns:
+                conn.execute("ALTER TABLE search_profiles ADD COLUMN origin_links_json TEXT NOT NULL DEFAULT '[]'")
+            discovery_columns = {row[1] for row in conn.execute("PRAGMA table_info(literature_discovery_sessions)").fetchall()}
+            if "origin_card_ids_json" not in discovery_columns:
+                conn.execute("ALTER TABLE literature_discovery_sessions ADD COLUMN origin_card_ids_json TEXT NOT NULL DEFAULT '[]'")
             paper_columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_shelf)").fetchall()}
             if "labels_json" not in paper_columns:
                 conn.execute("ALTER TABLE paper_shelf ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'")
@@ -547,6 +595,8 @@ class Ledger:
                 conn.execute("ALTER TABLE paper_shelf ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'paper'")
             if "intake_source" not in paper_columns:
                 conn.execute("ALTER TABLE paper_shelf ADD COLUMN intake_source TEXT NOT NULL DEFAULT 'manual'")
+            if "origin_links_json" not in paper_columns:
+                conn.execute("ALTER TABLE paper_shelf ADD COLUMN origin_links_json TEXT NOT NULL DEFAULT '[]'")
             analysis_columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_analyses)").fetchall()}
             if "reading_raw_output" not in analysis_columns:
                 conn.execute("ALTER TABLE paper_analyses ADD COLUMN reading_raw_output TEXT NOT NULL DEFAULT ''")
@@ -563,7 +613,15 @@ class Ledger:
             ontology_type_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_types)").fetchall()}
             if "facet_id" not in ontology_type_columns:
                 conn.execute("ALTER TABLE ontology_types ADD COLUMN facet_id TEXT")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "16"))
+            ontology_facet_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_facets)").fetchall()}
+            if "color" not in ontology_facet_columns:
+                conn.execute("ALTER TABLE ontology_facets ADD COLUMN color TEXT NOT NULL DEFAULT '#DCEBFF'")
+            ontology_version_columns = {row[1] for row in conn.execute("PRAGMA table_info(ontology_versions)").fetchall()}
+            if "snapshot_json" not in ontology_version_columns:
+                conn.execute("ALTER TABLE ontology_versions ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
+            if "change_json" not in ontology_version_columns:
+                conn.execute("ALTER TABLE ontology_versions ADD COLUMN change_json TEXT NOT NULL DEFAULT '{}'")
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "18"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()
@@ -807,6 +865,11 @@ class Ledger:
         """Create one editable M1 search profile when a researcher approves an Intent."""
         intent_id = str(intent["intent_id"])
         timestamp = now()
+        origin_links = normalize_origin_links(intent.get("origin_links", []))
+        for link in origin_links:
+            link["research_title"] = str(link.get("research_title") or intent.get("title") or "").strip()
+            link["research_question"] = str(link.get("research_question") or intent.get("question") or "").strip()
+            link["research_context"] = str(link.get("research_context") or intent.get("research_context") or intent.get("context") or "").strip()
         profile = {
             "profile_id": f"sp-{uuid.uuid4().hex[:12]}", "intent_id": intent_id,
             "title": str(intent["title"]), "question": str(intent["question"]),
@@ -819,6 +882,7 @@ class Ledger:
             # the Intent context and M2 translates them on the profile screen.
             "keywords": [str(item) for item in intent.get("labels", []) if _is_english_search_term(str(item))],
             "core_terms": [],
+            "origin_links": normalize_origin_links(origin_links),
             "cadence": "daily", "is_active": True, "created_at": timestamp, "updated_at": timestamp, "last_run_at": None,
         }
         with self.connect() as conn:
@@ -826,10 +890,10 @@ class Ledger:
             if row:
                 return self._search_profile_row(row)
             conn.execute(
-                "INSERT INTO search_profiles (profile_id, intent_id, title, question, context, keywords_json, core_terms_json, cadence, is_active, created_at, updated_at, last_run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO search_profiles (profile_id, intent_id, title, question, context, keywords_json, core_terms_json, cadence, is_active, created_at, updated_at, last_run_at, origin_links_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (profile["profile_id"], profile["intent_id"], profile["title"], profile["question"], profile["context"],
                  json.dumps(profile["keywords"], ensure_ascii=False), json.dumps(profile["core_terms"], ensure_ascii=False), profile["cadence"], int(profile["is_active"]),
-                 timestamp, timestamp, None),
+                 timestamp, timestamp, None, json.dumps(profile["origin_links"], ensure_ascii=False)),
             )
         return profile
 
@@ -838,6 +902,11 @@ class Ledger:
         result = dict(row)
         result["keywords"] = json.loads(result.pop("keywords_json"))
         result["core_terms"] = json.loads(result.pop("core_terms_json", "[]"))
+        result["origin_links"] = normalize_origin_links(json.loads(result.pop("origin_links_json", "[]")))
+        for link in result["origin_links"]:
+            link["research_title"] = str(link.get("research_title") or result.get("title") or "").strip()
+            link["research_question"] = str(link.get("research_question") or result.get("question") or "").strip()
+            link["research_context"] = str(link.get("research_context") or result.get("context") or "").strip()
         result["is_active"] = bool(result["is_active"])
         return result
 
@@ -864,6 +933,16 @@ class Ledger:
             conn.execute(
                 "UPDATE search_profiles SET context=?, keywords_json=?, core_terms_json=?, cadence=?, is_active=?, updated_at=? WHERE profile_id=?",
                 (context.strip(), json.dumps(cleaned, ensure_ascii=False), json.dumps(core_terms, ensure_ascii=False), cadence, int(is_active), now(), profile_id),
+            )
+
+    def update_search_profile_policy(self, profile_id: str, *, context: str, cadence: str, is_active: bool) -> None:
+        """Update LLM-task policy without requiring a persistent keyword list."""
+        if cadence not in {"daily", "weekly", "manual"}:
+            raise ValueError("지원하지 않는 탐색 주기입니다.")
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE search_profiles SET context=?, cadence=?, is_active=?, updated_at=? WHERE profile_id=?",
+                (context.strip(), cadence, int(is_active), now(), profile_id),
             )
 
     def complete_search_profile(self, profile_id: str) -> None:
@@ -911,18 +990,55 @@ class Ledger:
         self, *, topic: str, research_context: str = "", target_count: int = 12,
         discovery_source: str = "internal", search_plan: dict[str, Any] | None = None,
         search_summary: str = "", results: list[dict[str, Any]] | None = None,
+        origin_card_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         session_id, timestamp = f"lds-{uuid.uuid4().hex[:12]}", now()
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO literature_discovery_sessions
-                   (session_id, topic, research_context, target_count, discovery_source, search_plan_json, search_summary, results_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (session_id, topic, research_context, target_count, discovery_source, search_plan_json, search_summary, results_json, origin_card_ids_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session_id, topic.strip(), research_context.strip(), int(target_count), discovery_source.strip() or "internal",
                  json.dumps(search_plan or {}, ensure_ascii=False), search_summary.strip(),
-                 json.dumps(results or [], ensure_ascii=False), timestamp, timestamp),
+                 json.dumps(results or [], ensure_ascii=False), json.dumps(sorted(set(origin_card_ids or [])), ensure_ascii=False), timestamp, timestamp),
             )
         return self.literature_discovery_session(session_id) or {}
+
+    def save_literature_discovery_workspace(
+        self, payload: dict[str, Any], *, workspace_id: str = "active"
+    ) -> dict[str, Any]:
+        """Persist the current discovery workbench independently from append-only history."""
+        timestamp = now()
+        clean_payload = dict(payload)
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO literature_discovery_workspace (workspace_id, payload_json, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(workspace_id) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
+                (workspace_id, json.dumps(clean_payload, ensure_ascii=False, default=str), timestamp),
+            )
+        return {**clean_payload, "workspace_id": workspace_id, "updated_at": timestamp}
+
+    def literature_discovery_workspace(self, *, workspace_id: str = "active") -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json, updated_at FROM literature_discovery_workspace WHERE workspace_id=?",
+                (workspace_id,),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(str(row["payload_json"]) or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        return {**payload, "workspace_id": workspace_id, "updated_at": row["updated_at"]}
+
+    def clear_literature_discovery_workspace(self, *, workspace_id: str = "active") -> bool:
+        with self.connect() as conn:
+            result = conn.execute(
+                "DELETE FROM literature_discovery_workspace WHERE workspace_id=?", (workspace_id,)
+            )
+        return result.rowcount == 1
 
     def update_literature_discovery_session_results(
         self, session_id: str, results: list[dict[str, Any]], *, search_summary: str | None = None
@@ -948,6 +1064,90 @@ class Ledger:
             ).fetchall()
         return [self._literature_discovery_session_row(row) for row in rows]
 
+    def unified_literature_discovery_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Project ad-hoc card searches and periodic Intent runs into one history."""
+        records: list[dict[str, Any]] = []
+        for session in self.literature_discovery_sessions(limit=limit):
+            session_origin_links = [{
+                "origin_type": "m2_knowledge", "origin_id": str(card_id),
+                "label": f"지식카드 {card_id}", "source_card_ids": [str(card_id)],
+            } for card_id in session.get("origin_card_ids", [])]
+            records.append({
+                "run_id": session["session_id"], "session_id": session["session_id"],
+                "origin_type": "knowledge_cards", "origin_ids": list(session.get("origin_card_ids", [])),
+                "execution_mode": "ad_hoc", "profile_id": "", "intent_id": "",
+                "topic": session.get("topic", ""), "research_context": session.get("research_context", ""),
+                "sources": list((session.get("search_plan") or {}).get("sources", [])),
+                "trigger": session.get("discovery_source", "internal"), "status": "completed",
+                "results": list(session.get("results", [])), "search_summary": session.get("search_summary", ""),
+                "origin_links": normalize_origin_links(session_origin_links),
+                "query": "", "error": "", "created_at": session.get("created_at", ""), "updated_at": session.get("updated_at", ""),
+            })
+        profiles = {str(item["profile_id"]): item for item in self.search_profiles(include_deleted=True)}
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM search_runs ORDER BY created_at DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
+        for row in rows:
+            run = dict(row); profile = profiles.get(str(run.get("profile_id")), {})
+            try:
+                results = json.loads(run.pop("candidates_json") or "[]")
+            except Exception:
+                results = []
+            try:
+                query_metadata = json.loads(str(run.get("query") or "{}"))
+                if not isinstance(query_metadata, dict):
+                    query_metadata = {}
+            except Exception:
+                query_metadata = {}
+            trigger = str(run.get("trigger") or "")
+            records.append({
+                "run_id": run.get("run_id", ""), "session_id": run.get("run_id", ""),
+                "origin_type": "research_intent", "origin_ids": [profile.get("intent_id")] if profile.get("intent_id") else [],
+                "execution_mode": "periodic" if trigger == "scheduled" else "manual",
+                "profile_id": run.get("profile_id", ""), "intent_id": profile.get("intent_id", ""),
+                "topic": query_metadata.get("topic") or profile.get("title") or profile.get("question") or "Research Intent search",
+                "research_context": query_metadata.get("research_context") or profile.get("context", ""),
+                "sources": list(query_metadata.get("sources") or []),
+                "origin_links": normalize_origin_links(query_metadata.get("origin_links") or profile.get("origin_links", [])),
+                "trigger": trigger, "status": run.get("status", ""),
+                "results": results, "search_summary": "", "query": run.get("query", ""),
+                "error": run.get("error", ""), "created_at": run.get("created_at", ""), "updated_at": run.get("created_at", ""),
+            })
+        records.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return records[:max(1, int(limit))]
+
+    def create_paper_project(self, *, title: str, research_question: str, origin_type: str, origin_ids: list[str]) -> dict[str, Any]:
+        project_id, timestamp = f"pp-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            conn.execute("INSERT INTO paper_projects VALUES (?,?,?,?,?,?,?,?,?)", (project_id, title.strip(), research_question.strip(), origin_type, json.dumps(origin_ids, ensure_ascii=False), "short_paper", "active", timestamp, timestamp))
+        return self.paper_project(project_id) or {}
+
+    def paper_project(self, project_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn: row = conn.execute("SELECT * FROM paper_projects WHERE project_id=?", (project_id,)).fetchone()
+        if not row: return None
+        item=dict(row); item["origin_ids"]=json.loads(item.pop("origin_ids_json") or "[]"); item["events"]=self.paper_project_events(project_id); return item
+
+    def paper_projects(self) -> list[dict[str, Any]]:
+        with self.connect() as conn: rows=conn.execute("SELECT project_id FROM paper_projects ORDER BY updated_at DESC").fetchall()
+        return [item for row in rows if (item:=self.paper_project(str(row["project_id"]))) is not None]
+
+    def add_paper_project_event(self, project_id: str, event_type: str, payload: dict[str, Any]) -> str:
+        event_id, timestamp=f"ppe-{uuid.uuid4().hex[:12]}", now()
+        with self.connect() as conn:
+            conn.execute("INSERT INTO paper_project_events VALUES (?,?,?,?,?)", (event_id, project_id, event_type, json.dumps(payload, ensure_ascii=False), timestamp))
+            conn.execute("UPDATE paper_projects SET updated_at=? WHERE project_id=?", (timestamp, project_id))
+        return event_id
+
+    def paper_project_events(self, project_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn: rows=conn.execute("SELECT * FROM paper_project_events WHERE project_id=? ORDER BY created_at", (project_id,)).fetchall()
+        result=[]
+        for row in rows:
+            item=dict(row); item["payload"]=json.loads(item.pop("payload_json") or "{}"); result.append(item)
+        return result
+
+    def advance_paper_project(self, project_id: str, stage: str) -> None:
+        if stage not in {"short_paper", "full_paper"}: raise ValueError("지원하지 않는 논문 단계입니다.")
+        with self.connect() as conn: conn.execute("UPDATE paper_projects SET stage=?, updated_at=? WHERE project_id=?", (stage, now(), project_id))
+
     def literature_discovery_session(self, session_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
@@ -966,6 +1166,10 @@ class Ledger:
             item["results"] = json.loads(item.pop("results_json") or "[]")
         except Exception:
             item["results"] = []
+        try:
+            item["origin_card_ids"] = json.loads(item.pop("origin_card_ids_json", "[]") or "[]")
+        except Exception:
+            item["origin_card_ids"] = []
         return item
 
     def upsert_literature_reference(
@@ -1714,14 +1918,14 @@ class Ledger:
 
     # --- Ontology schema -------------------------------------------------
 
-    def create_ontology_facet(self, name: str, description: str = "") -> dict[str, Any]:
+    def create_ontology_facet(self, name: str, description: str = "", color: str = "#DCEBFF") -> dict[str, Any]:
         name = name.strip()
         if not name:
             raise ValueError("Facet 이름은 비어 있을 수 없습니다.")
         facet_id, timestamp = f"of-{uuid.uuid4().hex[:12]}", now()
         with self.connect() as conn:
             try:
-                conn.execute("INSERT INTO ontology_facets VALUES (?, ?, ?, ?, ?, NULL)", (facet_id, name, description.strip(), timestamp, timestamp))
+                conn.execute("INSERT INTO ontology_facets(facet_id,name,description,color,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,NULL)", (facet_id, name, description.strip(), color.strip() or "#DCEBFF", timestamp, timestamp))
             except sqlite3.IntegrityError as error:
                 raise ValueError("같은 이름의 활성 Facet이 이미 있습니다.") from error
             row = conn.execute("SELECT * FROM ontology_facets WHERE facet_id=?", (facet_id,)).fetchone()
@@ -1873,6 +2077,22 @@ class Ledger:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def update_ontology_type_relation(self, relation_id: str, *, source_type_id: str, target_type_id: str, relation_name: str, description: str = "") -> bool:
+        if source_type_id == target_type_id:
+            raise ValueError("타입 관계의 출발·도착 타입은 달라야 합니다.")
+        relation_name = relation_name.strip()
+        if not relation_name:
+            raise ValueError("타입 관계 이름은 비어 있을 수 없습니다.")
+        with self.connect() as conn:
+            try:
+                result = conn.execute(
+                    "UPDATE ontology_type_relations SET source_type_id=?, target_type_id=?, relation_name=?, description=?, updated_at=? WHERE relation_id=? AND deleted_at IS NULL",
+                    (source_type_id, target_type_id, relation_name, description.strip(), now(), relation_id),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("같은 타입 사이에 같은 이름의 활성 관계가 이미 있습니다.") from error
+        return result.rowcount == 1
+
     def delete_ontology_type_relation(self, relation_id: str) -> bool:
         with self.connect() as conn:
             result = conn.execute(
@@ -1880,6 +2100,170 @@ class Ledger:
                 (now(), now(), relation_id),
             )
         return result.rowcount == 1
+
+    def latest_ontology_version(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM ontology_versions ORDER BY approved_at DESC LIMIT 1").fetchone()
+        return self._ontology_version_row(row) if row else None
+
+    @staticmethod
+    def _ontology_version_row(row: sqlite3.Row | None) -> dict[str, Any]:
+        item = dict(row or {})
+        if item:
+            item["source_card_ids"] = json.loads(item.pop("source_card_ids_json") or "[]")
+            item["snapshot"] = json.loads(item.pop("snapshot_json", "{}") or "{}")
+            item["change"] = json.loads(item.pop("change_json", "{}") or "{}")
+        return item
+
+    def ontology_versions(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM ontology_versions ORDER BY approved_at DESC LIMIT ?", (max(1, min(int(limit), 200)),)).fetchall()
+        return [self._ontology_version_row(row) for row in rows]
+
+    def ontology_snapshot(self) -> dict[str, Any]:
+        facets = self.ontology_facets(); types = self.ontology_types(); relations = self.ontology_type_relations()
+        assignments = [
+            {"card_id": card_id, "type_id": str(item["type_id"])}
+            for item in types for card_id in self.ontology_card_ids(str(item["type_id"]))
+        ]
+        return {"facets": facets, "types": types, "relations": relations, "assignments": assignments}
+
+    def create_ontology_change_review(self, *, source_card_ids: list[str], proposal: dict[str, Any], base_version_id: str | None = None) -> dict[str, Any]:
+        review_id, timestamp = f"ocr-{uuid.uuid4().hex[:12]}", now()
+        source_ids = sorted({str(value) for value in source_card_ids if str(value)})
+        base = base_version_id or str((self.latest_ontology_version() or {}).get("version_id") or "") or None
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO ontology_change_reviews VALUES (?,?,?,?,?,?,?,?,NULL)",
+                (review_id, base, json.dumps(source_ids, ensure_ascii=False), json.dumps(proposal, ensure_ascii=False), "", "proposed", timestamp, timestamp),
+            )
+            row = conn.execute("SELECT * FROM ontology_change_reviews WHERE review_id=?", (review_id,)).fetchone()
+        return self._ontology_review_row(row)
+
+    @staticmethod
+    def _ontology_review_row(row: sqlite3.Row | None) -> dict[str, Any]:
+        item = dict(row or {})
+        if item:
+            item["source_card_ids"] = json.loads(item.pop("source_card_ids_json") or "[]")
+            item["proposal"] = json.loads(item.pop("proposal_json") or "{}")
+        return item
+
+    def ontology_change_reviews(self, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM ontology_change_reviews"; values: list[Any] = []
+        if status:
+            query += " WHERE status=?"; values.append(status)
+        query += " ORDER BY updated_at DESC LIMIT ?"; values.append(max(1, min(int(limit), 200)))
+        with self.connect() as conn:
+            rows = conn.execute(query, values).fetchall()
+        return [self._ontology_review_row(row) for row in rows]
+
+    def update_ontology_change_review_comment(self, review_id: str, comment: str) -> bool:
+        with self.connect() as conn:
+            result = conn.execute("UPDATE ontology_change_reviews SET researcher_comment=?, updated_at=? WHERE review_id=? AND status='proposed'", (comment.strip(), now(), review_id))
+        return result.rowcount == 1
+
+    def approve_ontology_change_review(self, review_id: str, *, summary: str = "", approved_by: str = "researcher") -> dict[str, Any]:
+        review = next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), None)
+        if not review or review.get("status") != "proposed":
+            raise ValueError("승인 가능한 온톨로지 변경 검토를 찾을 수 없습니다.")
+        proposal = review["proposal"]
+        before = self.ontology_snapshot()
+        facets = {str(item["name"]).casefold(): item for item in self.ontology_facets()}
+        types = {str(item["type_id"]): item for item in self.ontology_types()}
+        names = {str(item["name"]).casefold(): item for item in types.values()}
+        for item in proposal.get("new_types", []):
+            facet_name = str(item.get("facet") or "").strip()
+            facet = facets.get(facet_name.casefold()) if facet_name else None
+            if facet_name and facet is None:
+                facet = self.create_ontology_facet(facet_name, str(item.get("facet_description") or ""), str(item.get("facet_color") or "#DCEBFF"))
+                facets[facet_name.casefold()] = facet
+            name = str(item.get("name") or "").strip()
+            if name and name.casefold() not in names:
+                created = self.create_ontology_type(name, str(item.get("description") or ""), (facet or {}).get("facet_id"))
+                types[str(created["type_id"])] = created; names[name.casefold()] = created
+        updated_type_ids: list[str] = []
+        for item in proposal.get("type_updates", []):
+            type_id = str(item.get("type_id") or "")
+            current_type = types.get(type_id)
+            if current_type and self.update_ontology_type(type_id, name=str(item.get("name") or current_type["name"]), description=str(item.get("description") or ""), facet_id=current_type.get("facet_id")):
+                updated_type_ids.append(type_id)
+        types = {str(item["type_id"]): item for item in self.ontology_types()}
+        names = {str(item["name"]).casefold(): item for item in types.values()}
+        desired_by_card: dict[str, list[str]] = {str(card_id): [] for card_id in proposal.get("reviewed_card_ids", []) if str(card_id)}
+        for item in proposal.get("assignments", []):
+            card_id = str(item.get("card_id") or "").strip(); type_id = str(item.get("type_id") or "").strip()
+            if not type_id:
+                found = names.get(str(item.get("type") or "").casefold()); type_id = str((found or {}).get("type_id") or "")
+            if card_id and type_id in types:
+                desired_by_card.setdefault(card_id, []).append(type_id)
+        for card_id, desired_ids in desired_by_card.items():
+            self.set_card_ontology_types(card_id, desired_ids)
+        for item in proposal.get("relations", []):
+            source = str(item.get("source_type_id") or "") or str((names.get(str(item.get("source_type") or "").casefold()) or {}).get("type_id") or "")
+            target = str(item.get("target_type_id") or "") or str((names.get(str(item.get("target_type") or "").casefold()) or {}).get("type_id") or "")
+            if source and target and source != target and str(item.get("relation_name") or "").strip():
+                try:
+                    self.create_ontology_type_relation(source, target, str(item["relation_name"]), str(item.get("description") or ""))
+                except ValueError:
+                    pass
+        updated_relation_ids: list[str] = []
+        deleted_relation_ids: list[str] = []
+        for item in proposal.get("relation_changes", []):
+            action = str(item.get("action") or "").lower(); relation_id = str(item.get("relation_id") or "")
+            current_relations = {str(row["relation_id"]): row for row in self.ontology_type_relations()}
+            current_relation = current_relations.get(relation_id)
+            if action == "delete" and current_relation and self.delete_ontology_type_relation(relation_id):
+                deleted_relation_ids.append(relation_id)
+            elif action == "update" and current_relation:
+                if self.update_ontology_type_relation(
+                    relation_id,
+                    source_type_id=str(item.get("source_type_id") or current_relation["source_type_id"]),
+                    target_type_id=str(item.get("target_type_id") or current_relation["target_type_id"]),
+                    relation_name=str(item.get("relation_name") or current_relation["relation_name"]),
+                    description=str(item.get("description") or current_relation.get("description") or ""),
+                ):
+                    updated_relation_ids.append(relation_id)
+            elif action == "add":
+                try:
+                    self.create_ontology_type_relation(str(item.get("source_type_id") or ""), str(item.get("target_type_id") or ""), str(item.get("relation_name") or ""), str(item.get("description") or ""))
+                except ValueError:
+                    pass
+        after = self.ontology_snapshot()
+        before_assignments: dict[str, list[str]] = {}
+        after_assignments: dict[str, list[str]] = {}
+        for item in before.get("assignments", []): before_assignments.setdefault(str(item["card_id"]), []).append(str(item["type_id"]))
+        for item in after.get("assignments", []): after_assignments.setdefault(str(item["card_id"]), []).append(str(item["type_id"]))
+        assignment_changes = [
+            {"card_id": card_id, "before_type_ids": sorted(before_assignments.get(card_id, [])), "after_type_ids": sorted(after_assignments.get(card_id, []))}
+            for card_id in sorted(set(desired_by_card))
+            if sorted(before_assignments.get(card_id, [])) != sorted(after_assignments.get(card_id, []))
+        ]
+        change = {
+            "summary": summary.strip() or str(proposal.get("summary") or ""),
+            "assignment_changes": assignment_changes,
+            "new_type_ids": sorted(set(str(item["type_id"]) for item in after["types"]) - set(str(item["type_id"]) for item in before["types"])),
+            "new_relation_ids": sorted(set(str(item["relation_id"]) for item in after["relations"]) - set(str(item["relation_id"]) for item in before["relations"])),
+            "updated_type_ids": sorted(set(updated_type_ids)),
+            "updated_relation_ids": sorted(set(updated_relation_ids)),
+            "deleted_relation_ids": sorted(set(deleted_relation_ids)),
+        }
+        change["changed_type_ids"] = sorted({
+            type_id for item in assignment_changes
+            for type_id in [*item.get("before_type_ids", []), *item.get("after_type_ids", [])]
+            if type_id not in set(change["new_type_ids"])
+        })
+        change["changed_type_ids"] = sorted(set(change["changed_type_ids"]) | set(change["updated_type_ids"]))
+        previous = self.latest_ontology_version(); number = len(self.ontology_change_reviews(status="approved", limit=200)) + 1
+        version_id, timestamp = f"ov-{uuid.uuid4().hex[:12]}", now()
+        label = f"v0.{number}"
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO ontology_versions(version_id,version_label,base_version_id,summary,source_card_ids_json,snapshot_json,change_json,approved_at,approved_by) VALUES (?,?,?,?,?,?,?,?,?)",
+                (version_id, label, (previous or {}).get("version_id"), change["summary"], json.dumps(review["source_card_ids"], ensure_ascii=False), json.dumps(after, ensure_ascii=False), json.dumps(change, ensure_ascii=False), timestamp, approved_by),
+            )
+            conn.execute("UPDATE ontology_change_reviews SET status='approved', approved_version_id=?, updated_at=? WHERE review_id=?", (version_id, timestamp, review_id))
+            row = conn.execute("SELECT * FROM ontology_versions WHERE version_id=?", (version_id,)).fetchone()
+        return self._ontology_version_row(row)
 
     def delete_knowledge_relation(self, relation_id: str, note: str = "") -> bool:
         with self.connect() as conn:
@@ -1899,24 +2283,31 @@ class Ledger:
         with self.connect() as conn:
             existing = None
             if source_id:
-                existing = conn.execute("SELECT paper_id FROM paper_shelf WHERE source_id=?", (source_id,)).fetchone()
-            paper_id = str(existing["paper_id"]) if existing else str(paper.get("paper_id") or f"paper-{uuid.uuid4().hex[:12]}")
+                existing = conn.execute("SELECT paper_id, origin_links_json FROM paper_shelf WHERE source_id=?", (source_id,)).fetchone()
+            requested_paper_id = str(paper.get("paper_id") or "").strip()
+            if existing is None and requested_paper_id:
+                existing = conn.execute("SELECT paper_id, origin_links_json FROM paper_shelf WHERE paper_id=?", (requested_paper_id,)).fetchone()
+            paper_id = str(existing["paper_id"]) if existing else str(requested_paper_id or f"paper-{uuid.uuid4().hex[:12]}")
+            prior_origin_links = json.loads(existing["origin_links_json"] or "[]") if existing else []
+            origin_links = merge_origin_links(prior_origin_links, paper.get("origin_links", []))
             conn.execute(
                 """INSERT INTO paper_shelf
-                   (paper_id, title, authors_json, publication_year, source_url, source_id, pdf_path, labels_json, shelf_status, reading_status, asset_type, intake_source, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (paper_id, title, authors_json, publication_year, source_url, source_id, pdf_path, labels_json, shelf_status, reading_status, asset_type, intake_source, origin_links_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(paper_id) DO UPDATE SET
                      title=excluded.title, authors_json=excluded.authors_json, publication_year=excluded.publication_year,
                      source_url=excluded.source_url, source_id=excluded.source_id,
                      pdf_path=CASE WHEN excluded.pdf_path <> '' THEN excluded.pdf_path ELSE paper_shelf.pdf_path END,
                      labels_json=CASE WHEN excluded.labels_json <> '[]' THEN excluded.labels_json ELSE paper_shelf.labels_json END,
                      shelf_status=excluded.shelf_status, reading_status=excluded.reading_status,
-                     asset_type=excluded.asset_type, intake_source=excluded.intake_source, updated_at=excluded.updated_at""",
+                     asset_type=excluded.asset_type, intake_source=excluded.intake_source,
+                     origin_links_json=excluded.origin_links_json, updated_at=excluded.updated_at""",
                 (paper_id, title, json.dumps(paper.get("authors", []), ensure_ascii=False), str(paper.get("publication_year", "")),
                  str(paper.get("source_url", "")), source_id, str(paper.get("pdf_path", "")),
                  json.dumps(_clean_paper_labels(paper.get("labels", [])), ensure_ascii=False),
                  str(paper.get("shelf_status", "reference")), str(paper.get("reading_status", "unread")),
-                 str(paper.get("asset_type", "paper")), str(paper.get("intake_source", "manual")), timestamp, timestamp),
+                 str(paper.get("asset_type", "paper")), str(paper.get("intake_source", "manual")),
+                 json.dumps(origin_links, ensure_ascii=False), timestamp, timestamp),
             )
             abstract = str(paper.get("abstract") or paper.get("summary") or "").strip()
             if abstract:
@@ -1948,6 +2339,7 @@ class Ledger:
         item = dict(row)
         item["authors"] = json.loads(item.pop("authors_json"))
         item["labels"] = json.loads(item.pop("labels_json"))
+        item["origin_links"] = normalize_origin_links(json.loads(item.pop("origin_links_json", "[]")))
         return item
 
     def update_shelf_paper(

@@ -57,7 +57,8 @@ def decide_request(
         ledger.record(
             request["case_id"], "knowledge_update", "m1", ["m2", "researcher"],
             "knowledge_card",
-            {"title": f"승인 지식 추가: {card['title']}", "card_id": card["card_id"], "labels": card.get("labels", [])},
+            {"title": f"승인 지식 추가: {card['title']}", "card_id": card["card_id"], "labels": card.get("labels", []),
+             "origin_links": card.get("origin_links", [])},
             card["card_id"], status="completed",
         )
     elif request["subject_type"] == "curation_intent":

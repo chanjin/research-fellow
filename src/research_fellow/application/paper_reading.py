@@ -8,7 +8,6 @@ from typing import Any
 
 from research_fellow.domain.knowledge import KnowledgeCard
 from research_fellow.infrastructure.document_reader import ExtractedDocument
-from research_fellow.origin_lineage import origin_research_context
 from research_fellow.storage import Ledger
 
 
@@ -44,7 +43,7 @@ Use these exact Korean field labels in every question block. Do not omit a field
 핵심 개념: 이후 관계 작업에 쓸 도메인 개념, 쉼표 구분
 적용 대상: Claim이 다루는 객체·상황·과업, 쉼표 구분
 적용 조건: 원문에 근거한 전제·관찰 범위·설계 제약
-카드 맥락: 이 주장이 어떤 과업·비교·문제 설정에서 나온 것인지 1~2문장
+카드 맥락: 이 주장이 원 논문의 어떤 과업·비교·문제 설정에서 나온 것인지 1~2문장. 현재 연구 프로젝트, 입력된 Research context, 숏페이퍼 또는 Revision To-do를 언급하지 말 것
 설계 함의: 이 결과가 연구·설계·메모리/검색 선택 또는 의사결정에 주는 의미를 1~2문장
 주변 원문: 위 주장을 해석하는 데 필요한 짧은 원문 주변 문맥. 가능하면 p.N 표시 포함
 
@@ -59,6 +58,7 @@ Output check before responding:
 - Return one to five complete question blocks by default, and never more than ten, separated by ---.
 - Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건, 카드 맥락, 설계 함의, 주변 원문.
 - Every Evidence value must include p.N and a short source hint.
+- Card context must remain an independent, source-intrinsic description of this paper. Keep project-specific usefulness only in Research relevance; never copy the supplied Research context into Card context.
 - Return 2 to 5 independent evidence locations when the source supports them. Never return more than 5 evidence locations for one question.
 - Prefer fewer complete blocks to an incomplete response. Keep every non-evidence field concise (one or two sentences).
 """
@@ -227,6 +227,23 @@ def parse_reading_summary(text: str) -> str:
     return prefix.strip("- \n") if len(prefix) >= 80 else ""
 
 
+def independent_card_context(item: dict[str, Any], paper_summary: str = "", *, max_chars: int = 1200) -> str:
+    """Build reusable card context from the source paper, never from project lineage.
+
+    The short, claim-specific context proposed during paper reading is preferred.
+    A paper reading summary is only a fallback, so the card does not accumulate a
+    duplicate essay or the current short-paper/Revision-To-do context.
+    """
+    suggested = re.sub(r"\s+", " ", str(item.get("suggested_context") or "")).strip()
+    summary = re.sub(r"\s+", " ", str(paper_summary or "")).strip()
+    context = suggested or summary
+    if not context:
+        return ""
+    if len(context) <= max_chars:
+        return context
+    return context[:max_chars].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+
+
 def second_pass_prompt(document: ExtractedDocument, paper: dict[str, Any], questions: list[dict[str, Any]]) -> str:
     """Re-read broader paper context to test and enrich the first-pass interpretations."""
     question_text = "\n".join(f"ID: {item['question_id']}\nQuestion: {item['question']}\nFirst answer: {item['tentative_answer']}\nFirst evidence: {'; '.join(item['evidence'])}" for item in questions)
@@ -273,8 +290,8 @@ def parse_second_pass_reviews(text: str) -> list[dict[str, Any]]:
 
 def promote_question(ledger: Ledger, paper: dict[str, Any], item: dict[str, Any], comment: str) -> str:
     """Turn a reviewed reading interpretation into a claim candidate, not a question card."""
-    lineage_context = origin_research_context(paper.get("origin_links", []))
-    card_context = "\n\n".join(filter(None, [str(item.get("suggested_context") or item.get("question") or "").strip(), lineage_context]))
+    analysis = ledger.paper_analysis(paper["paper_id"]) or {}
+    card_context = independent_card_context(item, str(analysis.get("summary") or ""))
     card = KnowledgeCard(
         card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}", title=item["question"][:72], source_kind="external_paper",
         claim=item["tentative_answer"], explanation=comment,

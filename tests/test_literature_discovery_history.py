@@ -1,5 +1,9 @@
 from research_fellow.storage import Ledger
-from research_fellow.application.search_profiles import intent_discovery_task_prompt, run_intent_discovery_plan
+from research_fellow.application.search_profiles import (
+    intent_discovery_task_prompt,
+    record_external_intent_discovery,
+    run_intent_discovery_plan,
+)
 
 
 def test_literature_discovery_history_roundtrip(tmp_path):
@@ -140,3 +144,60 @@ def test_intent_llm_task_prompt_uses_recent_runs_and_plan_executes(tmp_path, mon
     assert outcome["status"] == "completed"
     assert outcome["candidates"][0]["title"] == "New paper"
     assert ledger.search_profiles()[0]["is_active"] is True
+
+
+def test_external_llm_is_recorded_as_direct_intent_discovery(tmp_path):
+    ledger = Ledger(tmp_path / "research_fellow.db")
+    profile = ledger.create_search_profile({
+        "intent_id": "intent-external", "title": "Persistent agents",
+        "question": "How are persistent job agents evaluated?",
+        "research_context": "Need evidence for a short paper", "labels": [],
+        "cadence": "manual",
+    })
+    ledger.update_search_profile_policy(profile["profile_id"], context=profile["context"], cadence="manual", is_active=True)
+    profile = next(item for item in ledger.search_profiles() if item["profile_id"] == profile["profile_id"])
+    response = '''{
+      "search_summary": "Evaluation work clusters around reliability and scope control.",
+      "papers": [{
+        "title": "Verified Agent Evaluation",
+        "authors": ["A. Researcher"],
+        "publication_year": "2026",
+        "source_url": "https://doi.org/10.1000/example",
+        "source_id": "10.1000/example",
+        "abstract_or_summary": "A benchmark for persistent agents.",
+        "relevance_score": 93,
+        "quick_take": "Measures long-running reliability.",
+        "why_relevant": "Direct evidence for the research question.",
+        "caution": "Limited domains."
+      }]
+    }'''
+
+    outcome = record_external_intent_discovery(
+        ledger, profile, response, trigger="manual_external_llm", max_results=12,
+    )
+
+    assert outcome["status"] == "completed"
+    assert outcome["candidates"][0]["title"] == "Verified Agent Evaluation"
+    assert outcome["search_summary"].startswith("Evaluation work")
+    run = ledger.search_runs(profile["profile_id"], limit=1)[0]
+    assert "external_llm_direct_discovery" in run["query"]
+    saved_profile = next(item for item in ledger.search_profiles() if item["profile_id"] == profile["profile_id"])
+    assert saved_profile["is_active"] is True
+
+
+def test_discovery_workspaces_are_isolated_per_intent(tmp_path):
+    ledger = Ledger(tmp_path / "research_fellow.db")
+    ledger.save_literature_discovery_workspace(
+        {"profile_id": "profile-a", "m1-discovery-topic": "Question A", "m1-discovery-results": [{"title": "Paper A"}]},
+        workspace_id="intent:profile-a",
+    )
+    ledger.save_literature_discovery_workspace(
+        {"profile_id": "profile-b", "m1-discovery-topic": "Question B", "m1-discovery-results": [{"title": "Paper B"}]},
+        workspace_id="intent:profile-b",
+    )
+
+    workspace_a = ledger.literature_discovery_workspace(workspace_id="intent:profile-a")
+    workspace_b = ledger.literature_discovery_workspace(workspace_id="intent:profile-b")
+
+    assert workspace_a["m1-discovery-results"][0]["title"] == "Paper A"
+    assert workspace_b["m1-discovery-results"][0]["title"] == "Paper B"

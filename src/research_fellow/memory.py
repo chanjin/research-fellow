@@ -134,14 +134,27 @@ class KnowledgeMemory:
             stream.write(json.dumps({"subject_id": card_id, "deleted_at": _now(), "note": note}, ensure_ascii=False) + "\n")
         return True
 
-    def all(self, *, include_deleted: bool = False) -> list[dict[str, Any]]:
+    def count(self, *, include_deleted: bool = False) -> int:
+        if self.sqlite:
+            query = "SELECT COUNT(*) FROM knowledge_cards"
+            if not include_deleted:
+                query += " WHERE deleted_at IS NULL"
+            with self._connect() as conn:
+                return int(conn.execute(query).fetchone()[0])
+        return len(self.all(include_deleted=include_deleted))
+
+    def all(self, *, include_deleted: bool = False, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
         if self.sqlite:
             query = "SELECT * FROM knowledge_cards"
             if not include_deleted:
                 query += " WHERE deleted_at IS NULL"
             query += " ORDER BY updated_at DESC, approved_at DESC"
+            params: tuple[int, ...] = ()
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params = (max(0, int(limit)), max(0, int(offset)))
             with self._connect() as conn:
-                rows = conn.execute(query).fetchall()
+                rows = conn.execute(query, params).fetchall()
             result = []
             for row in rows:
                 payload = json.loads(row["card_json"])
@@ -157,9 +170,10 @@ class KnowledgeMemory:
             latest_by_id[str(card["card_id"])] = card
         cards = list(reversed(list(latest_by_id.values())))
         if include_deleted:
-            return cards
+            return cards[offset:] if limit is None else cards[offset : offset + max(0, int(limit))]
         deleted = self._deleted_ids()
-        return [card for card in cards if card["card_id"] not in deleted]
+        active = [card for card in cards if card["card_id"] not in deleted]
+        return active[offset:] if limit is None else active[offset : offset + max(0, int(limit))]
 
     def add_supporting_evidence(self, card_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
         existing = next((card for card in self.all() if card["card_id"] == card_id), None)

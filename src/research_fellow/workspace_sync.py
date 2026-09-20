@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,8 +19,12 @@ SYNC_TABLES = (
     "phenomena",
     "decisions",
     "search_profiles",
+    "search_runs",
     "literature_discovery_sessions",
+    "literature_discovery_workspace",
     "literature_references",
+    "paper_projects",
+    "paper_project_events",
     "knowledge_cards",
     "knowledge_relations",
     "paper_shelf",
@@ -28,10 +34,13 @@ SYNC_TABLES = (
     "paper_reading_questions",
     "paper_reading_reviews",
     "paper_asset_events",
+    "paper_ontology_candidates",
     "ontology_facets",
     "ontology_types",
     "ontology_card_assignments",
     "ontology_type_relations",
+    "ontology_versions",
+    "ontology_change_reviews",
     "episode_memories",
     "research_questions",
     "research_question_intents",
@@ -51,6 +60,16 @@ SYNC_TABLES = (
     "auto_research_failures",
     "manual_recovery_attempts",
 )
+
+# Every durable table must be classified explicitly. User-visible research
+# assets belong in SYNC_TABLES; only machine/runtime metadata belongs here.
+# This allowlist prevents a newly added feature from silently becoming local-only.
+LOCAL_ONLY_TABLES = frozenset({
+    "schema_meta",
+    "llm_calls",
+    "sync_baseline",
+    "sync_runs",
+})
 
 # These values describe a machine-local artifact. They are deliberately excluded
 # from row comparison and never overwrite the value on another machine.
@@ -104,6 +123,64 @@ class SyncPreview:
         return result
 
 
+@dataclass(frozen=True)
+class AssetSyncResult:
+    uploaded: int = 0
+    downloaded: int = 0
+    unchanged: int = 0
+    missing: int = 0
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sync_paper_assets(local_db: str | Path, server_db: str | Path, local_asset_dir: str | Path, server_asset_dir: str | Path) -> AssetSyncResult:
+    """Safely exchange paper files using versioned, content-addressed names."""
+    local_db, server_db = Path(local_db), Path(server_db)
+    local_asset_dir, server_asset_dir = Path(local_asset_dir), Path(server_asset_dir)
+    local_asset_dir.mkdir(parents=True, exist_ok=True)
+    server_asset_dir.mkdir(parents=True, exist_ok=True)
+    uploaded = downloaded = unchanged = missing = 0
+    with WorkspaceSync._connect(local_db) as conn:
+        exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_shelf'").fetchone()
+        local_rows = conn.execute("SELECT paper_id, pdf_path FROM paper_shelf").fetchall() if exists else []
+    for row in local_rows:
+        paper_id = str(row["paper_id"])
+        safe_paper_id = re.sub(r"[^A-Za-z0-9._-]+", "_", paper_id)[:100] or "paper"
+        local_path = Path(str(row["pdf_path"] or "")).expanduser() if str(row["pdf_path"] or "").strip() else None
+        if local_path and local_path.is_file():
+            digest = _file_sha256(local_path)
+            suffix = local_path.suffix.lower() if local_path.suffix else ".bin"
+            server_path = server_asset_dir / f"{safe_paper_id}--{digest[:16]}{suffix}"
+            if not server_path.exists():
+                shutil.copy2(local_path, server_path)
+                uploaded += 1
+            else:
+                unchanged += 1
+            with WorkspaceSync._connect(server_db) as server_conn:
+                server_conn.execute("UPDATE paper_shelf SET pdf_path=? WHERE paper_id=?", (str(server_path), paper_id))
+            continue
+        candidates = sorted(server_asset_dir.glob(f"{safe_paper_id}--*"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not candidates:
+            missing += 1
+            continue
+        source = candidates[0]
+        destination = local_asset_dir / source.name
+        if not destination.exists():
+            shutil.copy2(source, destination)
+            downloaded += 1
+        else:
+            unchanged += 1
+        with WorkspaceSync._connect(local_db) as local_conn:
+            local_conn.execute("UPDATE paper_shelf SET pdf_path=? WHERE paper_id=?", (str(destination), paper_id))
+    return AssetSyncResult(uploaded=uploaded, downloaded=downloaded, unchanged=unchanged, missing=missing)
+
+
 class WorkspaceSync:
     """Explicit record-level merge between a local working DB and an integrated server DB.
 
@@ -125,10 +202,12 @@ class WorkspaceSync:
         self.local_db.parent.mkdir(parents=True, exist_ok=True)
         Ledger(self.local_db)
         self._ensure_sync_tables()
+        self._validate_table_policy(self.local_db)
         # Do not create an empty server DB here. Missing server DB means
         # 'first initialization' and should be created from the current local DB.
         if self.server_db.exists():
             Ledger(self.server_db)
+            self._validate_table_policy(self.server_db)
 
 
     @property
@@ -181,6 +260,28 @@ class WorkspaceSync:
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @classmethod
+    def _database_tables(cls, path: Path) -> set[str]:
+        with cls._connect(path) as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    @classmethod
+    def unclassified_tables(cls, path: str | Path) -> set[str]:
+        """Return durable tables that have no explicit sync/local-only policy."""
+        tables = cls._database_tables(Path(path))
+        return tables - set(SYNC_TABLES) - set(LOCAL_ONLY_TABLES)
+
+    @classmethod
+    def _validate_table_policy(cls, path: Path) -> None:
+        missing = sorted(cls.unclassified_tables(path))
+        if missing:
+            raise ValueError(
+                "동기화 정책이 지정되지 않은 테이블이 있습니다: " + ", ".join(missing)
+            )
 
     def _ensure_sync_tables(self) -> None:
         with self._connect(self.local_db) as conn:
@@ -391,3 +492,86 @@ class WorkspaceSync:
         result = dict(row)
         result["summary"] = json.loads(result.pop("summary_json"))
         return result
+
+
+@dataclass
+class WorkspaceBatchStatus:
+    key: str
+    label: str
+    local_db: Path
+    server_db: Path
+    server_exists: bool
+    upload_changes: int
+    download_changes: int
+    conflicts: int
+    initialization_rows: int
+
+
+@dataclass
+class WorkspaceBatchResult:
+    key: str
+    initialized: bool
+    applied: int
+    conflicts: int
+    assets: AssetSyncResult
+
+
+class AllWorkspacesSync:
+    """Coordinate database and paper-asset sync for every active workspace."""
+
+    def __init__(self, profiles: dict[str, Any], data_dir: str | Path, server_root: str | Path):
+        self.profiles = profiles
+        self.data_dir = Path(data_dir).expanduser()
+        self.server_root = Path(server_root).expanduser()
+
+    def _paths(self, key: str, profile: Any) -> tuple[Path, Path, Path, Path]:
+        local_db = self.data_dir / str(profile.db_filename)
+        server_workspace = self.server_root / "workspaces" / key
+        server_db = server_workspace / str(profile.server_db_filename)
+        local_assets = self.data_dir / "workspaces" / key / "paper_shelf"
+        server_assets = server_workspace / "assets" / "paper_shelf"
+        return local_db, server_db, local_assets, server_assets
+
+    def preview(self) -> list[WorkspaceBatchStatus]:
+        statuses: list[WorkspaceBatchStatus] = []
+        for key, profile in self.profiles.items():
+            local_db, server_db, _, _ = self._paths(key, profile)
+            sync = WorkspaceSync(local_db, server_db)
+            if sync.server_exists:
+                preview = sync.preview()
+                counts = preview.counts()
+                upload = sum(value for label, value in counts.items() if label.startswith("local→server:"))
+                download = sum(value for label, value in counts.items() if label.startswith("server→local:"))
+                initialization_rows = 0
+                conflicts = len(preview.conflicts)
+            else:
+                upload = download = conflicts = 0
+                initialization_rows = sum(sync.initialization_counts().values())
+            statuses.append(WorkspaceBatchStatus(
+                key=key, label=str(profile.label), local_db=local_db, server_db=server_db,
+                server_exists=sync.server_exists, upload_changes=upload,
+                download_changes=download, conflicts=conflicts,
+                initialization_rows=initialization_rows,
+            ))
+        return statuses
+
+    def apply(self) -> list[WorkspaceBatchResult]:
+        results: list[WorkspaceBatchResult] = []
+        for key, profile in self.profiles.items():
+            local_db, server_db, local_assets, server_assets = self._paths(key, profile)
+            sync = WorkspaceSync(local_db, server_db)
+            initialized = not sync.server_exists
+            if initialized:
+                sync.initialize_server_from_local()
+                applied = 0
+                conflicts = 0
+            else:
+                result = sync.apply()
+                applied = len(result.actionable)
+                conflicts = len(result.conflicts)
+            assets = sync_paper_assets(local_db, server_db, local_assets, server_assets)
+            results.append(WorkspaceBatchResult(
+                key=key, initialized=initialized, applied=applied,
+                conflicts=conflicts, assets=assets,
+            ))
+        return results

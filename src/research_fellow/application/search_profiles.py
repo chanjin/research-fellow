@@ -42,8 +42,6 @@ def run_intent_discovery_plan(
             "origin_links": origin_links,
         }, ensure_ascii=False)
         run_id = ledger.record_search_run(str(profile["profile_id"]), trigger, query_log, results, status)
-        if profile.get("cadence") == "manual":
-            ledger.complete_search_profile(str(profile["profile_id"]))
         return {"run_id": run_id, "query": query_log, "candidates": results, "status": status, "error": "", "plan": plan}
     except Exception as error:
         query_log = json.dumps({
@@ -64,6 +62,50 @@ def run_intent_discovery_task(
     prompt = intent_discovery_task_prompt(profile, previous_runs, max_results)
     plan = parse_discovery_search_plan(planner(prompt) or "")
     return run_intent_discovery_plan(ledger, profile, plan, trigger=trigger, triage_drafter=triage_drafter, sources=sources, max_results=max_results)
+
+
+def record_external_intent_discovery(
+    ledger: Ledger,
+    profile: dict[str, Any],
+    response: str,
+    *,
+    trigger: str = "external_llm_task",
+    max_results: int = 12,
+) -> dict[str, Any]:
+    """Validate and record papers found directly by a web-enabled external LLM.
+
+    Intent discovery deliberately treats this as the primary route: the LLM
+    searches and organises literature in one task.  The API-backed search-plan
+    route remains available as an explicit fallback.
+    """
+    from research_fellow.application.literature_discovery import parse_external_literature_results
+
+    topic = str(profile.get("question") or profile.get("title") or "").strip()
+    context = str(profile.get("context") or profile.get("research_context") or "").strip()
+    parsed = parse_external_literature_results(response, max_results)
+    origin_links = normalize_origin_links(profile.get("origin_links", []))
+    results = [{**paper, "origin_links": origin_links} for paper in parsed["papers"]]
+    status = "completed" if results else "completed_no_candidates"
+    query_log = json.dumps(
+        {
+            "mode": "external_llm_direct_discovery",
+            "topic": topic,
+            "research_context": context,
+            "search_summary": parsed.get("search_summary", ""),
+            "sources": ["external_llm_web_search"],
+            "origin_links": origin_links,
+        },
+        ensure_ascii=False,
+    )
+    run_id = ledger.record_search_run(str(profile["profile_id"]), trigger, query_log, results, status)
+    return {
+        "run_id": run_id,
+        "query": query_log,
+        "candidates": results,
+        "status": status,
+        "error": "",
+        "search_summary": parsed.get("search_summary", ""),
+    }
 
 
 def keyword_prompt(profile: dict[str, Any]) -> str:

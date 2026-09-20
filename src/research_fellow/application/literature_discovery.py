@@ -18,6 +18,68 @@ from urllib.request import Request, urlopen
 from research_fellow.infrastructure.arxiv import search as arxiv_search
 
 
+def _even_backslashes(value: str) -> str:
+    """Make LaTeX backslash runs JSON-safe without double-escaping valid pairs."""
+    output: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            output.append(value[index])
+            index += 1
+            continue
+        end = index
+        while end < len(value) and value[end] == "\\":
+            end += 1
+        count = end - index
+        output.append("\\" * (count if count % 2 == 0 else count + 1))
+        index = end
+    return "".join(output)
+
+
+def _repair_llm_json_escapes(value: str) -> str:
+    r"""Repair common copy/paste JSON errors caused by LaTeX and raw paths.
+
+    External LLMs frequently put ``$\pi$`` or ``$\text{{...}}$`` directly in a
+    JSON string. JSON then treats the slash as an escape (or rejects ``\p``).
+    First protect dollar-delimited math, including escapes that JSON would
+    otherwise accept but corrupt (for example ``\t``). Then repair remaining
+    invalid single-backslash escapes while inside JSON strings.
+    """
+    repaired = re.sub(r"\$(?:\\.|[^$])*\$", lambda match: _even_backslashes(match.group(0)), value, flags=re.S)
+    output: list[str] = []
+    in_string = False
+    index = 0
+    valid_escapes = {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}
+    while index < len(repaired):
+        char = repaired[index]
+        if char == '"':
+            # A quote is escaped only when preceded by an odd slash run.
+            slash_count = 0
+            scan = index - 1
+            while scan >= 0 and repaired[scan] == "\\":
+                slash_count += 1
+                scan -= 1
+            if slash_count % 2 == 0:
+                in_string = not in_string
+            output.append(char)
+            index += 1
+            continue
+        if in_string and char == "\\":
+            end = index
+            while end < len(repaired) and repaired[end] == "\\":
+                end += 1
+            count = end - index
+            next_char = repaired[end] if end < len(repaired) else ""
+            if count % 2 == 1 and next_char not in valid_escapes:
+                count += 1
+            output.append("\\" * count)
+            index = end
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
 def _json_payload(text: str) -> Any:
     value = (text or "").strip()
     if not value:
@@ -33,10 +95,14 @@ def _json_payload(text: str) -> Any:
         end = max(end_obj, end_arr)
         if end >= start:
             value = value[start : end + 1]
+    repaired = _repair_llm_json_escapes(value)
     try:
-        return json.loads(value)
+        return json.loads(repaired)
     except json.JSONDecodeError as error:
-        raise ValueError(f"JSON 응답을 해석하지 못했습니다: {error}") from error
+        raise ValueError(
+            f"JSON 응답을 해석하지 못했습니다: {error}. "
+            "수식의 백슬래시는 자동 보정했지만, 따옴표·쉼표 또는 JSON 구조도 확인해 주세요."
+        ) from error
 
 
 
@@ -512,6 +578,7 @@ For each paper give:
 - caution: any important limitation or indirectness
 
 Return ONLY valid JSON with this schema:
+If any field contains LaTeX, escape every backslash for JSON (for example, write $\\\\pi$ in the JSON source, not $\\pi$).
 {{
   "search_summary": "short orientation to the literature",
   "papers": [

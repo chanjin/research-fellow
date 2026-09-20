@@ -157,6 +157,216 @@ def draft_prompt(project: dict[str,Any], cards: list[dict[str,Any]]) -> str:
     from research_fellow.infrastructure.prompt_renderer import render_prompt
     return render_prompt("m2_short_paper_draft.j2",project=project,cards=cards)
 
+
+def paper_proposal_prompt(
+    *, title: str, research_question: str, research_context: str,
+    cards: list[dict[str,Any]], papers: list[dict[str,Any]],
+) -> str:
+    """Build a bounded pre-draft framing and provisional novelty review task."""
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+    return render_prompt(
+        "m2_paper_proposal_review.j2",title=title,research_question=research_question,
+        research_context=research_context,cards=cards,papers=papers,
+    )
+
+
+def parse_paper_proposal(text: str) -> dict[str,Any]:
+    """Normalize an LLM proposal review without treating model memory as evidence."""
+    raw=_json(text)
+
+    def assessment_rows(name: str) -> list[dict[str,Any]]:
+        rows=[]
+        for index,item in enumerate(raw.get(name) or [],1):
+            if isinstance(item,str):item={"subject":item,"assessment":item}
+            if not isinstance(item,dict):continue
+            status=str(item.get("evidence_status") or "verification_required")
+            if status not in {"grounded_internal","model_prior","verification_required","researcher_decision"}:
+                status="verification_required"
+            rows.append({
+                "item_id":str(item.get("item_id") or f"{name}-{index:02d}"),
+                "subject":str(item.get("subject") or item.get("title") or "").strip(),
+                "assessment":str(item.get("assessment") or item.get("comment") or "").strip(),
+                "evidence_status":status,
+                "source_ids":list(dict.fromkeys(str(value) for value in item.get("source_ids") or [] if str(value))),
+                "verification_need":str(item.get("verification_need") or "").strip(),
+            })
+        return [item for item in rows if item["subject"] or item["assessment"]][:12]
+
+    candidates=[]
+    for index,item in enumerate(raw.get("candidate_pairs") or [],1):
+        if not isinstance(item,dict):continue
+        candidate_title=str(item.get("title") or "").strip()
+        candidate_rq=str(item.get("research_question") or "").strip()
+        if not candidate_title or not candidate_rq:continue
+        candidates.append({
+            "candidate_id":str(item.get("candidate_id") or f"candidate-{index}"),
+            "title":candidate_title,"research_question":candidate_rq,
+            "contribution":str(item.get("contribution") or "").strip(),
+            "scope":str(item.get("scope") or "").strip(),
+            "rationale":str(item.get("rationale") or "").strip(),
+        })
+    if not candidates:raise ValueError("제목·연구질문 후보가 포함되어야 합니다.")
+
+    searches=[]
+    for index,item in enumerate(raw.get("m1_verification_candidates") or [],1):
+        if not isinstance(item,dict):continue
+        title=str(item.get("title") or "").strip();target=str(item.get("target") or "").strip()
+        if not title or not target:continue
+        searches.append({
+            "candidate_id":str(item.get("candidate_id") or f"proposal-search-{index}"),
+            "title":title,"target":target,
+            "research_context":str(item.get("research_context") or "").strip(),
+            "expected_evidence":str(item.get("expected_evidence") or "").strip(),
+            "completion_condition":str(item.get("completion_condition") or "").strip(),
+        })
+    recommended=str(raw.get("recommended_candidate_id") or "")
+    if recommended not in {item["candidate_id"] for item in candidates}:recommended=candidates[0]["candidate_id"]
+    decisions=[]
+    for item in raw.get("researcher_decisions") or []:
+        if isinstance(item,dict):
+            decisions.append({
+                "question":str(item.get("question") or item.get("decision") or "").strip(),
+                "options":[str(value) for value in item.get("options") or [] if str(value).strip()],
+                "reason":str(item.get("reason") or "").strip(),
+            })
+        elif str(item).strip():decisions.append({"question":str(item).strip(),"options":[],"reason":""})
+    return {
+        "planning_summary":str(raw.get("planning_summary") or "").strip(),
+        "internal_similarity_assessment":assessment_rows("internal_similarity_assessment"),
+        "external_landscape_assessment":assessment_rows("external_landscape_assessment"),
+        "novelty_risks":assessment_rows("novelty_risks"),
+        "candidate_pairs":candidates[:5],"recommended_candidate_id":recommended,
+        "m1_verification_candidates":searches[:5],"researcher_decisions":decisions[:8],
+    }
+
+
+def writing_spec_guidance_prompt(
+    *, project: dict[str,Any], proposal: dict[str,Any], current_spec: dict[str,Any],
+    cards: list[dict[str,Any]], papers: list[dict[str,Any]],
+) -> str:
+    """Guide the researcher from confirmed framing to an editable writing contract."""
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+    return render_prompt(
+        "m2_writing_spec_guidance.j2",project=project,proposal=proposal,
+        current_spec=current_spec,cards=cards,papers=papers,
+    )
+
+
+def parse_writing_spec_guidance(text: str, *, valid_card_ids: set[str]) -> dict[str,Any]:
+    raw=_json(text);claims=[]
+    for index,item in enumerate(raw.get("central_claim_candidates") or [],1):
+        if isinstance(item,str):item={"claim":item}
+        if not isinstance(item,dict):continue
+        claim=str(item.get("claim") or item.get("text") or "").strip()
+        if not claim:continue
+        claims.append({
+            "claim_id":str(item.get("claim_id") or f"claim-{index}"),"claim":claim,
+            "rationale":str(item.get("rationale") or "").strip(),
+            "evidence_card_ids":list(dict.fromkeys(
+                str(value) for value in item.get("evidence_card_ids") or [] if str(value) in valid_card_ids
+            )),
+            "risk_or_condition":str(item.get("risk_or_condition") or "").strip(),
+        })
+    if not claims:raise ValueError("중심 주장 후보가 하나 이상 필요합니다.")
+    recommended=str(raw.get("recommended_claim_id") or "")
+    if recommended not in {item["claim_id"] for item in claims}:recommended=claims[0]["claim_id"]
+
+    def strings(name: str, limit: int) -> list[str]:
+        values=raw.get(name) or []
+        if isinstance(values,str):values=values.splitlines()
+        return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))[:limit]
+
+    def strings_from(values: Any, limit: int) -> list[str]:
+        values=values or []
+        if isinstance(values,str):values=values.splitlines()
+        return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))[:limit]
+
+    try:minimum=max(100,int(raw.get("target_min_chars") or 4000))
+    except (TypeError,ValueError):minimum=4000
+    try:maximum=max(minimum,int(raw.get("target_max_chars") or 9000))
+    except (TypeError,ValueError):maximum=max(minimum,9000)
+
+    design_candidates=[]
+    for index,item in enumerate(raw.get("research_design_candidates") or [],1):
+        if not isinstance(item,dict):continue
+        method=str(item.get("method") or item.get("label") or "").strip()
+        if not method:continue
+        plans=[]
+        for plan_index,plan in enumerate(item.get("verification_plan") or [],1):
+            if not isinstance(plan,dict):continue
+            metrics=[]
+            for metric in plan.get("metrics") or []:
+                if isinstance(metric,str):metric={"name":metric}
+                if isinstance(metric,dict) and str(metric.get("name") or "").strip():
+                    example=str(metric.get("example_record") or "[조건] | [관측값] | [해석 대기]").strip()
+                    if not example.startswith("예시·미수행"):example="예시·미수행: "+example
+                    metrics.append({
+                        "name":str(metric.get("name") or "").strip(),
+                        "definition":str(metric.get("definition") or "").strip(),
+                        "example_record":example,
+                    })
+            plans.append({
+                "plan_id":str(plan.get("plan_id") or f"plan-{index}-{plan_index}"),
+                "research_question":str(plan.get("research_question") or "").strip(),
+                "claim_to_verify":str(plan.get("claim_to_verify") or "").strip(),
+                "method":str(plan.get("method") or method).strip(),
+                "baseline":str(plan.get("baseline") or "").strip(),
+                "unit_of_analysis":str(plan.get("unit_of_analysis") or "").strip(),
+                "required_data":list(dict.fromkeys(str(value).strip() for value in plan.get("required_data") or [] if str(value).strip()))[:10],
+                "metrics":metrics[:8],
+                "analysis_method":str(plan.get("analysis_method") or "").strip(),
+                "success_criteria":str(plan.get("success_criteria") or "").strip(),
+                "falsification_condition":str(plan.get("falsification_condition") or "").strip(),
+                "validity_threats":list(dict.fromkeys(str(value).strip() for value in plan.get("validity_threats") or [] if str(value).strip()))[:8],
+            })
+        recording=[]
+        for artifact in item.get("result_recording_plan") or []:
+            if not isinstance(artifact,dict):continue
+            example_row=str(artifact.get("example_row") or "[조건] | [관측값] | [해석 대기]").strip()
+            if not example_row.startswith("예시·미수행"):example_row="예시·미수행: "+example_row
+            recording.append({
+                "artifact":str(artifact.get("artifact") or "").strip(),
+                "fields":[str(value).strip() for value in artifact.get("fields") or [] if str(value).strip()][:12],
+                "example_row":example_row,
+                "status":"planned",
+            })
+        design_candidates.append({
+            "design_id":str(item.get("design_id") or f"design-{index}"),"method":method,
+            "compatible_claim_ids":[str(value) for value in item.get("compatible_claim_ids") or [] if str(value) in {claim["claim_id"] for claim in claims}],
+            "rationale":str(item.get("rationale") or "").strip(),
+            "verification_plan":plans[:6],
+            "execution_guide":strings_from(item.get("execution_guide"),10),
+            "result_recording_plan":recording[:6],
+        })
+    recommended_design=str(raw.get("recommended_design_id") or "")
+    if design_candidates and recommended_design not in {item["design_id"] for item in design_candidates}:
+        recommended_design=design_candidates[0]["design_id"]
+
+    searches=[]
+    for index,item in enumerate(raw.get("literature_search_candidates") or [],1):
+        if not isinstance(item,dict):continue
+        target=str(item.get("target") or "").strip()
+        if not target:continue
+        searches.append({
+            "candidate_id":str(item.get("candidate_id") or f"method-search-{index}"),
+            "title":_literature_candidate_title(item.get("title"),target),"target":target,
+            "research_context":str(item.get("research_context") or "").strip(),
+            "expected_evidence":str(item.get("expected_evidence") or "").strip(),
+            "completion_condition":str(item.get("completion_condition") or "").strip(),
+        })
+    return {
+        "guidance_summary":str(raw.get("guidance_summary") or "").strip(),
+        "audience":str(raw.get("audience") or "").strip(),
+        "central_claim_candidates":claims[:5],"recommended_claim_id":recommended,
+        "target_min_chars":minimum,"target_max_chars":maximum,
+        "required_section_terms":strings("required_section_terms",8),
+        "writing_rules":strings("writing_rules",10),
+        "open_decisions":strings("open_decisions",8),
+        "research_design_candidates":design_candidates[:4],
+        "recommended_design_id":recommended_design,
+        "literature_search_candidates":searches[:5],
+    }
+
 def review_prompt(project: dict[str,Any], manuscript: dict[str,Any], cards: list[dict[str,Any]]) -> str:
     from research_fellow.infrastructure.prompt_renderer import render_prompt
     return render_prompt("m2_short_paper_review.j2",project=project,manuscript=manuscript,cards=cards)
@@ -261,13 +471,14 @@ def todo_verification_prompt(
 def resolution_proposal_prompt(
     project: dict[str,Any], manuscript: dict[str,Any], todo: dict[str,Any],
     papers: list[dict[str,Any]], cards: list[dict[str,Any]], connection_note: str,
-    *, include_full_manuscript: bool=False,
+    *, include_full_manuscript: bool=False, research_artifacts: list[dict[str,Any]] | None=None,
 ) -> str:
     from research_fellow.infrastructure.prompt_renderer import render_prompt
     focus=revision_focus_context(manuscript,todo)
     return render_prompt(
         "m2_revision_resolution_proposal.j2",project=project,manuscript=manuscript,
         todo=todo,papers=papers,cards=cards,focus=focus,
+        research_artifacts=list(research_artifacts or []),
         full_manuscript_sentences=sentences(manuscript) if include_full_manuscript else [],
         include_full_manuscript=include_full_manuscript,connection_note=connection_note,
     )
@@ -747,15 +958,16 @@ def revision_todo_timeline(
         str(item.get("todo_id", "")): item
         for item in updates if item.get("todo_id")
     }
+    terminal={"resolved","obsolete","merged","split"}
     history = {
         todo_id: {**item, "todo_id": todo_id}
-        for todo_id, item in latest_updates.items() if item.get("status") == "resolved"
+        for todo_id, item in latest_updates.items() if item.get("status") in terminal
     }
     for item in active_todos:
         history[str(item.get("todo_id", ""))] = item
     order = {"P0": 0, "P1": 1, "P2": 2}
     return sorted(history.values(), key=lambda item: (
-        1 if item.get("status") == "resolved" else 0,
+        1 if item.get("status") in terminal else 0,
         order.get(str(item.get("priority", "P1")), 1),
         str(item.get("sentence_id", "")), str(item.get("todo_id", "")),
     ))
@@ -790,4 +1002,133 @@ def review_change_set(
         "retained_todos": [row(todo_id, after_by_id[todo_id], "유지") for todo_id in retained],
         "new_todos": [row(todo_id, after_by_id[todo_id], "신규") for todo_id in new],
         "resolved_todos": [row(todo_id, before_by_id[todo_id], "해결") for todo_id in resolved],
+    }
+
+
+TODO_RECONCILIATION_STATUSES = {
+    "resolved", "retained", "modified", "obsolete", "merged", "split", "researcher_review",
+}
+
+REVISION_ACTION_TYPES = {
+    "M1_LITERATURE_SEARCH", "KNOWLEDGE_CARD_REVIEW", "RESEARCHER_DECISION",
+    "EXPERIMENT", "SURVEY", "CASE_ANALYSIS", "DATA_ANALYSIS", "TRACE_REVIEW", "WRITING_ONLY",
+}
+
+
+def revision_resolution_plan_prompt(
+    project: dict[str,Any], manuscript: dict[str,Any], todo: dict[str,Any],
+    linked_cards: list[dict[str,Any]], linked_papers: list[dict[str,Any]],
+) -> str:
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+    return render_prompt(
+        "m2_revision_resolution_plan.j2",project=project,manuscript=manuscript,todo=todo,
+        linked_cards=linked_cards,linked_papers=linked_papers,
+    )
+
+
+def parse_revision_resolution_plan(text: str, todo: dict[str,Any]) -> dict[str,Any]:
+    raw=_json(text);actions=[]
+    for index,item in enumerate(raw.get("actions") or [],1):
+        if not isinstance(item,dict):continue
+        kind=str(item.get("type") or "WRITING_ONLY").strip().upper()
+        if kind not in REVISION_ACTION_TYPES:kind="WRITING_ONLY"
+        title=str(item.get("title") or "").strip()
+        if not title:continue
+        procedure=item.get("procedure") or []
+        if isinstance(procedure,str):procedure=procedure.splitlines()
+        outputs=item.get("expected_artifacts") or []
+        if isinstance(outputs,str):outputs=outputs.splitlines()
+        actions.append({
+            "action_id":str(item.get("action_id") or f"action-{index}"),"type":kind,"title":title,
+            "purpose":str(item.get("purpose") or "").strip(),
+            "procedure":[str(value).strip() for value in procedure if str(value).strip()][:12],
+            "expected_artifacts":[str(value).strip() for value in outputs if str(value).strip()][:10],
+            "completion_condition":str(item.get("completion_condition") or "").strip(),
+            "status":"planned",
+        })
+    if not actions:raise ValueError("To-do 해결 계획에는 하나 이상의 실행 작업이 필요합니다.")
+    return {
+        "todo_id":str(todo.get("todo_id") or ""),
+        "strategy_summary":str(raw.get("strategy_summary") or "").strip(),
+        "revision_target":str(raw.get("revision_target") or todo.get("sentence_id") or "").strip(),
+        "actions":actions[:10],
+        "risks":[str(value).strip() for value in raw.get("risks") or [] if str(value).strip()][:8],
+        "expected_resolution":str(raw.get("expected_resolution") or todo.get("completion_criteria") or "").strip(),
+    }
+
+
+def todo_reconciliation_prompt(
+    project: dict[str,Any], before_manuscript: dict[str,Any], after_manuscript: dict[str,Any],
+    before_todos: list[dict[str,Any]], revision_diff: list[dict[str,Any]],
+) -> str:
+    """Reassess the work backlog after one manuscript revision."""
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+    return render_prompt(
+        "m2_revision_todo_reconciliation.j2",project=project,
+        before_manuscript=before_manuscript,after_manuscript=after_manuscript,
+        before_todos=before_todos,revision_diff=revision_diff,
+    )
+
+
+def parse_todo_reconciliation(
+    text: str, *, existing_todos: list[dict[str,Any]], manuscript: dict[str,Any],
+) -> dict[str,Any]:
+    """Normalize LLM backlog changes without silently deleting historical To-dos."""
+    raw=_json(text)
+    existing={str(item.get("todo_id") or ""):item for item in existing_todos if item.get("todo_id")}
+    valid_sentences={str(item.get("sentence_id") or ""):item for item in sentences(manuscript)}
+    assessments=[];seen=set()
+    for item in raw.get("existing_todo_assessments") or []:
+        if not isinstance(item,dict):continue
+        todo_id=str(item.get("todo_id") or "")
+        status=str(item.get("status") or "retained").strip().lower()
+        if todo_id not in existing or todo_id in seen or status not in TODO_RECONCILIATION_STATUSES:continue
+        seen.add(todo_id);prior=existing[todo_id]
+        assessments.append({
+            "todo_id":todo_id,"status":status,"reason":str(item.get("reason") or "").strip(),
+            "evidence":[str(value).strip() for value in item.get("evidence") or [] if str(value).strip()][:8],
+            "sentence_id":str(item.get("sentence_id") or prior.get("sentence_id") or ""),
+            "updated_problem":str(item.get("updated_problem") or prior.get("problem") or "").strip(),
+            "updated_completion_criteria":str(item.get("updated_completion_criteria") or prior.get("completion_criteria") or "").strip(),
+            "updated_recommended_action":str(item.get("updated_recommended_action") or prior.get("recommended_action") or "researcher_input").strip(),
+            "merged_into":str(item.get("merged_into") or "").strip(),
+        })
+    for todo_id,prior in existing.items():
+        if todo_id not in seen:
+            assessments.append({
+                "todo_id":todo_id,"status":"researcher_review",
+                "reason":"LLM 응답에서 기존 To-do 평가가 누락되어 연구자 확인이 필요합니다.","evidence":[],
+                "sentence_id":str(prior.get("sentence_id") or ""),
+                "updated_problem":str(prior.get("problem") or ""),
+                "updated_completion_criteria":str(prior.get("completion_criteria") or ""),
+                "updated_recommended_action":str(prior.get("recommended_action") or "researcher_input"),"merged_into":"",
+            })
+
+    new_todos=[];known_ids=set(existing)
+    for index,item in enumerate(raw.get("new_todos") or [],1):
+        if not isinstance(item,dict):continue
+        sentence_id=str(item.get("sentence_id") or "")
+        kind=str(item.get("type") or "logic_gap")
+        if sentence_id not in valid_sentences or kind not in ANNOTATION_TYPES:continue
+        todo_id=str(item.get("todo_id") or f"reconcile-{sentence_id}-{index}")
+        if todo_id in known_ids:todo_id=f"{todo_id}-new-{index}"
+        known_ids.add(todo_id);guide=ANNOTATION_GUIDES[kind]
+        new_todos.append({
+            "todo_id":todo_id,"parent_todo_id":str(item.get("parent_todo_id") or ""),
+            "sentence_id":sentence_id,"sentence_text":str(valid_sentences[sentence_id].get("text") or ""),
+            "type":kind,"label":guide["label"],
+            "priority":str(item.get("priority") or "P1") if str(item.get("priority") or "P1") in {"P0","P1","P2"} else "P1",
+            "problem":str(item.get("problem") or guide["description"]).strip(),
+            "completion_criteria":str(item.get("completion_criteria") or guide["completion_criteria"]).strip(),
+            "recommended_action":str(item.get("recommended_action") or guide["action"]).strip(),
+            "search_guide":str(item.get("search_guide") or guide["search_guide"]).strip(),
+            "question_for_researcher":str(item.get("question_for_researcher") or "").strip(),
+            "literature_search_candidates":[],
+            "reason":str(item.get("reason") or "리비전 후 새로 발견된 보완점").strip(),
+        })
+    return {
+        "summary":str(raw.get("summary") or "").strip(),
+        "revision_achievements":[str(value).strip() for value in raw.get("revision_achievements") or [] if str(value).strip()][:12],
+        "existing_todo_assessments":assessments,"new_todos":new_todos[:20],
+        "next_revision_recommendations":[str(value).strip() for value in raw.get("next_revision_recommendations") or [] if str(value).strip()][:12],
     }

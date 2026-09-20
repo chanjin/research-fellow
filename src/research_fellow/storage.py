@@ -1033,6 +1033,24 @@ class Ledger:
             payload = {}
         return {**payload, "workspace_id": workspace_id, "updated_at": row["updated_at"]}
 
+    def literature_discovery_workspaces(self, *, prefix: str = "") -> list[dict[str, Any]]:
+        query = "SELECT workspace_id, payload_json, updated_at FROM literature_discovery_workspace"
+        params: tuple[str, ...] = ()
+        if prefix:
+            query += " WHERE workspace_id LIKE ?"
+            params = (f"{prefix}%",)
+        query += " ORDER BY updated_at DESC"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        workspaces: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"]) or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            workspaces.append({**payload, "workspace_id": row["workspace_id"], "updated_at": row["updated_at"]})
+        return workspaces
+
     def clear_literature_discovery_workspace(self, *, workspace_id: str = "active") -> bool:
         with self.connect() as conn:
             result = conn.execute(
@@ -1138,7 +1156,9 @@ class Ledger:
         return event_id
 
     def paper_project_events(self, project_id: str) -> list[dict[str, Any]]:
-        with self.connect() as conn: rows=conn.execute("SELECT * FROM paper_project_events WHERE project_id=? ORDER BY created_at", (project_id,)).fetchall()
+        # rowid keeps insertion order deterministic when several events share the
+        # same second-level timestamp (for example validation followed by freeze).
+        with self.connect() as conn: rows=conn.execute("SELECT * FROM paper_project_events WHERE project_id=? ORDER BY created_at, rowid", (project_id,)).fetchall()
         result=[]
         for row in rows:
             item=dict(row); item["payload"]=json.loads(item.pop("payload_json") or "{}"); result.append(item)
@@ -1147,6 +1167,24 @@ class Ledger:
     def advance_paper_project(self, project_id: str, stage: str) -> None:
         if stage not in {"short_paper", "full_paper"}: raise ValueError("지원하지 않는 논문 단계입니다.")
         with self.connect() as conn: conn.execute("UPDATE paper_projects SET stage=?, updated_at=? WHERE project_id=?", (stage, now(), project_id))
+
+    def update_paper_project_status(self, project_id: str, status: str) -> None:
+        """Mark a project active/completed without deleting its manuscript history."""
+        if status not in {"active", "completed"}:
+            raise ValueError("논문 프로젝트 상태는 active 또는 completed여야 합니다.")
+        timestamp = now()
+        with self.connect() as conn:
+            exists = conn.execute("SELECT 1 FROM paper_projects WHERE project_id=?", (project_id,)).fetchone()
+            if not exists:
+                raise KeyError(f"논문 프로젝트를 찾을 수 없습니다: {project_id}")
+            conn.execute(
+                "UPDATE paper_projects SET status=?, updated_at=? WHERE project_id=?",
+                (status, timestamp, project_id),
+            )
+            conn.execute(
+                "INSERT INTO paper_project_events VALUES (?,?,?,?,?)",
+                (f"ppe-{uuid.uuid4().hex[:12]}", project_id, "project_status_changed", json.dumps({"status": status}, ensure_ascii=False), timestamp),
+            )
 
     def literature_discovery_session(self, session_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -2319,12 +2357,21 @@ class Ledger:
             self._record_paper_event(conn, paper_id, "intake", {"source": paper.get("intake_source", "manual")})
         return self.shelf_paper(paper_id) or {}
 
-    def shelf_papers(self) -> list[dict[str, Any]]:
+    def shelf_paper_count(self) -> int:
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT p.*, COALESCE(a.abstract, '') AS abstract FROM paper_shelf p "
-                "LEFT JOIN paper_abstracts a ON a.paper_id=p.paper_id ORDER BY p.updated_at DESC"
-            ).fetchall()
+            return int(conn.execute("SELECT COUNT(*) FROM paper_shelf").fetchone()[0])
+
+    def shelf_papers(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        query = (
+            "SELECT p.*, COALESCE(a.abstract, '') AS abstract FROM paper_shelf p "
+            "LEFT JOIN paper_abstracts a ON a.paper_id=p.paper_id ORDER BY p.updated_at DESC"
+        )
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params = (max(0, int(limit)), max(0, int(offset)))
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
         return [self._paper_shelf_row(row) for row in rows]
 
     def shelf_paper(self, paper_id: str) -> dict[str, Any] | None:

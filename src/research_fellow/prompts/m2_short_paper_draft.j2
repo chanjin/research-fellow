@@ -6,6 +6,30 @@ Do not invent citations or facts. An incomplete draft is allowed: attach sentenc
 
 PROJECT: {{ project.title }}
 RESEARCH QUESTION: {{ project.research_question }}
+WRITING SPECIFICATION:
+- Target audience: {{ project.writing_spec.audience if project.writing_spec else '' }}
+- Central claim to test and sustain: {{ project.writing_spec.central_claim if project.writing_spec else '' }}
+- Body character budget (not an exact page guarantee): {{ project.writing_spec.target_min_chars if project.writing_spec else 4000 }}-{{ project.writing_spec.target_max_chars if project.writing_spec else 9000 }} Korean characters excluding whitespace
+- Required section terms: {{ project.writing_spec.required_section_terms | join(', ') if project.writing_spec else '서론, 결론' }}
+- Required Knowledge Cards: {{ project.writing_spec.required_card_ids | join(', ') if project.writing_spec else '' }}
+- Project-specific writing rules: {{ project.writing_spec.writing_rules | join(' | ') if project.writing_spec else '' }}
+- Open researcher decisions: {{ project.writing_spec.open_decisions | join(' | ') if project.writing_spec else '' }}
+- Planned substantiation method: {{ project.writing_spec.research_method if project.writing_spec else '' }}
+- Method rationale: {{ project.writing_spec.research_method_rationale if project.writing_spec else '' }}
+- Verification plan (planned, not completed): {{ project.writing_spec.verification_plan if project.writing_spec else [] }}
+- Execution guide: {{ project.writing_spec.execution_guide if project.writing_spec else [] }}
+- Result-recording plan: {{ project.writing_spec.result_recording_plan if project.writing_spec else [] }}
+
+HOW TO APPLY THE WRITING SPECIFICATION:
+1. Treat the central claim as the paper's provisional thesis. Build the argument toward it, but narrow or annotate it rather than inventing evidence to make it true.
+2. Required section terms describe required section titles or words that must appear in a section title; they are not body-text keywords. Organize the manuscript so every supplied term is represented by an appropriate section title.
+3. Project-specific writing rules are binding constraints for this draft. If available evidence cannot satisfy a rule, keep the affected sentence explicitly annotated instead of silently violating the rule.
+4. Every required Knowledge Card must be used in the body or `appendix_claims` only when its actual claim is relevant. Never distort a card merely to satisfy coverage.
+5. Treat each unresolved researcher decision as an explicit `decision` or `researcher_input` annotation with a concrete `question_for_researcher`. Do not select an option, present it as settled, or hide the uncertainty.
+6. The character range is a body-length budget, not an exact rendered-page guarantee. Prioritize the research question and central claim; move secondary but valuable grounded claims to the Appendix.
+7. Before composing, internally check the research question, central claim, required sections, required cards, writing rules, and open decisions. Return only the required JSON, not the check or planning notes.
+8. Treat the substantiation method, verification plan, and result-recording examples as a future research plan. Never convert `예시·미수행` placeholders into completed findings. State planned evaluation in future/proposal form until actual observations are supplied.
+
 EVIDENCE CARDS:
 {% for card in cards %}- {{ card.card_id }} | {{ card.title }} | {{ card.claim }} | conditions={{ card.conditions }} | limits={{ card.limits }}
 {% endfor %}

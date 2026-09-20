@@ -11,6 +11,8 @@ Use papers in REFERENCES only as bibliographic sources. Factual claims must be g
 
 PAPER PROJECT: {{ project.title }}
 RESEARCH QUESTION: {{ project.research_question }}
+WRITING SPECIFICATION: central_claim={{ project.writing_spec.central_claim if project.writing_spec else '' }}; character_budget={{ project.writing_spec.target_min_chars if project.writing_spec else 4000 }}-{{ project.writing_spec.target_max_chars if project.writing_spec else 9000 }}; required_cards={{ project.writing_spec.required_card_ids | join(', ') if project.writing_spec else '' }}; rules={{ project.writing_spec.writing_rules | join(' | ') if project.writing_spec else '' }}; planned_method={{ project.writing_spec.research_method if project.writing_spec else '' }}; verification_plan={{ project.writing_spec.verification_plan if project.writing_spec else [] }}
+Preserve this specification while applying evidence-driven changes. Do not resolve researcher decisions implicitly.
 TRIGGERING TODO:
 - ID: {{ todo.todo_id }}
 - Target sentence: {{ todo.sentence_id }}

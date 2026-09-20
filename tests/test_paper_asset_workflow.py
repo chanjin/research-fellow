@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 from urllib.error import HTTPError
 
-from research_fellow.application.paper_reading import parse_reading_questions, parse_reading_summary, promote_question
+from research_fellow.application.paper_reading import independent_card_context, parse_reading_questions, parse_reading_summary, promote_question
 from research_fellow.application.paper_shelf import pasted_paper_text_upload
 from research_fellow.storage import Ledger
 
@@ -50,6 +50,38 @@ def test_paper_asset_keeps_reading_and_promotion_history(tmp_path: Path) -> None
     assert ledger.phenomena(type_="decision_request")
     assert ledger.paper_reading_questions(paper["paper_id"])[0]["status"] == "promoted"
     assert any(event["event_type"] == "reading_question_reviewed" for event in ledger.paper_asset_events(paper["paper_id"]))
+
+
+def test_card_context_is_source_intrinsic_and_does_not_copy_project_lineage(tmp_path: Path) -> None:
+    item = {"suggested_context": "원 논문은 두 산업 과업에서 검증 절차를 비교한다."}
+    assert independent_card_context(item, "더 긴 논문 읽기 요약") == item["suggested_context"]
+    assert independent_card_context({}, "원 논문의 탐색·읽기 요약") == "원 논문의 탐색·읽기 요약"
+
+    ledger = Ledger(tmp_path / "ledger.db")
+    paper = ledger.upsert_shelf_paper({
+        "title": "Independent knowledge asset",
+        "intake_source": "search",
+        "origin_links": [{
+            "origin_kind": "paper_revision_todo",
+            "origin_title": "현재 작성 중인 숏페이퍼",
+            "research_context": "이 문장을 리비전하기 위한 프로젝트 전용 맥락",
+        }],
+    })
+    ledger.save_paper_analysis(paper["paper_id"], summary="논문 자체의 방법과 결과를 정리한 읽기 요약")
+    question = {
+        "question_id": "rq-1",
+        "question": "무엇을 비교했는가?",
+        "tentative_answer": "두 검증 절차의 차이를 비교했다.",
+        "evidence": ["p.2 Method", "p.5 Result"],
+        "uncertainty": "한 산업에 한정된다.",
+        "suggested_context": "원 논문은 두 검증 절차를 동일 조건에서 비교한다.",
+    }
+    promote_question(ledger, paper, question, "검토 완료")
+    payload = ledger.phenomena(type_="decision_request")[0]["payload"]
+    card = payload["card"]
+    assert card["context"] == question["suggested_context"]
+    assert "숏페이퍼" not in card["context"]
+    assert card["origin_links"] == paper["origin_links"]
 
 
 def test_reading_questions_support_legacy_required_columns(tmp_path: Path) -> None:

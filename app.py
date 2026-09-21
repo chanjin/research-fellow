@@ -2351,33 +2351,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                 prompt_error=str(st.session_state.get(prompt_error_key) or "")
                 if prompt_error:
                     st.warning(f"M1 프롬프트 준비 중 원문을 가져오지 못했습니다: {prompt_error}")
-                    st.caption("사이트 접근을 반복하지 않고 아래 대체 원문으로 프롬프트를 생성할 수 있습니다.")
-                fallback_file=st.file_uploader(
-                    "대체 원문 파일 · PDF/TXT/MD",type=["pdf","txt","md"],
-                    key=f"manual-reading-source-file-{paper['paper_id']}",
-                )
-                fallback_text=st.text_area(
-                    "대체 원문 텍스트 Copy/Paste",height=160,key=f"manual-reading-source-text-{paper['paper_id']}",
-                    placeholder="브라우저에서 확보한 논문 본문을 붙여 넣으세요.",
-                )
-                persist_fallback=st.checkbox(
-                    "이 대체 원문을 서재함 논문에도 연결",value=True,key=f"manual-reading-source-persist-{paper['paper_id']}",
-                    help="다음 M1 읽기와 M2 리비전에서도 같은 원문을 다시 사용할 수 있습니다.",
-                )
-                if st.button(
-                    "대체 원문으로 M1 프롬프트 만들기",type="primary",
-                    disabled=fallback_file is None and not fallback_text.strip(),key=f"manual-reading-source-build-{paper['paper_id']}",
-                ):
-                    try:
-                        fallback_upload=fallback_file if fallback_file is not None else pasted_paper_text_upload(str(paper.get("title") or "paper"),fallback_text)
-                        document=extract_document(fallback_upload,max_pages=60,chars_per_page=8000,cache_dir=EXTRACTION_CACHE)
-                        st.session_state[prompt_key]=reading_prompt(document,paper,question)
-                        st.session_state.pop(prompt_error_key,None)
-                        if persist_fallback:
-                            _store_manual_discovery_source(paper,fallback_upload,shelf_match=paper,intake_source="m1_manual_prompt_fallback")
-                            st.success("대체 원문을 서재함에 연결하고 M1 프롬프트를 만들었습니다.")
-                        else:st.success("대체 원문으로 M1 프롬프트를 만들었습니다. 원문 파일은 서재함에 저장하지 않았습니다.")
-                    except Exception as error:st.error(f"대체 원문으로 M1 프롬프트를 만들지 못했습니다: {error}")
+                    st.caption("위의 '원문 파일·텍스트 보완'에서 원문을 서재함 논문에 연결한 뒤 프롬프트를 다시 만드세요.")
                 manual_prompt = st.session_state.get(prompt_key, "")
                 if manual_prompt:
                     st.code(manual_prompt, language="markdown")

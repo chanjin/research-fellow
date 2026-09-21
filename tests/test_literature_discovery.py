@@ -48,6 +48,57 @@ def test_parse_external_results_uses_stable_fallback_id():
     assert first["source_id"] == second["source_id"]
     assert first["url"] == "https://example.org/x"
 
+
+def test_parse_external_results_repairs_unescaped_latex_math():
+    raw = r'''{
+      "search_summary": "The objective uses $\pi(K \mid S_t)$ and $\text{late binding}$.",
+      "papers": [
+        {"title":"Math Paper","authors":["A"],"publication_year":"2026","source_url":"https://example.org/math","source_id":"math-1","abstract_or_summary":"Defines $\alpha$ under $\mathcal{W}$.","relevance_score":90,"quick_take":"Uses $\pi$.","why_relevant":"Matches $S_t$.","caution":""}
+      ]
+    }'''
+
+    parsed = parse_external_literature_results(raw, 10)
+
+    assert parsed["search_summary"] == r"The objective uses $\pi(K \mid S_t)$ and $\text{late binding}$."
+    assert parsed["papers"][0]["summary"] == r"Defines $\alpha$ under $\mathcal{W}$."
+
+
+def test_parse_external_results_keeps_already_escaped_latex():
+    raw = r'{"search_summary":"Uses $\\pi$ safely.","papers":[{"title":"P","source_url":"https://example.org/p","abstract_or_summary":"$\\alpha$","relevance_score":80}]}'
+
+    parsed = parse_external_literature_results(raw, 10)
+
+    assert parsed["search_summary"] == r"Uses $\pi$ safely."
+    assert parsed["papers"][0]["summary"] == r"$\alpha$"
+
+
+def test_parse_external_results_repairs_unescaped_prose_quotes():
+    raw = '''{
+      "search_summary": "Reviews the "agent-as-job" framing",
+      "papers": [
+        {"title":"The "Agent" Problem","source_url":"https://example.org/p","abstract_or_summary":"Calls this the "responsibility gap" in deployment.","relevance_score":80}
+      ]
+    }'''
+
+    parsed = parse_external_literature_results(raw, 10)
+
+    assert parsed["search_summary"] == 'Reviews the "agent-as-job" framing'
+    assert parsed["papers"][0]["title"] == 'The "Agent" Problem'
+
+
+def test_parse_external_results_repairs_missing_and_trailing_commas():
+    raw = '''{
+      "search_summary": "overview"
+      "papers": [
+        {"title":"Paper A" "authors":["A"],"source_url":"https://example.org/a","relevance_score":80,},
+        {"title":"Paper B","source_url":"https://example.org/b","relevance_score":70,},
+      ]
+    }'''
+
+    parsed = parse_external_literature_results(raw, 10)
+
+    assert [paper["title"] for paper in parsed["papers"]] == ["Paper A", "Paper B"]
+
 from research_fellow.application.literature_discovery import build_paper_labels, collect_multisource_candidates, google_scholar_url
 
 

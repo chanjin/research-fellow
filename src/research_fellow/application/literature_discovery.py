@@ -80,6 +80,73 @@ def _repair_llm_json_escapes(value: str) -> str:
     return "".join(output)
 
 
+def _repair_unescaped_json_quotes(value: str) -> str:
+    """Escape prose quotes that an LLM placed inside a JSON string.
+
+    A quote closes a JSON string only when the following token can legally
+    follow a key or value.  Quotes followed by ordinary prose are preserved as
+    content and escaped.  This deliberately runs only after strict parsing has
+    failed.
+    """
+    output: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char != '"':
+            output.append(char)
+            index += 1
+            continue
+        slash_count = 0
+        scan = index - 1
+        while scan >= 0 and value[scan] == "\\":
+            slash_count += 1
+            scan -= 1
+        if slash_count % 2:
+            output.append(char)
+            index += 1
+            continue
+        if not in_string:
+            in_string = True
+            output.append(char)
+            index += 1
+            continue
+
+        look = index + 1
+        while look < len(value) and value[look].isspace():
+            look += 1
+        next_char = value[look] if look < len(value) else ""
+        closes_string = next_char in {"", ":", "}", "]"}
+        if next_char == ",":
+            after_comma = look + 1
+            while after_comma < len(value) and value[after_comma].isspace():
+                after_comma += 1
+            following = value[after_comma] if after_comma < len(value) else ""
+            closes_string = following in {'"', "{", "[", "}", "]", ""}
+        elif next_char == '"':
+            # A missing comma between fields:  "value" "next_key": ...
+            closes_string = bool(re.match(r'"(?:\\.|[^"\\])*"\s*:', value[look:]))
+        if closes_string:
+            in_string = False
+            output.append(char)
+        else:
+            output.append('\\"')
+        index += 1
+    return "".join(output)
+
+
+def _repair_llm_json_structure(value: str) -> str:
+    """Repair conservative, high-frequency structural mistakes in LLM JSON."""
+    repaired = _repair_unescaped_json_quotes(value)
+    # Missing comma between a value/container and the next object, array or key.
+    repaired = re.sub(r'([}\]])\s*(?=[{\[])', r'\1,', repaired)
+    repaired = re.sub(r'([}\]])\s*(?="(?:\\.|[^"\\])*"\s*:)', r'\1,', repaired)
+    repaired = re.sub(r'("|\b(?:true|false|null)|-?\d+(?:\.\d+)?)\s+(?="(?:\\.|[^"\\])*"\s*:)', r'\1,', repaired)
+    # Trailing commas are common in generated lists and objects.
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    return repaired
+
+
 def _json_payload(text: str) -> Any:
     value = (text or "").strip()
     if not value:
@@ -98,11 +165,20 @@ def _json_payload(text: str) -> Any:
     repaired = _repair_llm_json_escapes(value)
     try:
         return json.loads(repaired)
-    except json.JSONDecodeError as error:
-        raise ValueError(
-            f"JSON 응답을 해석하지 못했습니다: {error}. "
-            "수식의 백슬래시는 자동 보정했지만, 따옴표·쉼표 또는 JSON 구조도 확인해 주세요."
-        ) from error
+    except json.JSONDecodeError as first_error:
+        structurally_repaired = _repair_llm_json_structure(repaired)
+        try:
+            return json.loads(structurally_repaired)
+        except json.JSONDecodeError as error:
+            lines = structurally_repaired.splitlines()
+            problem_line = lines[error.lineno - 1].strip() if 0 < error.lineno <= len(lines) else ""
+            excerpt = problem_line[max(0, error.colno - 45): error.colno + 45]
+            location = f"line {error.lineno}, column {error.colno}"
+            detail = f" 문제 위치: {excerpt}" if excerpt else ""
+            raise ValueError(
+                f"JSON 응답을 자동 보정한 뒤에도 해석하지 못했습니다({location}): {error.msg}."
+                f"{detail} 응답 전체를 다시 만들 필요 없이 표시된 줄의 따옴표·쉼표·괄호만 수정해 주세요."
+            ) from first_error
 
 
 

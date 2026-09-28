@@ -3,5 +3,6 @@ data/
 .venv/
 *.pyc
 *.jsonl
+*.html
 .DS_Store
 .cache/

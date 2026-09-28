@@ -1,0 +1,155 @@
+digraph ResearchFellowAPF {
+
+  graph [dpi=300];
+
+  node [
+    shape=box,
+    style="filled",
+    fillcolor="white",
+    color="#222222",
+    fontname="Helvetica",
+    fontsize=11
+   
+  ];
+
+  edge [
+    color="#111111",
+    fontname="Helvetica",
+    fontsize=9,
+    arrowhead=vee,
+    arrowtail=vee
+  ];
+
+  requirement [
+    shape=ellipse,
+    style="filled,dashed",
+    fillcolor="#FFF400",
+    penwidth=1.5,
+    label="R: Sustained, Evidence-grounded Research Partnership\n(Living Domain Knowledge + Critical Co-authorship)"
+  ];
+
+//  subgraph cluster_operational_world {
+
+    literature [
+      shape=note,
+      label="<<Lexical>>\nAcademic Literature & Sources [W_Lit]\n- Papers / PDFs / Web pages\n- Metadata / Citations / Abstracts"
+    ];
+
+    m1 [
+      shape=box,
+      peripheries=2,
+      fillcolor="#F8F8F8",
+      penwidth=2.0,
+      label="<<Machine: Curator>>\nM1 Knowledge Curator [M1]\n- Literature Discovery & Paper Reading\n- Knowledge Card & Ontology Evolution"
+    ];
+
+    memory [
+      shape=note,
+      fillcolor="#D9D9D9",
+      label="<<Lexical: Operational Context>>\nResearch Assets & Memory [S_t, K_t]\n- Intent / Search Runs / Paper Shelf & Sources\n- Knowledge Cards / Relations / Versioned Ontology\n- Research Questions / Projects / Manuscripts\n- Decisions / To-dos / References / Revision History"
+    ];
+
+    llm [
+      shape=box,
+      fillcolor="#FFFFFF",
+      label="<<Causal>>\nInternal & External LLM Services [W_LLM]\n- Prompt-conditioned generation\n- Non-deterministic drafts / JSON responses"
+    ];
+
+    m2 [
+      shape=box,
+      peripheries=2,
+      fillcolor="#D9D9D9",
+      penwidth=2.0,
+      label="<<Machine: Co-author / Advisor>>\nM2 Research Co-author [M2]\n- Research Question & Paper Project Formation\n- Evidence Review / To-do / Draft Revision\n- Advisory Interpretation & Response"
+    ];
+
+    researcher [
+      shape=box,
+      style="filled,dashed",
+      fillcolor="#FFF400",
+      label="<<Biddable>>\nHuman Researcher [W_Researcher]\n- Authoritative judgment\n- Review / correction / approval"
+    ];
+
+    requester [
+      shape=box,
+      style="filled,dashed",
+      fillcolor="#FFF8A6",
+      label="<<Biddable>>\nExternal Advisory Requester [W_Requester]\n- Question / context\n- Scope confirmation / follow-up"
+    ];
+
+    workspace_server [
+      shape=folder,
+      fillcolor="#FFFFFF",
+      label="<<Lexical>>\nWorkspace Repository [W_Server]\n- Workspace DB snapshots\n- Versioned paper assets"
+    ];
+
+    //{ rank=same; m1; memory; llm; }
+    //{ rank=same; researcher; m2; requester; }
+
+    m1 -> literature [
+      dir=both,
+      label="1. Paper metadata & source text\n2. Search intent & acquisition request"
+    ];
+
+    m1 -> llm [
+      dir=both,
+      style=dashed,
+      label="3. Discovery / reading / ontology prompt\nDraft or structured response"
+    ];
+
+    m1 -> memory [
+      dir=both,
+      label="4. Shelf, provenance, search history,\ncards & ontology versions"
+    ];
+
+    m1 -> m2 [
+      style=dotted,
+      penwidth=1.0,
+      label="5. knowledge_update\nNew evidence / gap / conflict"
+    ];
+
+    m2 -> m1 [
+      style=dotted,
+      penwidth=1.0,
+      constraint=false,
+      label="6. approved curation_intent\nEvidence need & completion condition"
+    ];
+
+    researcher -> m1 [
+      dir=both,
+      label="7. Sources, card & ontology review\nApprove / edit / defer / reject"
+    ];
+
+    researcher -> m2 [
+      dir=both,
+      label="8. Research question, author input & feedback\nProposal / manuscript / decision / confirmation"
+    ];
+
+    m2 -> memory [
+      dir=both,
+      label="9. Evidence context & project state\nManuscript / To-do / references / history"
+    ];
+
+    m2 -> llm [
+      dir=both,
+      style=dashed,
+      label="10. Proposal, drafting, revision\n& resolution-verification tasks"
+    ];
+
+    m2 -> requester  [
+      dir=both,
+      label="11. Advisory request / interpreted scope\nEvidence-grounded response / follow-up"
+    ];
+
+    memory -> workspace_server [
+      dir=both,
+      style=dashed,
+      label="12. All-workspace DB merge\n& paper-asset synchronization"
+    ];
+  //}
+  requirement -> researcher [style=dotted, arrowhead=none, color="#607D8B", constraint=false];
+  requirement -> m1 [style=dotted, arrowhead=none, color="#607D8B", constraint=false];
+  requirement -> m2 [style=dotted, arrowhead=none, color="#607D8B", constraint=false];
+
+  //requirement -> literature [style=invis, weight=12];
+}

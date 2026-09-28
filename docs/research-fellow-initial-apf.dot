@@ -1,0 +1,120 @@
+digraph ResearchFellowInitialAPF {
+  graph [
+    rankdir=TB,
+    splines=spline,
+    overlap=false,
+    bgcolor="white",
+    fontname="나눔명조",
+    fontsize=18,
+    labelloc="t",
+    dpi=300,
+    
+    label="도메인 특화 전문 연구위원 에이전트 · 개발 초기 단계 APF"
+  ];
+
+  node [
+    shape=box,
+    style="filled",
+    fillcolor="white",
+    color="#202020",
+    fontname="나눔명조",
+    fontsize=12,
+    margin="0.5,0.230"
+  ];
+
+  edge [
+    color="#202020",
+    fontname="나눔명조",
+    fontsize=10,
+    arrowhead=vee,
+    arrowtail=vee
+  ];
+
+  requirement [
+    shape=ellipse,
+    style="filled,dashed",
+    fillcolor="#fff200",
+    color="#202020",
+    penwidth=1.4,
+    label="요구사항 R: 근거 기반 연구 수행 지원\n지속적 도메인 지식 축적 · 연구질문과 논증의 비판적 검토 · 책임 있는 연구 자문"
+  ];
+
+  machine [
+    shape=box,
+    peripheries=2,
+    penwidth=1.6,
+    fillcolor="#d9d9d9",
+    label="<<Machine>>\n도메인 특화 전문 연구위원 에이전트 [M]\n(내부 직무 분해와 지식 표현은 이후 설계 단계에서 결정)"
+  ];
+
+  researcher [
+    style="filled,dashed",
+    fillcolor="#fff200",
+    label="<<Biddable>>\n인간 연구자 [W_연구자]\n- 연구질문·가설·연구 맥락 제시\n- 검토·수정·승인"
+  ];
+
+  requester [
+    style="filled,dashed",
+    fillcolor="#fff7a8",
+    label="<<Biddable>>\n외부 자문 요청자 [W_요청자]\n- 자문 질문·업무 맥락 제시\n- 범위 확인·후속 질문"
+  ];
+
+  academic_systems [
+    label="<<Causal>>\n학술정보 시스템 [W_학술정보]\n- arXiv · Semantic Scholar · Crossref\n- 출판사 및 원문 웹사이트"
+  ];
+
+  research_documents [
+    shape=note,
+    fillcolor="#f3f6fa",
+    label="<<Lexical>>\n외부 연구문서 [W_문서]\n- 연구자가 보유한 논문·노트\n- 기존 원고·실험 결과·참고자료"
+  ];
+
+  external_llm [
+    label="<<Causal>>\n외부 LLM 서비스 [W_LLM]\n- 프롬프트 조건부 생성\n- 비결정적 분석·응답"
+  ];
+
+//  { rank=same; research_documents; academic_systems; }
+//  { rank=same; machine; external_llm; }
+//  { rank=same; researcher; requester; }
+
+  requirement -> machine [
+    style=dotted,
+    color="#78909c",
+    arrowhead=none,
+    //constraint=true,
+    label="충족해야 할 연구지원 요구"
+  ];
+
+  requirement -> researcher [
+    style=dotted,
+    color="#78909c",
+    arrowhead=none,
+    //constraint=false
+  ];
+
+  research_documents -> machine [
+    label="3. 논문 본문 · 연구 노트 · 기존 원고\n실험 결과 · 인용 문맥"
+  ];
+
+  machine -> academic_systems [
+    dir=both,
+    label="2. 탐색 질의 · 원문 요청\n검색 결과 · 메타데이터 · 접근 상태"
+  ];
+
+  machine -> external_llm [
+    dir=both,
+    style=dashed,
+    label="4. 작업 프롬프트 · 선택된 연구 맥락\n초안 · 분석 · 구조화 응답"
+  ];
+
+  researcher -> machine [
+    dir=both,
+    label="1. 연구질문 · 가설 · 자료 · 피드백\n검토 보고 · 근거 · 보완 요청 · 자문"
+  ];
+
+  machine -> requester [ dir=both,  style=dashed,
+    label="5. 자문 요청 · 범위 확인\n근거 기반 답변 · 한계 · 후속 질문"  ];
+
+  //requirement -> researcher [weight=2];
+  //researcher -> requester [style=invis, weight=2];
+}

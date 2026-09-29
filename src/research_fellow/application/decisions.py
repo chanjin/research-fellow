@@ -61,6 +61,17 @@ def decide_request(
              "origin_links": card.get("origin_links", [])},
             card["card_id"], status="completed",
         )
+    elif request["subject_type"] == "knowledge_evidence":
+        update = payload["evidence_update"]
+        target_card_id = str(update["target_card_id"])
+        card = memory.add_supporting_evidence(target_card_id, update)
+        ledger.record(
+            request["case_id"], "knowledge_update", "m1", ["m2", "researcher"],
+            "knowledge_card",
+            {"title": f"승인 근거 보강: {card['title']}", "card_id": card["card_id"],
+             "operation": "supporting_evidence_added", "origin_links": card.get("origin_links", [])},
+            card["card_id"], status="completed",
+        )
     elif request["subject_type"] == "curation_intent":
         ledger.record(
             request["case_id"], "curation_intent", "m2", ["m1"], "curation_intent",

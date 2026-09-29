@@ -12,6 +12,7 @@ dependencies = [
   "requests>=2.32",
   "jinja2>=3.1",
   "networkx>=3.4",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -27,4 +28,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-research_fellow = ["prompts/*.j2"]
+research_fellow = ["prompts/*.j2", "workflows/**/*.yaml", "ajd/*.yaml", "topologies/*.yaml"]

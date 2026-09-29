@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from research_fellow.application.ontology import search_cards_for_ontology
 from research_fellow.infrastructure.prompt_renderer import render_prompt
+from research_fellow.application.structured_output import extract_json_value
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever
 
 
@@ -116,34 +115,13 @@ def relation_suggestion_prompt(
     )
 
 
-def _extract_json(text: str) -> Any:
-    raw = (text or "").strip()
-    if not raw:
-        raise ValueError("LLM 응답이 비어 있습니다.")
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S).strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start_candidates = [i for i in (raw.find("{"), raw.find("[")) if i >= 0]
-        if not start_candidates:
-            raise ValueError("JSON 응답을 찾을 수 없습니다.")
-        start = min(start_candidates)
-        end = max(raw.rfind("}"), raw.rfind("]"))
-        if end <= start:
-            raise ValueError("JSON 응답이 중간에서 잘린 것으로 보입니다.")
-        try:
-            return json.loads(raw[start : end + 1])
-        except json.JSONDecodeError as error:
-            raise ValueError(f"JSON 형식을 해석할 수 없습니다: {error}") from error
-
-
 def parse_type_suggestions(
     text: str,
     *,
     existing_facets: list[dict[str, Any]],
     existing_types: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    payload = _extract_json(text)
+    payload = extract_json_value(text)
     if not isinstance(payload, dict):
         raise ValueError("타입 후보 응답은 JSON object여야 합니다.")
     recommendations = payload.get("recommendations") or []
@@ -216,7 +194,7 @@ def parse_type_suggestions(
 
 
 def parse_relation_suggestions(text: str, *, existing_types: list[dict[str, Any]]) -> dict[str, Any]:
-    payload = _extract_json(text)
+    payload = extract_json_value(text)
     if not isinstance(payload, dict):
         raise ValueError("관계 후보 응답은 JSON object여야 합니다.")
     suggestions = payload.get("relations") or []

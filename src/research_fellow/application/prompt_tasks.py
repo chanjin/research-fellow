@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from research_fellow.infrastructure.prompt_renderer import render_prompt
+from research_fellow.application.structured_output import extract_json_object
 from research_fellow.origin_lineage import origin_labels
 
 
@@ -166,22 +167,12 @@ New knowledge cards:
 
 def parse_knowledge_grouping(text: str, *, valid_card_ids: set[str], limit: int = 8) -> list[dict[str, Any]]:
     """Parse advisory grouping JSON defensively and keep only known card IDs."""
-    import json
-    import re
-
-    raw = (text or "").strip()
-    if not raw:
+    if not (text or "").strip():
         return []
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, flags=re.S)
-        if not match:
-            return []
-        try:
-            payload = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return []
+        payload = extract_json_object(text)
+    except ValueError:
+        return []
     groups = payload.get("groups", []) if isinstance(payload, dict) else []
     results: list[dict[str, Any]] = []
     for item in groups:

@@ -1,0 +1,28 @@
+dsl: ajd-workflow/v0.2
+id: m2_paper_proposal
+revision: 1
+agent: m2
+realizes: [paper_coauthoring]
+purpose: >
+  확정 전 제목과 연구질문을 내부 지식과 서재함 논문 범위에서 검토하고,
+  잠정 기여·범위·유사연구 검증 필요사항을 논문 기획안으로 구조화한다.
+trigger:
+  phenomenon: paper_proposal_request
+inputs: [title, research_question, research_context, cards, papers]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: review_paper_proposal
+    kind: decision
+    authority: m2
+    uses:
+      required: [title, research_question, research_context, cards, papers]
+    produces: [proposal_review, raw_response]
+outputs:
+  required: [proposal_review]
+  optional: [raw_response]
+completion:
+  criteria: [proposal_review_is_available_before_project_commitment]
+invariants:
+  - model_prior_is_not_treated_as_verified_novelty_evidence
+  - verification_needs_are_preserved_for_followup_search

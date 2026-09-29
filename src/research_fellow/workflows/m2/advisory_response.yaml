@@ -1,0 +1,72 @@
+dsl: ajd-workflow/v0.2
+id: m2_advisory_response
+revision: 1
+agent: m2
+realizes: [advisory_response]
+purpose: >
+  확인된 자문 계획에 따라 승인 지식과 관계를 수집하고 각 하위 질문을 판단한 뒤,
+  근거 범위와 유보 사항을 보존한 M2 자문 답변으로 종합한다.
+
+trigger:
+  phenomenon: advisory_plan_confirmed
+
+inputs:
+  - plan
+  - context
+  - recipient
+  - cards
+  - relations
+
+memory:
+  reads:
+    - knowledge_cards
+
+steps:
+  - id: collect_advisory_evidence
+    kind: action
+    uses:
+      required: [plan, context, cards, relations]
+    produces: [evidence_clusters]
+    purpose: >
+      각 하위 질문별로 승인 지식의 직접 일치와 관계 확장을 이용해 근거 클러스터를 만든다.
+
+  - id: judge_advisory_subquestion
+    kind: decision
+    authority: m2
+    foreach: evidence_clusters
+    uses:
+      required: [evidence_clusters, context]
+    produces: [judgments]
+    purpose: >
+      각 하위 질문에 대해 현재 승인 근거가 지지하는 판단과 유보 범위를 작성한다.
+
+  - id: synthesize_advisory_response
+    kind: decision
+    authority: m2
+    uses:
+      required: [plan, evidence_clusters, judgments, recipient]
+    produces: [answer, evidence_card_ids, evidence_relation_ids, unresolved_items]
+    emits:
+      - phenomenon: advice_report
+        to: [researcher]
+    purpose: >
+      하위 판단을 최종 자문으로 통합하고 사용된 근거와 미해결 질문을 함께 반환한다.
+
+outputs:
+  required:
+    - evidence_clusters
+    - judgments
+    - answer
+    - evidence_card_ids
+    - evidence_relation_ids
+    - unresolved_items
+
+completion:
+  criteria:
+    - every_subquestion_has_a_judgment
+    - final_advice_is_traceable_to_approved_evidence
+
+invariants:
+  - evidence_selection_remains_deterministic_given_the_same_retrieval_inputs
+  - missing_evidence_is_reported_as_uncertainty_not_fabricated_support
+  - recalled_precedent_is_context_not_current_evidence

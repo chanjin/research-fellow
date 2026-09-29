@@ -1,0 +1,40 @@
+dsl: ajd-workflow/v0.2
+id: m2_advisory_planning
+revision: 1
+agent: m2
+realizes: [advisory_response]
+purpose: >
+  연구자 질문 또는 외부 자문 요청을 M2의 전문성 관점에서 핵심 판단 질문과
+  검증 가능한 하위 질문으로 구조화하여 근거 수집 전에 답변 계획을 만든다.
+
+trigger:
+  phenomenon: advisory_request
+
+inputs:
+  - request_type
+  - question
+  - context
+  - recipient
+  - recalled_context
+
+steps:
+  - id: plan_advisory
+    kind: decision
+    authority: m2
+    uses:
+      required: [request_type, question, context, recipient, recalled_context]
+    produces: [plan, plan_draft]
+    purpose: >
+      요청을 바로 답하지 않고 최종 판단 질문과 최대 세 개의 하위 검증 질문으로 분해한다.
+
+outputs:
+  required: [plan]
+  optional: [plan_draft]
+
+completion:
+  criteria:
+    - an_advisory_plan_exists_before_evidence_judgment
+
+invariants:
+  - the_plan_preserves_the_original_request_context
+  - the_plan_separates_decision_question_from_supporting_subquestions

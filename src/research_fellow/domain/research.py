@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 ConfidenceLevel = Literal["low", "medium", "high"]
 Priority = Literal["높음", "보통", "낮음"]
-ResearchQuestionStatus = Literal["candidate", "interested", "exploring", "hold", "rejected"]
+ResearchQuestionStatus = Literal["candidate", "interested", "exploring", "hold", "resolved", "rejected"]
 ExecutionMode = Literal["manual", "auto"]
 IntentCreator = Literal["m2", "m2_auto"]
 OriginType = Literal["researcher_question", "m2_knowledge", "paper_writing"]

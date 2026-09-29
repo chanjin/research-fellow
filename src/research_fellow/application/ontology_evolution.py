@@ -2,30 +2,18 @@
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from research_fellow.infrastructure.prompt_renderer import render_prompt
+from research_fellow.application.structured_output import extract_json_object
 
 
 def ontology_delta_prompt(*, cards: list[dict[str, Any]], facets: list[dict[str, Any]], types: list[dict[str, Any]], relations: list[dict[str, Any]], comment: str = "") -> str:
     return render_prompt("m1_ontology_delta.j2", cards=cards, facets=facets, types=types, relations=relations, comment=comment)
 
 
-def _json(text: str) -> dict[str, Any]:
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip(), flags=re.I | re.S)
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("온톨로지 변경안 JSON을 찾지 못했습니다.")
-    value = json.loads(text[start : end + 1])
-    if not isinstance(value, dict):
-        raise ValueError("온톨로지 변경안은 JSON object여야 합니다.")
-    return value
-
-
 def parse_ontology_delta(text: str, *, cards: list[dict[str, Any]], types: list[dict[str, Any]]) -> dict[str, Any]:
-    raw = _json(text)
+    raw = extract_json_object(text, message="온톨로지 변경안은 JSON object여야 합니다.")
     card_ids = {str(card.get("card_id")) for card in cards}
     type_by_id = {str(item.get("type_id")): item for item in types}
     type_by_name = {str(item.get("name", "")).casefold(): item for item in types}

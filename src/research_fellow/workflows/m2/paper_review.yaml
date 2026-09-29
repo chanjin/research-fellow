@@ -1,0 +1,27 @@
+dsl: ajd-workflow/v0.2
+id: m2_paper_review
+revision: 1
+agent: m2
+realizes: [paper_coauthoring]
+purpose: >
+  현재 원고의 문장별 주장·근거·범위·논리 문제를 진단하고 Revision To-do의 근거가 되는 마크업을 만든다.
+trigger:
+  phenomenon: paper_review_request
+inputs: [project, manuscript, cards, version]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: review_manuscript
+    kind: decision
+    authority: m2
+    uses:
+      required: [project, manuscript, cards, version]
+    produces: [annotations, reviewed_manuscript, raw_response]
+outputs:
+  required: [annotations, reviewed_manuscript]
+  optional: [raw_response]
+completion:
+  criteria: [the_current_manuscript_version_has_sentence_level_review]
+invariants:
+  - review_does_not_silently_change_the_argument
+  - review_findings_remain_traceable_to_sentence_ids

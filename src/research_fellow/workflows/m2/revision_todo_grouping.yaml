@@ -1,0 +1,25 @@
+dsl: ajd-workflow/v0.2
+id: m2_revision_todo_grouping
+revision: 1
+agent: m2
+realizes: [revision_todo_management]
+purpose: >
+  함께 처리할 수 있는 활성 Revision To-do를 제한된 그룹으로 묶고 공유 근거 요구와 탐색 필요를 구조화한다.
+trigger:
+  phenomenon: revision_todo_grouping_request
+inputs: [project, manuscript, todos]
+steps:
+  - id: group_revision_todos
+    kind: decision
+    authority: m2
+    uses:
+      required: [project, manuscript, todos]
+    produces: [group_plan, raw_response]
+outputs:
+  required: [group_plan]
+  optional: [raw_response]
+completion:
+  criteria: [each_group_contains_only_active_nonduplicated_todos]
+invariants:
+  - one_todo_may_belong_to_at_most_one_group
+  - grouping_does_not_imply_resolution

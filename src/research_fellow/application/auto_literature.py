@@ -4,18 +4,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from research_fellow.application.dsl import WorkflowDefinition, prepare_workflow_run, workflow_result
+from research_fellow.application.dsl import (
+    capability_bindings,
+    execute_workflow,
+    load_workflow_definition,
+    prepare_workflow_context,
+    project_workflow_outputs,
+)
 from research_fellow.application.llm_retry import LLMRetryExhausted
 from research_fellow.application.llm_execution import execute_llm_stage
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.run_tracking import ExecutionRunTracker
-from research_fellow.application.search_profiles import (
-    auto_search_strategy_prompt,
-    keyword_prompt,
-    parse_auto_search_strategy,
-    parse_keyword_plan,
-    run_profile,
+from research_fellow.application.search_profile_strategy import (
+    auto_search_strategy_prompt, keyword_prompt, parse_auto_search_strategy, parse_keyword_plan,
 )
+from research_fellow.application.search_profile_execution import run_profile
 from research_fellow.services import complete_intent
 from research_fellow.storage import Ledger
 
@@ -82,7 +85,8 @@ def execute_auto_literature_review(
     The YAML owns the M1 orchestration. Python handlers retain stateful ledger
     operations, parsing/validation, search execution, and deterministic fallback.
     """
-    workflow = prepare_workflow_run(WORKFLOW_PATH, {
+    definition = load_workflow_definition(WORKFLOW_PATH)
+    context = prepare_workflow_context(definition, {
         "ledger": ledger,
         "curation_intent": intent_event,
         "data_dir": data_dir,
@@ -91,13 +95,26 @@ def execute_auto_literature_review(
         "fulltext_drafter": fulltext_drafter,
         "synthesis_drafter": synthesis_drafter,
         "parent_run_id": parent_run_id,
-    }, globals())
-    context = workflow.context
+    })
 
-    return workflow.execute(recover=[
-        (LLMRetryExhausted, _recover_retry_exhausted),
-        (Exception, _recover_unexpected_error),
-    ])
+    try:
+        execute_workflow(
+            definition,
+            context,
+            capability_bindings(
+                _plan_literature_search,
+                _discover_and_screen_literature,
+                _record_search_failure,
+                _review_full_texts,
+                _synthesize_literature_report,
+                _finalize_literature_review,
+            ),
+        )
+        return project_workflow_outputs(definition, context)
+    except LLMRetryExhausted as error:
+        return _handle_retry_exhausted(context, error, definition.workflow_id)
+    except Exception as error:
+        return _handle_unexpected_error(context, error, definition.workflow_id)
 
 
 def _plan_literature_search(context: dict[str, Any]) -> None:
@@ -153,8 +170,12 @@ def _plan_literature_search(context: dict[str, Any]) -> None:
 
 def _record_failure(context: dict[str, Any], error: LLMRetryExhausted, stage: str, extra: dict[str, Any] | None = None) -> None:
     tracker: ExecutionRunTracker = context["run_tracker"]
-    tracker.fail_from_llm(
-        error, stage=stage,
+    tracker.needs_attention(
+        stage=stage, error_type=error.error_type,
+        error_message=error.message, retry_count=error.attempts,
+    )
+    tracker.record_llm_failure(
+        error,
         context={"kind": "auto_literature", "parent_run_id": context.get("parent_run_id", ""), **(extra or {})},
         intent_id=context["intent_id"],
     )
@@ -310,10 +331,7 @@ def _finalize_literature_review(context: dict[str, Any]) -> None:
     })
 
 
-def _recover_retry_exhausted(
-    context: dict[str, Any], error: Exception, definition: WorkflowDefinition,
-) -> dict[str, Any]:
-    assert isinstance(error, LLMRetryExhausted)
+def _handle_retry_exhausted(context: dict[str, Any], error: LLMRetryExhausted, workflow_id: str) -> dict[str, Any]:
     ledger: Ledger = context["ledger"]
     if context.get("auto_run_id"):
         _record_failure(context, error, error.stage)
@@ -329,18 +347,14 @@ def _recover_retry_exhausted(
          "retry_run_id": context.get("auto_run_id", ""), "needs_attention": True},
         subject_id=context.get("intent_id", ""), status="failed",
     )
-    return workflow_result(
-        definition, context, status="needs_attention",
-        values={
-            "report": report, "run": {}, "papers": [],
-            "retry_run_id": context.get("auto_run_id", ""),
-        },
-    )
+    return {
+        "status": "needs_attention", "report": report, "run": {}, "papers": [],
+        "retry_run_id": context.get("auto_run_id", ""), "workflow_id": workflow_id,
+        "workflow_trace": list(context.get("workflow_trace", [])),
+    }
 
 
-def _recover_unexpected_error(
-    context: dict[str, Any], error: Exception, definition: WorkflowDefinition,
-) -> dict[str, Any]:
+def _handle_unexpected_error(context: dict[str, Any], error: Exception, workflow_id: str) -> dict[str, Any]:
     ledger: Ledger = context["ledger"]
     tracker = context.get("run_tracker")
     if tracker is not None:
@@ -359,7 +373,7 @@ def _recover_unexpected_error(
          "intent_id": context.get("intent_id", ""), "auto_mode": True},
         subject_id=context.get("intent_id", ""), status="failed",
     )
-    return workflow_result(
-        definition, context, status="failed",
-        values={"report": report, "run": {}, "papers": []},
-    )
+    return {
+        "status": "failed", "report": report, "run": {}, "papers": [],
+        "workflow_id": workflow_id, "workflow_trace": list(context.get("workflow_trace", [])),
+    }

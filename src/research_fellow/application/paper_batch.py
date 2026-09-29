@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.request import Request, urlopen
 
-from research_fellow.application.claim_curation import build_simple_claim_cards, discovery_prompt, parse_candidate_claims
+from research_fellow.application.claim_curation_cards import build_simple_claim_cards
+from research_fellow.application.claim_curation_prompts import discovery_prompt
+from research_fellow.application.claim_curation_parsers import parse_candidate_claims
 from research_fellow.infrastructure.document_reader import extract_document
 
 class _BytesUpload:

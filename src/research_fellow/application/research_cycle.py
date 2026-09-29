@@ -4,15 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from research_fellow.application.advising import (
-    auto_rq_priority_prompt,
-    dispatch_top_research_questions,
-    parse_research_question_suggestions,
-    parse_rq_priority_assessment,
-    recent_knowledge_updates,
-    recent_research_questions,
-    store_research_question_candidates,
-)
+from research_fellow.application.advising_rq_prompts import auto_rq_priority_prompt
+from research_fellow.application.advising_rq_parsers import parse_research_question_suggestions, parse_rq_priority_assessment
+from research_fellow.application.advising_rq_store import store_research_question_candidates
+from research_fellow.application.advising_rq_intents import dispatch_top_research_questions
+from research_fellow.application.advising_state import recent_knowledge_updates, recent_research_questions
 from research_fellow.application.auto_literature import execute_auto_literature_review
 from research_fellow.application.dsl import WorkflowDefinition, prepare_workflow_run, workflow_result
 from research_fellow.application.llm_retry import LLMRetryExhausted

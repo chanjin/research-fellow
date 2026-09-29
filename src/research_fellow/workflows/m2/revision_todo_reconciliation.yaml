@@ -1,0 +1,25 @@
+dsl: ajd-workflow/v0.2
+id: m2_revision_todo_reconciliation
+revision: 1
+agent: m2
+realizes: [revision_todo_management]
+purpose: >
+  원고 버전 변경 후 기존 Revision To-do를 해결·유지·수정·불필요·통합·분리로 재평가하고 신규 작업 후보를 구성한다.
+trigger:
+  phenomenon: manuscript_revision_completed
+inputs: [project, before_manuscript, after_manuscript, before_todos, revision_diff]
+steps:
+  - id: reconcile_revision_todos
+    kind: decision
+    authority: m2
+    uses:
+      required: [project, before_manuscript, after_manuscript, before_todos, revision_diff]
+    produces: [reconciliation, raw_response]
+outputs:
+  required: [reconciliation]
+  optional: [raw_response]
+completion:
+  criteria: [every_previous_todo_has_a_reconciliation_status]
+invariants:
+  - missing_llm_assessments_become_researcher_review_instead_of_silent_deletion
+  - reconciliation_does_not_apply_backlog_changes_without_researcher_review

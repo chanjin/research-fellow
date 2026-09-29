@@ -7,7 +7,7 @@ from typing import Any
 from research_fellow.domain.knowledge import KnowledgeCard, parse_text_draft
 from research_fellow.infrastructure.arxiv import ArxivError, search as arxiv_search
 from research_fellow.infrastructure.semantic_scholar import enrich_citation_counts
-from research_fellow.application.search_profiles import auto_search_strategy_prompt, parse_auto_search_strategy
+from research_fellow.application.search_profile_strategy import auto_search_strategy_prompt, parse_auto_search_strategy
 
 
 def sensemaking_answer_prompt(*, thread_title: str, conversation: list[dict[str, Any]], question: str, cards: list[dict[str, Any]], papers: list[dict[str, Any]] | None = None) -> str:

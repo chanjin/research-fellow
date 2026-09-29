@@ -1,0 +1,325 @@
+"""Search-strategy, query and screening capabilities for M1 search profiles."""
+from __future__ import annotations
+import json
+import re
+from typing import Any, Callable
+
+STOP_WORDS = {
+    "a", "an", "and", "as", "at", "based", "by", "for", "from", "in", "into", "of", "on", "or", "the", "to", "with",
+}
+
+def keyword_prompt(profile: dict[str, Any]) -> str:
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+
+    return render_prompt("m2_search_keywords.j2", profile=profile)
+
+
+def auto_search_strategy_prompt(profile: dict[str, Any]) -> str:
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+
+    return render_prompt("m1_auto_search_strategy.j2", profile=profile)
+
+
+def parse_auto_search_strategy(text: str) -> dict[str, Any]:
+    """Parse concept groups and arXiv-ready Boolean query variants for auto mode.
+
+    Falls back to the legacy phrase plan so auto execution is not blocked by a
+    local model that still returns the old keyword format.
+    """
+    section = "concepts"
+    groups: list[dict[str, Any]] = []
+    core_terms: list[str] = []
+    queries: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        marker = line.rstrip(":").upper()
+        if marker == "CONCEPT_GROUPS":
+            section = "concepts"
+            continue
+        if marker in {"CORE_TERMS", "CORE TERMS"}:
+            section = "terms"
+            continue
+        if marker in {"QUERY_VARIANTS", "QUERY VARIANTS"}:
+            section = "queries"
+            continue
+        value = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if section == "concepts" and "|" in value:
+            label, raw_terms = [part.strip() for part in value.split("|", 1)]
+            terms = [term.strip().strip('"') for term in raw_terms.split(";") if is_english_search_term(term.strip().strip('"'))]
+            if label and terms:
+                groups.append({"concept": label, "terms": terms[:6]})
+        elif section == "terms":
+            if is_english_search_term(value.strip('"')):
+                core_terms.append(value.strip('"'))
+        elif section == "queries":
+            if _valid_boolean_query(value):
+                queries.append(value)
+
+    core_terms = _clean_core_terms(core_terms)
+    queries = _dedupe_queries(queries)[:5]
+    phrases = []
+    for group in groups:
+        for term in group["terms"]:
+            if term.lower() not in {item.lower() for item in phrases}:
+                phrases.append(term)
+    if not queries:
+        legacy_phrases, legacy_terms = parse_keyword_plan(text)
+        phrases = phrases or legacy_phrases
+        core_terms = core_terms or legacy_terms
+        queries = _boolean_queries_from_phrases(phrases)
+    return {"concept_groups": groups, "phrases": phrases[:12], "core_terms": core_terms, "queries": queries[:5]}
+
+
+def _valid_boolean_query(value: str) -> bool:
+    if not value or any("가" <= character <= "힣" for character in value):
+        return False
+    upper = value.upper()
+    return 'ALL:"' in upper and (" AND " in upper or " OR " in upper)
+
+
+def _dedupe_queries(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", value.strip()).lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(re.sub(r"\s+", " ", value.strip()))
+    return result
+
+
+def _boolean_queries_from_phrases(phrases: list[str]) -> list[str]:
+    """Safe fallback: pair independent phrases with OR/AND without inventing terms."""
+    cleaned = [phrase for phrase in phrases if is_english_search_term(phrase)]
+    if not cleaned:
+        return []
+    expressions = [_phrase_expression(phrase) for phrase in cleaned[:6]]
+    if len(expressions) == 1:
+        return expressions
+    queries: list[str] = []
+    # Broad OR query protects recall. Pairwise AND variants add contextual precision.
+    queries.append("(" + " OR ".join(expressions[: min(3, len(expressions))]) + ")")
+    for index in range(min(3, len(expressions) - 1)):
+        queries.append(f"({expressions[index]}) AND ({expressions[index + 1]})")
+    return _dedupe_queries(queries)[:5]
+
+
+def abstract_relevance_prompt(profile: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+    from research_fellow.infrastructure.prompt_renderer import render_prompt
+
+    return render_prompt("m2_abstract_relevance.j2", profile=profile, candidates=candidates)
+
+
+def parse_keywords(text: str) -> list[str]:
+    keywords = []
+    for line in text.splitlines():
+        value = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if is_english_search_term(value) and value not in keywords:
+            keywords.append(value)
+    return keywords[:8]
+
+
+def parse_keyword_plan(text: str) -> tuple[list[str], list[str]]:
+    """Read M2's explicit phrase/term plan, with a safe fallback for old prompts."""
+    section = "phrases"
+    phrases: list[str] = []
+    core_terms: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        marker = line.rstrip(":").upper()
+        if marker in {"PRIORITY_PHRASES", "PRIORITY PHRASES"}:
+            section = "phrases"
+            continue
+        if marker in {"CORE_TERMS", "CORE TERMS"}:
+            section = "terms"
+            continue
+        value = re.sub(r"^\\s*(?:[-*•]|\\d+[.)])\\s*", "", line).strip().strip('"')
+        if not is_english_search_term(value):
+            continue
+        target = phrases if section == "phrases" else core_terms
+        if value.lower() not in {item.lower() for item in target}:
+            target.append(value)
+    phrases = phrases[:8]
+    core_terms = _clean_core_terms(core_terms)
+    return (phrases or parse_keywords(text), core_terms)
+
+
+def query_for(profile: dict[str, Any]) -> str:
+    if invalid := [keyword for keyword in profile["keywords"] if not is_english_search_term(keyword)]:
+        raise ValueError(f"영문 검색어가 아닌 키워드가 있습니다: {', '.join(invalid[:3])}")
+    if not profile["keywords"]:
+        raise ValueError("저장된 영문 탐색 키워드가 없습니다.")
+    return _phrase_expression(profile["keywords"][0])
+
+
+def query_ladder(profile: dict[str, Any]) -> list[tuple[str, str]]:
+    """Build independent recall queries; never AND mutually alternative phrases.
+
+    Search phrases are ordered by researcher/M2 priority, but every phrase is
+    executed separately.  The final two queries expose both a transparent
+    all-term intersection and a compact, LLM-selected five-term intersection.
+    """
+    boolean_queries = _dedupe_queries(list(profile.get("boolean_queries") or []))
+    if boolean_queries:
+        return [(f"자동 Boolean {index}", query) for index, query in enumerate(boolean_queries[:5], start=1)]
+    keywords = profile["keywords"]
+    if invalid := [keyword for keyword in keywords if not is_english_search_term(keyword)]:
+        raise ValueError(f"영문 검색어가 아닌 키워드가 있습니다: {', '.join(invalid[:3])}")
+    if not keywords:
+        raise ValueError("저장된 영문 탐색 키워드가 없습니다.")
+    plan = [(f"우선순위 {index} · 정확 구문", _phrase_expression(keyword)) for index, keyword in enumerate(keywords, start=1)]
+    all_terms = _unique_content_terms(keywords)
+    if all_terms:
+        plan.append(("전체 구문 중복 제거어 AND", " AND ".join(f"all:{term}" for term in all_terms)))
+    core_terms = _clean_core_terms(profile.get("core_terms", [])) or _derive_core_terms(keywords)
+    if core_terms:
+        plan.append(("LLM 선정 핵심 5개어 AND", " AND ".join(f"all:{term}" for term in core_terms)))
+    return plan
+
+
+def _arxiv_expression(keywords: list[str]) -> str:
+    return " AND ".join(_keyword_expression(keyword) for keyword in keywords)
+
+
+def _keyword_expression(keyword: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", keyword)
+    if not tokens:
+        raise ValueError(f"arXiv 검색식으로 만들 수 없는 키워드입니다: {keyword}")
+    terms = [f"all:{token}" for token in tokens]
+    return terms[0] if len(terms) == 1 else "(" + " AND ".join(terms) + ")"
+
+
+def _phrase_expression(keyword: str) -> str:
+    phrase = " ".join(re.findall(r"[A-Za-z0-9]+", keyword))
+    if not phrase:
+        raise ValueError(f"arXiv 검색식으로 만들 수 없는 키워드입니다: {keyword}")
+    return f'all:"{phrase}"'
+
+
+def _unique_content_terms(keywords: list[str]) -> list[str]:
+    terms: list[str] = []
+    for keyword in keywords:
+        for token in re.findall(r"[A-Za-z0-9]+", keyword):
+            normalized = token.lower()
+            if len(normalized) < 3 or normalized in STOP_WORDS or normalized in terms:
+                continue
+            terms.append(normalized)
+    return terms
+
+
+def _clean_core_terms(values: list[str]) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        for token in re.findall(r"[A-Za-z0-9]+", value):
+            normalized = token.lower()
+            if len(normalized) < 3 or normalized in STOP_WORDS or normalized in terms:
+                continue
+            terms.append(normalized)
+            if len(terms) == 5:
+                return terms
+    return terms
+
+
+def _derive_core_terms(keywords: list[str]) -> list[str]:
+    return _unique_content_terms(keywords)[:5]
+
+
+def is_english_search_term(value: str) -> bool:
+    return bool(value.strip()) and not any("가" <= character <= "힣" for character in value) and all(
+        character.isascii() and (character.isalnum() or character in " -_()/+.#") for character in value
+    )
+
+
+def attach_relevance(candidates: list[dict[str, Any]], draft: str | None) -> list[dict[str, Any]]:
+    """Attach M2's abstract-only triage without upgrading a candidate to knowledge."""
+    reviews: dict[str, dict[str, str]] = {}
+    for line in (draft or "").splitlines():
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) != 3 or parts[1].lower() not in {"high", "medium", "low"}:
+            continue
+        reviews[parts[0]] = {"level": parts[1].lower(), "rationale": parts[2]}
+    return [{
+        **candidate,
+        "relevance": reviews.get(candidate.get("source_id", ""), {"level": "unreviewed", "rationale": "초록 기반 맥락 적합성 검토가 아직 수행되지 않았습니다."}),
+        "evidence_status": "abstract_only_pending",
+    } for candidate in candidates]
+
+
+def screen_abstract_batches(
+    profile: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    reviewer: Callable[[str], str | None] | None,
+    *,
+    batch_size: int = 20,
+    existing_reviews: dict[str, dict[str, Any]] | None = None,
+    on_batch_completed: Callable[[int, list[dict[str, Any]]], None] | None = None,
+) -> dict[str, dict[str, Any]]:
+    reviewed_by_id: dict[str, dict[str, Any]] = dict(existing_reviews or {})
+    size = max(5, min(int(batch_size), 25))
+    for offset in range(0, len(candidates), size):
+        batch = candidates[offset : offset + size]
+        missing = [item for item in batch if item.get("source_id") not in reviewed_by_id]
+        if not missing:
+            continue
+        reviewed = attach_relevance(
+            missing, reviewer(abstract_relevance_prompt(profile, missing)) if reviewer else None,
+        )
+        for item in reviewed:
+            reviewed_by_id[item["source_id"]] = item
+        if on_batch_completed:
+            on_batch_completed(offset // size + 1, reviewed)
+    return reviewed_by_id
+
+
+def shortlist_candidates(
+    profile: dict[str, Any], candidates: list[dict[str, Any]], reviewer: Callable[[str], str | None] | None,
+    *, batch_size: int = 20, existing_reviews: dict[str, dict[str, Any]] | None = None,
+    on_batch_completed: Callable[[int, list[dict[str, Any]]], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Review up to 100 abstracts in resumable batches and keep the top five."""
+    context = " ".join([profile.get("title", ""), profile.get("question", ""), profile.get("context", ""), *profile.get("keywords", [])])
+    terms = {term.lower() for term in re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", context)}
+
+    def lexical_score(candidate: dict[str, Any]) -> tuple[int, str]:
+        text = f"{candidate.get('title', '')} {candidate.get('summary', '')}".lower()
+        matched = [term for term in terms if term in text]
+        title = candidate.get("title", "").lower()
+        return (sum(3 if term in title else 1 for term in matched), ", ".join(matched[:8]))
+
+    reviewed_by_id = screen_abstract_batches(
+        profile, candidates, reviewer, batch_size=batch_size, existing_reviews=existing_reviews,
+        on_batch_completed=on_batch_completed,
+    )
+    order = {"high": 0, "medium": 1, "low": 2, "unreviewed": 3}
+    def citation_signal(candidate: dict[str, Any]) -> float:
+        import math
+        count = candidate.get("citation_count")
+        try:
+            return math.log10(1 + max(0, int(count)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            order.get(reviewed_by_id[item["source_id"]]["relevance"]["level"], 3),
+            -(lexical_score(item)[0] * 5 + citation_signal(item)),
+        ),
+    )
+    shortlist_ids = {item["source_id"] for item in ranked[:5]}
+    enriched = []
+    for candidate in candidates:
+        score, matched = lexical_score(candidate)
+        reviewed = reviewed_by_id[candidate["source_id"]]
+        enriched.append({
+            **reviewed,
+            "abstract_shortlist": candidate["source_id"] in shortlist_ids,
+            "context_match_score": score,
+            "context_match_terms": matched,
+            "evidence_status": "abstract_only_pending",
+        })
+    return enriched

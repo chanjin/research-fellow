@@ -1,0 +1,27 @@
+dsl: ajd-workflow/v0.2
+id: m2_revision_todo_plan
+revision: 1
+agent: m2
+realizes: [revision_todo_management]
+purpose: >
+  활성 Revision To-do를 해결하기 위해 필요한 조사·판단·집필 작업을 실행 가능한 해결 계획으로 구조화한다.
+trigger:
+  phenomenon: revision_todo_plan_request
+inputs: [project, manuscript, todo, linked_cards, linked_papers]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: propose_todo_resolution_plan
+    kind: decision
+    authority: m2
+    uses:
+      required: [project, manuscript, todo, linked_cards, linked_papers]
+    produces: [plan, raw_response]
+outputs:
+  required: [plan]
+  optional: [raw_response]
+completion:
+  criteria: [the_todo_has_an_explicit_resolution_plan]
+invariants:
+  - plan_actions_distinguish_evidence_acquisition_from_writing
+  - expected_artifacts_and_completion_conditions_are_explicit

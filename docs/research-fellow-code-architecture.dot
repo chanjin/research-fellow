@@ -1,0 +1,90 @@
+digraph ResearchFellowCodeArchitecture {
+  graph [
+    rankdir=TB,
+    //splines=ortho,
+    //nodesep=0.45,
+    //ranksep=0.70,
+    //compound=true,
+    fontname="Helvetica",
+    label="Research Fellow — AJD / DSL / Topology / Workflow / Prompt Code Structure",
+    labelloc=t,
+    dpi=300,
+    fontsize=16
+  ];
+
+  node [shape=box, style="rounded", fontname="Helvetica", fontsize=11] //, margin="0.1,0.1"];
+  edge [fontname="Helvetica", fontsize=9, arrowsize=0.7, arrowhead=vee, arrowtail=none];
+
+  root [label="src/research_fellow/", shape=folder, style="rounded,bold"];
+
+  subgraph cluster_spec {
+    label="Specification / Executable Specification";
+    style="rounded,dashed";
+
+    ajd [shape=folder, 
+    label="ajd/\n├─ m1.yaml\n└─ m2.yaml"];
+
+    workflows [shape=folder, label="workflows/"];
+    wf_m1 [shape=folder, label="workflows/m1/\n├─ auto_literature_review.yaml\n├─ paper_reading_summary.yaml\n├─ evidence_investigation.yaml\n├─ knowledge_curation.yaml\n└─ knowledge_acquisition.yaml"];
+    wf_m2 [shape=folder, label="workflows/m2/\n├─ research_cycle.yaml\n├─ research_state_update.yaml\n├─ advisory_*.yaml\n├─ paper_*.yaml\n└─ revision_todo_*.yaml"];
+
+    topologies [shape=folder, label="topologies/\n└─ persistent_research.yaml"];
+
+    prompts [shape=folder, label="prompts/\n├─ m1_*.j2\n└─ m2_*.j2"];
+  }
+
+  subgraph cluster_runtime {
+    label="DSL Runtime / Validation";
+    style="rounded,dashed";
+
+    dsl [shape=folder, label="application/dsl/\n├─ ajd.py\n├─ workflow.py\n└─ topology.py"];
+  }
+
+  subgraph cluster_impl {
+    label="Capability Implementation";
+    style="rounded,dashed";
+
+    application [shape=folder, label="application/\nCapability adapters / prompts / \nparsers / transforms / persistence glue"];
+    domain [shape=folder, label="domain/\nDomain models / phenomena / \ninvariants"];
+    infrastructure [shape=folder, label="infrastructure/\nLLM / storage / document / \nexternal source adapters"];
+    ui [shape=folder, label="ui/\nHuman interaction / presentation"];
+  }
+
+  root -> ajd [arrowhead=none];
+  root -> workflows [arrowhead=none];
+  root -> topologies [arrowhead=none];
+  root -> prompts [arrowhead=none];
+  root -> dsl [arrowhead=none];
+  root -> application [arrowhead=none];
+  root -> domain [arrowhead=none];
+  root -> infrastructure [arrowhead=none];
+  root -> ui [arrowhead=none];
+
+  workflows -> wf_m1 [arrowhead=none];
+  workflows -> wf_m2 [arrowhead=none];
+
+  ajd -> wf_m1 [label="realizes / memory contract", constraint=false];
+  ajd -> wf_m2 [label="realizes / memory contract", constraint=false];
+
+  topologies -> workflows [label="compose / connect\nshared phenomena"];
+
+  dsl -> ajd [label="load + validate", style=dashed, constraint=false];
+  dsl -> workflows [label="load / validate / execute", style=dashed];
+  dsl -> topologies [label="load + validate", style=dashed, constraint=false];
+
+  workflows -> application [label="step id → capability binding"];
+  application -> prompts [label="render template", dir=both, arrowtail=none];
+
+  application -> domain [label="read / update domain state"];
+  application -> infrastructure [label="LLM / DB / file / source access"];
+
+  ui -> workflows [label="trigger / human interaction", style=dashed];
+  ui -> application [label="legacy / entrypoint calls", style=dashed];
+
+  wf_m1 -> wf_m2 [label="knowledge_update", style=bold, constraint=false];
+  wf_m2 -> wf_m1 [label="curation_intent", style=bold, constraint=false];
+
+//  {rank=same; ajd; topologies; prompts;}
+//  {rank=same; wf_m1; wf_m2;}
+//  {rank=same; application; domain; infrastructure; ui;}
+}

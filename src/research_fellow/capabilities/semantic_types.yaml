@@ -1,0 +1,105 @@
+semantic_types: ajd-semantic-types/v0.1
+types:
+  - id: Any
+  - id: Text
+    extends: Any
+  - id: Identifier
+    extends: Text
+  - id: Boolean
+    extends: Any
+  - id: Count
+    extends: Any
+  - id: Status
+    extends: Any
+  - id: Artifact
+    extends: Any
+  - id: ArtifactRef
+    extends: Any
+  - id: PaperRef
+    extends: ArtifactRef
+  - id: DocumentText
+    extends: Text
+  - id: ResearchContext
+    extends: Any
+  - id: Context
+    extends: Any
+  - id: PaperSummary
+    extends: Artifact
+  - id: ReadingQuestion
+    extends: Artifact
+  - id: EvidenceReview
+    extends: Artifact
+  - id: ResearchQuestion
+    extends: Artifact
+  - id: ResearchQuestionAssessment
+    extends: Artifact
+  - id: KnowledgeUpdate
+    extends: Artifact
+  - id: KnowledgeCard
+    extends: Artifact
+  - id: KnowledgeRelation
+    extends: Artifact
+  - id: KnowledgeCandidate
+    extends: Artifact
+  - id: KnowledgeAssessment
+    extends: Artifact
+  - id: CurationIntent
+    extends: Artifact
+  - id: SearchProfile
+    extends: Artifact
+  - id: SearchStrategy
+    extends: Artifact
+  - id: SearchOutcome
+    extends: Artifact
+  - id: LiteratureReviewRun
+    extends: Artifact
+  - id: LiteratureReport
+    extends: Artifact
+  - id: ExecutionRun
+    extends: Artifact
+  - id: AdvisoryPlan
+    extends: Artifact
+  - id: EvidenceCluster
+    extends: Artifact
+  - id: AdvisoryJudgment
+    extends: Artifact
+  - id: AdvisoryAnswer
+    extends: Artifact
+  - id: PaperProject
+    extends: Artifact
+  - id: Manuscript
+    extends: Text
+  - id: ManuscriptDiff
+    extends: Artifact
+  - id: ManuscriptAnnotation
+    extends: Artifact
+  - id: RevisionTodo
+    extends: Artifact
+  - id: RevisionTodoGroup
+    extends: Artifact
+  - id: RevisionPlan
+    extends: Artifact
+  - id: TodoResolution
+    extends: Artifact
+  - id: VerificationResult
+    extends: Artifact
+  - id: ReconciliationResult
+    extends: Artifact
+  - id: ProposalReview
+    extends: Artifact
+  - id: ResearchArtifact
+    extends: Artifact
+  - id: Reference
+    extends: ArtifactRef
+  - id: DraftResult
+    extends: Artifact
+  - id: RawLLMOutput
+    extends: Text
+  - id: ValidationError
+    extends: Text
+  - id: SectionRef
+    extends: ArtifactRef
+  - id: StateTransition
+    extends: Artifact
+  - id: ActionCounts
+    extends: Any

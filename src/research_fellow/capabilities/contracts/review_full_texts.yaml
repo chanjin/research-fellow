@@ -1,0 +1,22 @@
+capability: ajd-capability-contract/v0.2
+id: review_full_texts
+kind: action
+purpose: Capability for workflow step 'review_full_texts'.
+uses:
+  required:
+  - search_outcome
+  - search_profile
+  optional: []
+produces:
+- reviewed_papers
+- report_run
+data:
+  search_outcome:
+    type: SearchOutcome
+  search_profile:
+    type: SearchProfile
+  reviewed_papers:
+    type: PaperRef
+    cardinality: many
+  report_run:
+    type: LiteratureReviewRun

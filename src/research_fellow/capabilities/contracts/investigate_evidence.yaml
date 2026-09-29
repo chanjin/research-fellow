@@ -1,0 +1,38 @@
+capability: ajd-capability-contract/v0.2
+id: investigate_evidence
+kind: action
+purpose: 선택된 질문마다 논문 원문을 다시 읽어 잠정 답변을 검증·수정하고 추가 근거와 여전히 남는 불확실성을 확인한다.
+uses:
+  required:
+  - paper
+  - document
+  - selected_questions
+  optional: []
+produces:
+- reviews
+- raw_output
+- generation_succeeded
+- generation_failed
+- validation_error
+- draft_result
+data:
+  paper:
+    type: PaperRef
+  document:
+    type: DocumentText
+  selected_questions:
+    type: ReadingQuestion
+    cardinality: many
+  reviews:
+    type: EvidenceReview
+    cardinality: many
+  raw_output:
+    type: RawLLMOutput
+  generation_succeeded:
+    type: Boolean
+  generation_failed:
+    type: Boolean
+  validation_error:
+    type: ValidationError
+  draft_result:
+    type: DraftResult

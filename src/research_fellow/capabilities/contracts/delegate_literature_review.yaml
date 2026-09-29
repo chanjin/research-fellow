@@ -1,0 +1,21 @@
+capability: ajd-capability-contract/v0.2
+id: delegate_literature_review
+kind: action
+purpose: 선택된 Research Question을 M1이 실행할 Curation Intent로 변환한다. Research Question과
+  Curation Intent는 서로 다른 업무 객체이며 lineage로 연결된다.
+uses:
+  required:
+  - ranked_questions
+  - review_id
+  optional: []
+produces:
+- dispatched_intents
+data:
+  ranked_questions:
+    type: ResearchQuestion
+    cardinality: many
+  review_id:
+    type: Identifier
+  dispatched_intents:
+    type: CurationIntent
+    cardinality: many

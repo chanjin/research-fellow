@@ -15,6 +15,10 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import yaml
 
 from research_fellow.application.dsl.ajd import validate_ajd_traceability, validate_workflow_against_ajd
+from research_fellow.application.dsl.capability import (
+    capability_bindings_from_catalog,
+    validate_capability_catalog,
+)
 
 
 WorkflowHandler = Callable[[dict[str, Any]], None]
@@ -400,7 +404,10 @@ def validate_workflow_catalog(
     traceability = validate_ajd_traceability(
         catalog, strict_coverage=strict_ajd_coverage
     )
-    return {**phenomena, "ajd_traceability": traceability}
+    capabilities = validate_capability_catalog(
+        validate_imports=True, validate_workflows=True, strict_orphans=True
+    )
+    return {**phenomena, "ajd_traceability": traceability, "capability_catalog": capabilities}
 
 def validate_workflow_bindings(
     definition: WorkflowDefinition,
@@ -852,7 +859,16 @@ def prepare_workflow_run(
     """
     definition = load_workflow_definition(relative_path)
     context = prepare_workflow_context(definition, values)
-    handlers = capability_bindings_from_namespace(definition, namespace)
+
+    # Action/decision implementations are resolved through the Capability Catalog.
+    # Namespace binding remains only for composition adapters (subworkflows) and
+    # explicit external interactions, so workflow logic no longer depends on
+    # implicit Python function-name lookup for reusable capabilities.
+    handlers = capability_bindings_from_catalog(definition.steps)
+    namespace_handlers = capability_bindings_from_namespace(definition, namespace)
+    for name, handler in namespace_handlers.items():
+        handlers.setdefault(name, handler)
+
     validate_workflow_bindings(definition, handlers)
     return WorkflowRun(definition=definition, context=context, handlers=handlers)
 

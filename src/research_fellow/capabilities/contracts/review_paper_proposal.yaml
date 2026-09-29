@@ -1,0 +1,32 @@
+capability: ajd-capability-contract/v0.2
+id: review_paper_proposal
+kind: decision
+purpose: Capability for workflow step 'review_paper_proposal'.
+uses:
+  required:
+  - title
+  - research_question
+  - research_context
+  - cards
+  - papers
+  optional: []
+produces:
+- proposal_review
+- raw_response
+data:
+  title:
+    type: Text
+  research_question:
+    type: ResearchQuestion
+  research_context:
+    type: ResearchContext
+  cards:
+    type: KnowledgeCard
+    cardinality: many
+  papers:
+    type: PaperRef
+    cardinality: many
+  proposal_review:
+    type: ProposalReview
+  raw_response:
+    type: RawLLMOutput

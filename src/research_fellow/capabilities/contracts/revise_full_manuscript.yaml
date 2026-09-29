@@ -1,0 +1,42 @@
+capability: ajd-capability-contract/v0.2
+id: revise_full_manuscript
+kind: action
+purpose: Capability for workflow step 'revise_full_manuscript'.
+uses:
+  required:
+  - project
+  - manuscript
+  - todo
+  - added_cards
+  - references
+  - valid_card_ids
+  - version
+  optional: []
+produces:
+- revised_manuscript
+- diff
+- raw_response
+data:
+  project:
+    type: PaperProject
+  manuscript:
+    type: Manuscript
+  todo:
+    type: RevisionTodo
+  added_cards:
+    type: KnowledgeCard
+    cardinality: many
+  references:
+    type: Reference
+    cardinality: many
+  valid_card_ids:
+    type: Identifier
+    cardinality: many
+  version:
+    type: Identifier
+  revised_manuscript:
+    type: Manuscript
+  diff:
+    type: ManuscriptDiff
+  raw_response:
+    type: RawLLMOutput

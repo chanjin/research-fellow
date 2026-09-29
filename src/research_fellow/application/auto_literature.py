@@ -4,13 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from research_fellow.application.dsl import (
-    capability_bindings,
-    execute_workflow,
-    load_workflow_definition,
-    prepare_workflow_context,
-    project_workflow_outputs,
-)
+from research_fellow.application.dsl import prepare_workflow_run
 from research_fellow.application.llm_retry import LLMRetryExhausted
 from research_fellow.application.llm_execution import execute_llm_stage
 from research_fellow.application.paper_batch import process_top_papers
@@ -85,8 +79,7 @@ def execute_auto_literature_review(
     The YAML owns the M1 orchestration. Python handlers retain stateful ledger
     operations, parsing/validation, search execution, and deterministic fallback.
     """
-    definition = load_workflow_definition(WORKFLOW_PATH)
-    context = prepare_workflow_context(definition, {
+    workflow = prepare_workflow_run(WORKFLOW_PATH, {
         "ledger": ledger,
         "curation_intent": intent_event,
         "data_dir": data_dir,
@@ -95,26 +88,14 @@ def execute_auto_literature_review(
         "fulltext_drafter": fulltext_drafter,
         "synthesis_drafter": synthesis_drafter,
         "parent_run_id": parent_run_id,
-    })
+    }, globals())
 
     try:
-        execute_workflow(
-            definition,
-            context,
-            capability_bindings(
-                _plan_literature_search,
-                _discover_and_screen_literature,
-                _record_search_failure,
-                _review_full_texts,
-                _synthesize_literature_report,
-                _finalize_literature_review,
-            ),
-        )
-        return project_workflow_outputs(definition, context)
+        return workflow.execute()
     except LLMRetryExhausted as error:
-        return _handle_retry_exhausted(context, error, definition.workflow_id)
+        return _handle_retry_exhausted(workflow.context, error, workflow.definition.workflow_id)
     except Exception as error:
-        return _handle_unexpected_error(context, error, definition.workflow_id)
+        return _handle_unexpected_error(workflow.context, error, workflow.definition.workflow_id)
 
 
 def _plan_literature_search(context: dict[str, Any]) -> None:

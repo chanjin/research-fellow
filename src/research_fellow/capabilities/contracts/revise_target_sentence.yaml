@@ -1,0 +1,42 @@
+capability: ajd-capability-contract/v0.2
+id: revise_target_sentence
+kind: action
+purpose: Capability for workflow step 'revise_target_sentence'.
+uses:
+  required:
+  - project
+  - manuscript
+  - comments
+  - added_cards
+  - valid_card_ids
+  - version
+  - sentence_id
+  optional: []
+produces:
+- revised_manuscript
+- diff
+- raw_response
+data:
+  project:
+    type: PaperProject
+  manuscript:
+    type: Manuscript
+  comments:
+    type: Text
+    cardinality: many
+  added_cards:
+    type: KnowledgeCard
+    cardinality: many
+  valid_card_ids:
+    type: Identifier
+    cardinality: many
+  version:
+    type: Identifier
+  sentence_id:
+    type: Identifier
+  revised_manuscript:
+    type: Manuscript
+  diff:
+    type: ManuscriptDiff
+  raw_response:
+    type: RawLLMOutput

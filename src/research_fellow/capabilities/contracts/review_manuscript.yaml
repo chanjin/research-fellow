@@ -1,0 +1,32 @@
+capability: ajd-capability-contract/v0.2
+id: review_manuscript
+kind: decision
+purpose: Capability for workflow step 'review_manuscript'.
+uses:
+  required:
+  - project
+  - manuscript
+  - cards
+  - version
+  optional: []
+produces:
+- annotations
+- reviewed_manuscript
+- raw_response
+data:
+  project:
+    type: PaperProject
+  manuscript:
+    type: Manuscript
+  cards:
+    type: KnowledgeCard
+    cardinality: many
+  version:
+    type: Identifier
+  annotations:
+    type: ManuscriptAnnotation
+    cardinality: many
+  reviewed_manuscript:
+    type: Manuscript
+  raw_response:
+    type: RawLLMOutput

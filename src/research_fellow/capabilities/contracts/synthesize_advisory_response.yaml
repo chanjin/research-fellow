@@ -1,0 +1,38 @@
+capability: ajd-capability-contract/v0.2
+id: synthesize_advisory_response
+kind: decision
+purpose: 하위 판단을 최종 자문으로 통합하고 사용된 근거와 미해결 질문을 함께 반환한다.
+uses:
+  required:
+  - plan
+  - evidence_clusters
+  - judgments
+  - recipient
+  optional: []
+produces:
+- answer
+- evidence_card_ids
+- evidence_relation_ids
+- unresolved_items
+data:
+  plan:
+    type: AdvisoryPlan
+  evidence_clusters:
+    type: EvidenceCluster
+    cardinality: many
+  judgments:
+    type: AdvisoryJudgment
+    cardinality: many
+  recipient:
+    type: Text
+  answer:
+    type: AdvisoryAnswer
+  evidence_card_ids:
+    type: Identifier
+    cardinality: many
+  evidence_relation_ids:
+    type: Identifier
+    cardinality: many
+  unresolved_items:
+    type: RevisionTodo
+    cardinality: many

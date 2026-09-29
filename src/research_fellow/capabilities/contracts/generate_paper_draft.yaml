@@ -1,0 +1,19 @@
+capability: ajd-capability-contract/v0.2
+id: generate_paper_draft
+kind: action
+purpose: Capability for workflow step 'generate_paper_draft'.
+uses:
+  required:
+  - project
+  - cards
+  optional: []
+produces:
+- raw_response
+data:
+  project:
+    type: PaperProject
+  cards:
+    type: KnowledgeCard
+    cardinality: many
+  raw_response:
+    type: RawLLMOutput

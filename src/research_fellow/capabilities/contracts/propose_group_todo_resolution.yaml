@@ -1,0 +1,50 @@
+capability: ajd-capability-contract/v0.2
+id: propose_group_todo_resolution
+kind: decision
+purpose: Capability for workflow step 'propose_group_todo_resolution'.
+uses:
+  required:
+  - project
+  - manuscript
+  - group
+  - todos
+  - papers
+  - cards
+  - connection_note
+  - include_full_manuscript
+  - valid_card_ids
+  - valid_paper_ids
+  optional: []
+produces:
+- group_resolution
+- raw_response
+data:
+  project:
+    type: PaperProject
+  manuscript:
+    type: Manuscript
+  group:
+    type: RevisionTodoGroup
+  todos:
+    type: RevisionTodo
+    cardinality: many
+  papers:
+    type: PaperRef
+    cardinality: many
+  cards:
+    type: KnowledgeCard
+    cardinality: many
+  connection_note:
+    type: Text
+  include_full_manuscript:
+    type: Boolean
+  valid_card_ids:
+    type: Identifier
+    cardinality: many
+  valid_paper_ids:
+    type: Identifier
+    cardinality: many
+  group_resolution:
+    type: TodoResolution
+  raw_response:
+    type: RawLLMOutput

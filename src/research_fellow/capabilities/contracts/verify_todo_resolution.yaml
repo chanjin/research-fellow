@@ -1,0 +1,28 @@
+capability: ajd-capability-contract/v0.2
+id: verify_todo_resolution
+kind: decision
+purpose: Capability for workflow step 'verify_todo_resolution'.
+uses:
+  required:
+  - project
+  - todo
+  - current_sentence
+  - evidence_cards
+  optional: []
+produces:
+- verification
+- raw_response
+data:
+  project:
+    type: PaperProject
+  todo:
+    type: RevisionTodo
+  current_sentence:
+    type: Text
+  evidence_cards:
+    type: KnowledgeCard
+    cardinality: many
+  verification:
+    type: VerificationResult
+  raw_response:
+    type: RawLLMOutput

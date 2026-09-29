@@ -1,0 +1,42 @@
+capability: ajd-capability-contract/v0.2
+id: finalize_literature_review
+kind: action
+purpose: 문헌조사 결과를 보고서로 보존하고 Curation Intent를 완료한다. 부분 실패가 남아 있으면 완료 대신 추가 확인이 필요한
+  결과로 남긴다.
+uses:
+  required:
+  - synthesis
+  - reviewed_papers
+  - report_run
+  - search_strategy
+  optional: []
+produces:
+- status
+- report
+- run
+- papers
+- report_id
+- retry_run_id
+data:
+  synthesis:
+    type: LiteratureReport
+  reviewed_papers:
+    type: PaperRef
+    cardinality: many
+  report_run:
+    type: LiteratureReviewRun
+  search_strategy:
+    type: SearchStrategy
+  status:
+    type: Status
+  report:
+    type: LiteratureReport
+  run:
+    type: ExecutionRun
+  papers:
+    type: PaperRef
+    cardinality: many
+  report_id:
+    type: Identifier
+  retry_run_id:
+    type: Identifier

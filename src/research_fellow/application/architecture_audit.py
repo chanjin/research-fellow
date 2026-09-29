@@ -18,6 +18,7 @@ from typing import Any, Iterable
 from research_fellow.application.dsl import (
     load_topology_definition,
     topology_graph,
+    validate_capability_catalog,
     validate_workflow_catalog,
 )
 
@@ -89,6 +90,7 @@ def audit_application_architecture() -> dict[str, Any]:
     return value is a compact report suitable for tests or diagnostics.
     """
     workflow_report = validate_workflow_catalog(strict_ajd_coverage=True)
+    capability_report = validate_capability_catalog()
 
     package_root = resources.files("research_fellow")
     topology_root = package_root.joinpath("topologies")
@@ -138,6 +140,14 @@ def audit_application_architecture() -> dict[str, Any]:
     traceability = workflow_report.get("ajd_traceability") or {}
     return {
         "application_modules": module_count,
+        "capabilities": capability_report["capability_count"],
+        "semantic_types": capability_report["semantic_type_count"],
+        "semantic_flow_checks": capability_report["semantic_flow_checks"],
+        "python_capabilities": capability_report["python_capabilities"],
+        "external_capabilities": capability_report["external_capabilities"],
+        "binding_profile": capability_report["binding_profile"],
+        "missing_bindings": list(capability_report["missing_bindings"]),
+        "orphan_capabilities": list(capability_report["orphan_capabilities"]),
         "compatibility_facades": sorted(COMPATIBILITY_FACADES),
         "ajd_links": len(traceability.get("responsibility_links") or []),
         "orphan_workflows": list(traceability.get("orphan_workflows") or []),

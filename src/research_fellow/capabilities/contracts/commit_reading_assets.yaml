@@ -1,0 +1,26 @@
+capability: ajd-capability-contract/v0.2
+id: commit_reading_assets
+kind: action
+purpose: 읽기 결과를 paper asset과 후속 질문으로 보존하고 논문의 읽기 상태를 갱신한다.
+uses:
+  required:
+  - summary
+  - reading_questions
+  optional: []
+produces:
+- paper_analysis
+- saved_question_ids
+- reading_status
+data:
+  summary:
+    type: PaperSummary
+  reading_questions:
+    type: ReadingQuestion
+    cardinality: many
+  paper_analysis:
+    type: PaperSummary
+  saved_question_ids:
+    type: Identifier
+    cardinality: many
+  reading_status:
+    type: Status

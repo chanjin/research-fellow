@@ -1,0 +1,32 @@
+capability: ajd-capability-contract/v0.2
+id: formulate_research_questions
+kind: action
+purpose: 새 지식 업데이트를 기존 연구질문과 비교하여 새로운 질문을 만들거나 기존 질문을 보강하고, 이번 연구상태 검토의 대상으로 등록한다.
+uses:
+  required:
+  - knowledge_updates
+  - existing_research_questions
+  optional:
+  - followup_questions
+produces:
+- research_questions
+- actionable_questions
+- review_id
+data:
+  knowledge_updates:
+    type: KnowledgeUpdate
+    cardinality: many
+  existing_research_questions:
+    type: ResearchQuestion
+    cardinality: many
+  followup_questions:
+    type: ResearchQuestion
+    cardinality: many
+  research_questions:
+    type: ResearchQuestion
+    cardinality: many
+  actionable_questions:
+    type: ResearchQuestion
+    cardinality: many
+  review_id:
+    type: Identifier

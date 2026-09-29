@@ -1,0 +1,50 @@
+capability: ajd-capability-contract/v0.2
+id: propose_todo_resolution
+kind: decision
+purpose: Capability for workflow step 'propose_todo_resolution'.
+uses:
+  required:
+  - project
+  - manuscript
+  - todo
+  - papers
+  - cards
+  - connection_note
+  - include_full_manuscript
+  - research_artifacts
+  - valid_card_ids
+  - valid_paper_ids
+  optional: []
+produces:
+- proposal
+- raw_response
+data:
+  project:
+    type: PaperProject
+  manuscript:
+    type: Manuscript
+  todo:
+    type: RevisionTodo
+  papers:
+    type: PaperRef
+    cardinality: many
+  cards:
+    type: KnowledgeCard
+    cardinality: many
+  connection_note:
+    type: Text
+  include_full_manuscript:
+    type: Boolean
+  research_artifacts:
+    type: ResearchArtifact
+    cardinality: many
+  valid_card_ids:
+    type: Identifier
+    cardinality: many
+  valid_paper_ids:
+    type: Identifier
+    cardinality: many
+  proposal:
+    type: TodoResolution
+  raw_response:
+    type: RawLLMOutput

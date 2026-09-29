@@ -1,0 +1,18 @@
+capability: ajd-capability-contract/v0.2
+id: plan_literature_search
+kind: action
+purpose: Curation Intent의 목적에 맞는 문헌탐색 범위와 검색전략을 정한다.
+uses:
+  required:
+  - curation_intent
+  optional: []
+produces:
+- search_profile
+- search_strategy
+data:
+  curation_intent:
+    type: CurationIntent
+  search_profile:
+    type: SearchProfile
+  search_strategy:
+    type: SearchStrategy

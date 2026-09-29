@@ -1,0 +1,33 @@
+capability: ajd-capability-contract/v0.2
+id: prepare_knowledge_candidates
+kind: action
+purpose: 선택된 읽기 질문과 보강 근거를 source-grounded knowledge card 후보로 정규화하고 기존 승인 지식 중 의미적으로
+  유사한 비교 대상을 좁힌다.
+uses:
+  required:
+  - paper
+  - selected_questions
+  - reading_reviews
+  - approved_cards
+  optional: []
+produces:
+- candidates
+- similar_cards
+data:
+  paper:
+    type: PaperRef
+  selected_questions:
+    type: ReadingQuestion
+    cardinality: many
+  reading_reviews:
+    type: EvidenceReview
+    cardinality: many
+  approved_cards:
+    type: KnowledgeCard
+    cardinality: many
+  candidates:
+    type: KnowledgeCandidate
+    cardinality: many
+  similar_cards:
+    type: KnowledgeCard
+    cardinality: many

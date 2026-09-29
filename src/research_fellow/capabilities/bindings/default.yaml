@@ -1,0 +1,182 @@
+bindings: ajd-capability-binding/v0.1
+profile: default
+capabilities:
+- id: analyze_paper
+  implementation:
+    type: python
+    module: research_fellow.application.paper_reading
+    symbol: _analyze_paper
+- id: apply_research_question_state
+  implementation:
+    type: python
+    module: research_fellow.application.research_state_update
+    symbol: _apply_research_question_state
+- id: assess_knowledge_candidates
+  implementation:
+    type: python
+    module: research_fellow.application.knowledge_curation
+    symbol: _assess_knowledge_candidates
+- id: assess_research_question_state
+  implementation:
+    type: python
+    module: research_fellow.application.research_state_update
+    symbol: _assess_research_question_state
+- id: collect_advisory_evidence
+  implementation:
+    type: python
+    module: research_fellow.application.advisory_workflow
+    symbol: _collect_advisory_evidence
+- id: commit_evidence_reviews
+  implementation:
+    type: python
+    module: research_fellow.application.paper_reading
+    symbol: _commit_evidence_reviews
+- id: commit_reading_assets
+  implementation:
+    type: python
+    module: research_fellow.application.paper_reading
+    symbol: _commit_reading_assets
+- id: complete_research_state_review
+  implementation:
+    type: python
+    module: research_fellow.application.research_cycle
+    symbol: _complete_research_state_review
+- id: delegate_literature_review
+  implementation:
+    type: python
+    module: research_fellow.application.research_cycle
+    symbol: _delegate_literature_review
+- id: discover_and_screen_literature
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _discover_and_screen_literature
+- id: finalize_literature_review
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _finalize_literature_review
+- id: formulate_research_questions
+  implementation:
+    type: python
+    module: research_fellow.application.research_cycle
+    symbol: _formulate_research_questions
+- id: generate_paper_draft
+  implementation:
+    type: python
+    module: research_fellow.application.paper_coauthor_workflow
+    symbol: _generate_paper_draft
+- id: group_revision_todos
+  implementation:
+    type: python
+    module: research_fellow.application.paper_todo_workflow
+    symbol: _group_revision_todos
+- id: investigate_evidence
+  implementation:
+    type: python
+    module: research_fellow.application.paper_reading
+    symbol: _investigate_evidence
+- id: judge_advisory_subquestion
+  implementation:
+    type: python
+    module: research_fellow.application.advisory_workflow
+    symbol: _judge_advisory_subquestion
+- id: normalize_paper_draft
+  implementation:
+    type: python
+    module: research_fellow.application.paper_coauthor_workflow
+    symbol: _normalize_paper_draft
+- id: plan_advisory
+  implementation:
+    type: python
+    module: research_fellow.application.advisory_workflow
+    symbol: _plan_advisory
+- id: plan_literature_search
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _plan_literature_search
+- id: prepare_knowledge_candidates
+  implementation:
+    type: python
+    module: research_fellow.application.knowledge_curation
+    symbol: _prepare_knowledge_candidates
+- id: prioritize_research_questions
+  implementation:
+    type: python
+    module: research_fellow.application.research_cycle
+    symbol: _prioritize_research_questions
+- id: propose_group_todo_resolution
+  implementation:
+    type: python
+    module: research_fellow.application.paper_todo_workflow
+    symbol: _propose_group_todo_resolution
+- id: propose_todo_resolution
+  implementation:
+    type: python
+    module: research_fellow.application.paper_todo_workflow
+    symbol: _propose_todo_resolution
+- id: propose_todo_resolution_plan
+  implementation:
+    type: python
+    module: research_fellow.application.paper_todo_workflow
+    symbol: _propose_todo_resolution_plan
+- id: reconcile_revision_todos
+  implementation:
+    type: python
+    module: research_fellow.application.paper_todo_workflow
+    symbol: _reconcile_revision_todos
+- id: record_search_failure
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _record_search_failure
+- id: review_full_texts
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _review_full_texts
+- id: review_manuscript
+  implementation:
+    type: python
+    module: research_fellow.application.paper_coauthor_workflow
+    symbol: _review_manuscript
+- id: review_paper_proposal
+  implementation:
+    type: python
+    module: research_fellow.application.paper_coauthor_workflow
+    symbol: _review_paper_proposal
+- id: revise_full_manuscript
+  implementation:
+    type: python
+    module: research_fellow.application.paper_coauthor_workflow
+    symbol: _revise_full_manuscript
+- id: revise_target_sentence
+  implementation:
+    type: python
+    module: research_fellow.application.paper_coauthor_workflow
+    symbol: _revise_target_sentence
+- id: select_questions_for_investigation
+  implementation:
+    type: external
+    provider: researcher
+- id: submit_curation_decisions
+  implementation:
+    type: python
+    module: research_fellow.application.knowledge_curation
+    symbol: _submit_curation_decisions
+- id: synthesize_advisory_response
+  implementation:
+    type: python
+    module: research_fellow.application.advisory_workflow
+    symbol: _synthesize_advisory_response
+- id: synthesize_literature_report
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _synthesize_literature_report
+- id: verify_todo_resolution
+  implementation:
+    type: python
+    module: research_fellow.application.paper_todo_workflow
+    symbol: _verify_todo_resolution

@@ -1,0 +1,35 @@
+capability: ajd-capability-contract/v0.2
+id: apply_research_question_state
+kind: action
+purpose: M2의 판단을 Research Question의 상태·탐색 필요·변경 이력에 반영하고, 추가 문헌조사가 필요한 질문을 다음 우선순위
+  평가 단계로 돌려보낸다.
+uses:
+  required:
+  - assessments
+  - research_question_backlog
+  optional: []
+produces:
+- status
+- state_transitions
+- followup_questions
+- resolved_count
+- reinforced_count
+data:
+  assessments:
+    type: ResearchQuestionAssessment
+    cardinality: many
+  research_question_backlog:
+    type: ResearchQuestion
+    cardinality: many
+  status:
+    type: Status
+  state_transitions:
+    type: StateTransition
+    cardinality: many
+  followup_questions:
+    type: ResearchQuestion
+    cardinality: many
+  resolved_count:
+    type: Count
+  reinforced_count:
+    type: Count

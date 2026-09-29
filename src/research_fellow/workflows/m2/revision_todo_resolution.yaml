@@ -1,0 +1,28 @@
+dsl: ajd-workflow/v0.2
+id: m2_revision_todo_resolution
+revision: 1
+agent: m2
+realizes: [revision_todo_management]
+purpose: >
+  연구자가 선택한 논문·지식카드·연구 산출물을 Revision To-do의 완료 기준에 연결해 근거 있는 수정안을 제안한다.
+trigger:
+  phenomenon: revision_todo_resolution_request
+inputs: [project, manuscript, todo, papers, cards, connection_note, include_full_manuscript, research_artifacts, valid_card_ids, valid_paper_ids]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: propose_todo_resolution
+    kind: decision
+    authority: m2
+    uses:
+      required: [project, manuscript, todo, papers, cards, connection_note, include_full_manuscript, research_artifacts, valid_card_ids, valid_paper_ids]
+    produces: [proposal, raw_response]
+outputs:
+  required: [proposal]
+  optional: [raw_response]
+completion:
+  criteria: [the_todo_has_a_grounded_resolution_or_an_explicit_remaining_gap]
+invariants:
+  - resolved_proposals_include_a_revision_for_the_target_sentence
+  - resolved_target_revisions_reference_selected_evidence
+  - unresolved_gaps_remain_explicit

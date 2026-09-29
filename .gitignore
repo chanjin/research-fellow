@@ -4,5 +4,6 @@ data/
 *.pyc
 *.jsonl
 *.html
+*.png
 .DS_Store
 .cache/

@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from research_fellow.application.advising import parse_research_question_suggestions, parse_rq_priority_assessment
-from research_fellow.application.search_profiles import parse_auto_search_strategy, parse_keyword_plan
+from research_fellow.application.advising_rq_parsers import parse_research_question_suggestions, parse_rq_priority_assessment
+from research_fellow.application.search_profile_strategy import parse_auto_search_strategy, parse_keyword_plan
 from research_fellow.application.llm_retry import classify_output
 
 

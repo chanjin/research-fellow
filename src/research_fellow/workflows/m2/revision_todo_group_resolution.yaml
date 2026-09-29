@@ -1,0 +1,27 @@
+dsl: ajd-workflow/v0.2
+id: m2_revision_todo_group_resolution
+revision: 1
+agent: m2
+realizes: [revision_todo_management]
+purpose: >
+  연구자가 확정한 관련 To-do 그룹을 공유 근거로 검토하되 각 To-do의 해결 판정을 독립적으로 유지한다.
+trigger:
+  phenomenon: revision_todo_group_resolution_request
+inputs: [project, manuscript, group, todos, papers, cards, connection_note, include_full_manuscript, valid_card_ids, valid_paper_ids]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: propose_group_todo_resolution
+    kind: decision
+    authority: m2
+    uses:
+      required: [project, manuscript, group, todos, papers, cards, connection_note, include_full_manuscript, valid_card_ids, valid_paper_ids]
+    produces: [group_resolution, raw_response]
+outputs:
+  required: [group_resolution]
+  optional: [raw_response]
+completion:
+  criteria: [every_selected_todo_has_an_independent_verdict]
+invariants:
+  - shared_evidence_does_not_collapse_individual_todo_verdicts
+  - conflicting_sentence_rewrites_are_not_silently_merged

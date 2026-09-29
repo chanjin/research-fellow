@@ -21,6 +21,11 @@ responsibilities:
       연구자와 함께 논문 기획, 초안 작성, 문장 검증, 근거 기반 리비전을 수행하여
       원고의 주장과 근거 연결을 반복적으로 개선한다.
 
+  - id: revision_todo_management
+    purpose: >
+      문장 검토에서 생성된 Revision To-do를 계획, 근거 보강, 해결안 작성, 해결 검증,
+      리비전 후 백로그 재정리까지 추적 가능한 작업 단위로 관리한다.
+
 memory:
   - id: knowledge_cards
     access: [read]

@@ -1,0 +1,27 @@
+dsl: ajd-workflow/v0.2
+id: m2_revision_todo_verification
+revision: 1
+agent: m2
+realizes: [revision_todo_management]
+purpose: >
+  수정된 대상 문장이 원래 Revision To-do의 문제와 완료 기준을 충족했는지 판정하고 다음 행동을 명시한다.
+trigger:
+  phenomenon: revision_todo_verification_request
+inputs: [project, todo, current_sentence, evidence_cards]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: verify_todo_resolution
+    kind: decision
+    authority: m2
+    uses:
+      required: [project, todo, current_sentence, evidence_cards]
+    produces: [verification, raw_response]
+outputs:
+  required: [verification]
+  optional: [raw_response]
+completion:
+  criteria: [the_todo_is_either_resolved_or_has_an_explicit_next_action]
+invariants:
+  - verification_does_not_rewrite_the_sentence
+  - resolved_verdict_requires_close_as_next_action

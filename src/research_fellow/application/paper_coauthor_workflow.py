@@ -9,17 +9,12 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from research_fellow.application.dsl import prepare_workflow_run
-from research_fellow.application.paper_coauthor import (
-    apply_review,
-    apply_revisions,
-    draft_prompt,
-    full_revision_prompt,
-    paper_proposal_prompt,
-    parse_manuscript,
-    parse_paper_proposal,
-    parse_review,
-    revision_prompt,
-    review_prompt,
+from research_fellow.application.paper_coauthor_manuscript import apply_review, apply_revisions
+from research_fellow.application.paper_coauthor_parsers import (
+    parse_manuscript, parse_paper_proposal, parse_review,
+)
+from research_fellow.application.paper_coauthor_prompts import (
+    draft_prompt, full_revision_prompt, paper_proposal_prompt, revision_prompt, review_prompt,
 )
 
 DraftFunction = Callable[[str], str | None]

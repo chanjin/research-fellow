@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy, json, re
 from typing import Any
 
+from research_fellow.application.structured_output import extract_json_object
+
 ANNOTATION_TYPES = {"insufficient_evidence","citation_needed","researcher_input","decision","scope_unclear","overclaim","counterargument_needed","logic_gap","contribution_unclear"}
 
 ANNOTATION_GUIDES: dict[str, dict[str, str]] = {
@@ -144,15 +146,6 @@ def annotation_legend() -> list[dict[str, str]]:
         for kind, guide in ANNOTATION_GUIDES.items()
     ]
 
-def _json(text: str) -> dict[str, Any]:
-    value=(text or "").strip(); fenced=re.search(r"```(?:json)?\s*(.*?)```",value,re.I|re.S)
-    if fenced: value=fenced.group(1)
-    start=value.find("{"); end=value.rfind("}")
-    if start<0 or end<=start: raise ValueError("Short Paper JSON object를 찾지 못했습니다.")
-    result=json.loads(value[start:end+1])
-    if not isinstance(result,dict): raise ValueError("응답은 JSON object여야 합니다.")
-    return result
-
 def draft_prompt(project: dict[str,Any], cards: list[dict[str,Any]]) -> str:
     from research_fellow.infrastructure.prompt_renderer import render_prompt
     return render_prompt("m2_short_paper_draft.j2",project=project,cards=cards)
@@ -172,7 +165,7 @@ def paper_proposal_prompt(
 
 def parse_paper_proposal(text: str) -> dict[str,Any]:
     """Normalize an LLM proposal review without treating model memory as evidence."""
-    raw=_json(text)
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.")
 
     def assessment_rows(name: str) -> list[dict[str,Any]]:
         rows=[]
@@ -253,7 +246,7 @@ def writing_spec_guidance_prompt(
 
 
 def parse_writing_spec_guidance(text: str, *, valid_card_ids: set[str]) -> dict[str,Any]:
-    raw=_json(text);claims=[]
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.");claims=[]
     for index,item in enumerate(raw.get("central_claim_candidates") or [],1):
         if isinstance(item,str):item={"claim":item}
         if not isinstance(item,dict):continue
@@ -384,7 +377,7 @@ def apply_appendix_refresh(
     text: str, manuscript: dict[str,Any], *, valid_card_ids:set[str], version:int,
 ) -> tuple[dict[str,Any],list[dict[str,Any]]]:
     """Replace Full Paper candidates without rewriting the two-page body."""
-    raw=_json(text);result=copy.deepcopy(manuscript);before=list(result.get("appendix_claims") or [])
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.");result=copy.deepcopy(manuscript);before=list(result.get("appendix_claims") or [])
     body_claims={re.sub(r"\s+"," ",str(sentence.get("text") or "")).casefold() for sentence in sentences(result)}
     refreshed=[];seen:set[str]=set()
     for index,item in enumerate(raw.get("appendix_claims") or [],1):
@@ -497,7 +490,7 @@ def todo_grouping_prompt(
 
 def parse_todo_group_plan(text: str, todos: list[dict[str,Any]]) -> dict[str,Any]:
     """Validate an LLM grouping plan; each active To-do may appear in at most one group."""
-    raw=_json(text);valid_order=[str(item.get("todo_id") or "") for item in todos];valid_ids=set(valid_order);used:set[str]=set();group_ids:set[str]=set();groups=[]
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.");valid_order=[str(item.get("todo_id") or "") for item in todos];valid_ids=set(valid_order);used:set[str]=set();group_ids:set[str]=set();groups=[]
     for index,item in enumerate(raw.get("groups") or [],1):
         if not isinstance(item,dict):continue
         todo_ids=[]
@@ -553,7 +546,7 @@ def parse_group_resolution(
     valid_card_ids:set[str], valid_paper_ids:set[str],
 ) -> dict[str,Any]:
     """Validate a group response while retaining an independent verdict for every To-do."""
-    raw=_json(text)
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.")
     if raw.get("group_id") and str(raw.get("group_id"))!=str(group.get("group_id") or ""):
         raise ValueError("그룹 해결 응답의 group_id가 현재 확정 그룹과 일치하지 않습니다.")
     todo_by_id={str(item.get("todo_id") or ""):item for item in todos};results=[];seen=set()
@@ -622,7 +615,7 @@ def revision_focus_context(manuscript: dict[str,Any], todo: dict[str,Any]) -> di
 def parse_resolution_proposal(
     text: str, todo: dict[str,Any], *, valid_card_ids:set[str], valid_paper_ids:set[str],
 ) -> dict[str,Any]:
-    raw=_json(text);verdict=str(raw.get("verdict") or "").strip()
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.");verdict=str(raw.get("verdict") or "").strip()
     if verdict not in {"resolved","needs_more_work"}:
         raise ValueError("해결 제안 verdict는 resolved 또는 needs_more_work여야 합니다.")
     if str(raw.get("todo_id") or "")!=str(todo.get("todo_id") or ""):
@@ -672,7 +665,7 @@ def parse_resolution_proposal(
 
 
 def parse_todo_verification(text: str, todo: dict[str,Any]) -> dict[str,Any]:
-    raw = _json(text)
+    raw = extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.")
     verdict = str(raw.get("verdict") or "").strip()
     if verdict not in {"resolved", "needs_more_work"}:
         raise ValueError("verdict는 resolved 또는 needs_more_work여야 합니다.")
@@ -708,7 +701,7 @@ def parse_todo_verification(text: str, todo: dict[str,Any]) -> dict[str,Any]:
     }
 
 def parse_manuscript(text: str, *, valid_card_ids: set[str], version: int) -> dict[str,Any]:
-    raw=_json(text); sections=[]; sentence_index=0
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다."); sections=[]; sentence_index=0
     for sidx,section in enumerate(raw.get("sections") or [],1):
         paragraphs=[]
         for pidx,paragraph in enumerate(section.get("paragraphs") or [],1):
@@ -761,7 +754,7 @@ def parse_manuscript(text: str, *, valid_card_ids: set[str], version: int) -> di
     }
 
 def parse_review(text: str, manuscript: dict[str,Any]) -> list[dict[str,Any]]:
-    raw=_json(text); valid={s["sentence_id"] for s in sentences(manuscript)}; result=[]
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다."); valid={s["sentence_id"] for s in sentences(manuscript)}; result=[]
     for idx,item in enumerate(raw.get("annotations") or [],1):
         sid=str(item.get("sentence_id") or ""); kind=str(item.get("type") or "")
         if sid in valid and kind in ANNOTATION_TYPES:
@@ -781,7 +774,7 @@ def apply_revisions(
     text: str, manuscript: dict[str,Any], *, valid_card_ids:set[str], version:int,
     allowed_sentence_ids: set[str] | None = None,
 ) -> tuple[dict[str,Any],list[dict[str,Any]]]:
-    raw=_json(text); result=copy.deepcopy(manuscript); by={s["sentence_id"]:s for s in sentences(result)}; diffs=[]
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다."); result=copy.deepcopy(manuscript); by={s["sentence_id"]:s for s in sentences(result)}; diffs=[]
     for item in raw.get("revisions") or []:
         sid=str(item.get("sentence_id") or ""); after=str(item.get("after") or "").strip()
         if sid not in by or not after or (allowed_sentence_ids is not None and sid not in allowed_sentence_ids): continue
@@ -1027,7 +1020,7 @@ def revision_resolution_plan_prompt(
 
 
 def parse_revision_resolution_plan(text: str, todo: dict[str,Any]) -> dict[str,Any]:
-    raw=_json(text);actions=[]
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.");actions=[]
     for index,item in enumerate(raw.get("actions") or [],1):
         if not isinstance(item,dict):continue
         kind=str(item.get("type") or "WRITING_ONLY").strip().upper()
@@ -1074,7 +1067,7 @@ def parse_todo_reconciliation(
     text: str, *, existing_todos: list[dict[str,Any]], manuscript: dict[str,Any],
 ) -> dict[str,Any]:
     """Normalize LLM backlog changes without silently deleting historical To-dos."""
-    raw=_json(text)
+    raw=extract_json_object(text, message="Short Paper 응답은 JSON object여야 합니다.")
     existing={str(item.get("todo_id") or ""):item for item in existing_todos if item.get("todo_id")}
     valid_sentences={str(item.get("sentence_id") or ""):item for item in sentences(manuscript)}
     assessments=[];seen=set()

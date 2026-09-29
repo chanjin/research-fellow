@@ -1,0 +1,86 @@
+dsl: ajd-workflow/v0.2
+id: m1_knowledge_curation
+revision: 1
+agent: m1
+realizes: [knowledge_curation]
+purpose: >
+  논문 읽기 질문과 선택적 evidence review를 승인 지식과 비교하여
+  신규 지식, 기존 지식 보강, 충돌 후보, 보류로 구분하고 연구자 승인 대상으로 제시한다.
+
+trigger:
+  phenomenon: researcher_knowledge_curation_request
+  from: researcher
+
+inputs:
+  - paper
+  - selected_questions
+  - reading_reviews
+  - approved_cards
+
+outcomes:
+  assessment_result:
+    one_of: [assessment_succeeded, assessment_failed]
+
+memory:
+  reads:
+    - reading_questions
+    - reading_reviews
+    - knowledge_cards
+  writes:
+    - reading_questions
+
+steps:
+  - id: prepare_knowledge_candidates
+    kind: action
+    uses:
+      required: [paper, selected_questions, reading_reviews, approved_cards]
+    produces: [candidates, similar_cards]
+    purpose: >
+      선택된 읽기 질문과 보강 근거를 source-grounded knowledge card 후보로 정규화하고
+      기존 승인 지식 중 의미적으로 유사한 비교 대상을 좁힌다.
+
+  - id: assess_knowledge_candidates
+    kind: decision
+    authority: m1
+    uses:
+      required: [candidates, similar_cards, approved_cards]
+    produces: [assessments, assessment_succeeded, assessment_failed, validation_error, draft_result]
+    purpose: >
+      후보를 기존 승인 지식과 비교하여 new, reinforce, conflict, hold 중 하나로 판단한다.
+
+  - id: submit_curation_decisions
+    kind: action
+    when: assessment_succeeded
+    uses:
+      required: [paper, candidates, assessments]
+    produces: [request_ids, held_assessments, action_counts]
+    emits:
+      - phenomenon: decision_request
+        to: [researcher]
+    purpose: >
+      신규·충돌 후보 또는 기존 카드 보강 제안을 연구자 승인 요청으로 발행하며,
+      hold 판단은 semantic memory를 변경하지 않고 검토 결과로 남긴다.
+
+outputs:
+  required:
+    - candidates
+    - assessments
+    - assessment_succeeded
+    - assessment_failed
+    - validation_error
+    - draft_result
+  optional:
+    - request_ids
+    - held_assessments
+    - action_counts
+
+completion:
+  criteria:
+    - every_candidate_is_classified_or_assessment_failure_is_reported
+    - semantic_memory_is_changed_only_after_researcher_approval
+
+invariants:
+  - evidence_remains_traceable_to_the_source_paper
+  - reinforcement_never_creates_a_duplicate_approved_card
+  - conflict_does_not_overwrite_existing_approved_knowledge
+  - hold_does_not_modify_semantic_memory

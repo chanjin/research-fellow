@@ -1,0 +1,31 @@
+dsl: ajd-workflow/v0.2
+id: m2_paper_draft
+revision: 1
+agent: m2
+realizes: [paper_coauthoring]
+purpose: >
+  확정된 논문 프로젝트와 승인 지식을 집필 명세에 맞는 구조화 원고 초안으로 작성한다.
+trigger:
+  phenomenon: paper_draft_request
+inputs: [project, cards, valid_card_ids, version]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: generate_paper_draft
+    kind: action
+    uses:
+      required: [project, cards]
+    produces: [raw_response]
+  - id: normalize_paper_draft
+    kind: action
+    uses:
+      required: [raw_response, valid_card_ids, version]
+    produces: [manuscript]
+outputs:
+  required: [manuscript]
+  optional: [raw_response]
+completion:
+  criteria: [a_structured_manuscript_version_is_available]
+invariants:
+  - manuscript_evidence_links_reference_only_approved_cards
+  - missing_evidence_is_exposed_as_revision_work_not_fabricated_support

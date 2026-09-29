@@ -1,0 +1,26 @@
+dsl: ajd-workflow/v0.2
+id: m2_paper_targeted_revision
+revision: 1
+agent: m2
+realizes: [paper_coauthoring]
+purpose: >
+  선택된 Revision To-do의 대상 문장만 새 근거와 연구자 입력을 반영해 수정한다.
+trigger:
+  phenomenon: paper_targeted_revision_request
+inputs: [project, manuscript, comments, added_cards, valid_card_ids, version, sentence_id]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: revise_target_sentence
+    kind: action
+    uses:
+      required: [project, manuscript, comments, added_cards, valid_card_ids, version, sentence_id]
+    produces: [revised_manuscript, diff, raw_response]
+outputs:
+  required: [revised_manuscript, diff]
+  optional: [raw_response]
+completion:
+  criteria: [target_sentence_revision_is_either_applied_or_explicitly_empty]
+invariants:
+  - only_the_selected_sentence_may_be_modified
+  - new_evidence_links_reference_only_approved_cards

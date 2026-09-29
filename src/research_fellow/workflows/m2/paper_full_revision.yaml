@@ -1,0 +1,26 @@
+dsl: ajd-workflow/v0.2
+id: m2_paper_full_revision
+revision: 1
+agent: m2
+realizes: [paper_coauthoring]
+purpose: >
+  선택 문장 보완 이후 새 근거가 원고 전체 주장·결론·용어에 미치는 영향만 검토해 필요한 추가 수정을 반영한다.
+trigger:
+  phenomenon: paper_full_revision_request
+inputs: [project, manuscript, todo, added_cards, references, valid_card_ids, version]
+memory:
+  reads: [knowledge_cards]
+steps:
+  - id: revise_full_manuscript
+    kind: action
+    uses:
+      required: [project, manuscript, todo, added_cards, references, valid_card_ids, version]
+    produces: [revised_manuscript, diff, raw_response]
+outputs:
+  required: [revised_manuscript, diff]
+  optional: [raw_response]
+completion:
+  criteria: [cross_manuscript_impact_has_been_reviewed]
+invariants:
+  - unrelated_style_rewriting_is_out_of_scope
+  - revision_preserves_sentence_and_appendix_traceability

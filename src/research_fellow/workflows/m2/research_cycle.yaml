@@ -1,0 +1,111 @@
+dsl: ajd-workflow/v0.2
+id: m2_research_cycle
+revision: 1
+agent: m2
+realizes: [research_state_management]
+purpose: >
+  새롭게 승인된 지식 업데이트를 현재 연구상태와 비교하여 연구질문을 생성하거나 보강하고,
+  중요한 질문을 선택하여 M1 Research Curator에게 문헌조사를 위임한다.
+
+trigger:
+  phenomenon: knowledge_update
+  from: m1
+  condition: unreviewed
+
+inputs:
+  - knowledge_updates
+  - existing_research_questions
+  - research_question_backlog
+
+memory:
+  reads:
+    - knowledge_cards
+    - research_questions
+  writes:
+    - research_questions
+
+steps:
+  - id: refresh_research_question_state
+    kind: workflow
+    workflow: m2_research_state_update
+    uses:
+      required: [knowledge_updates, research_question_backlog]
+    produces: [state_update_status, state_transitions, followup_questions, resolved_rq_count, reinforced_rq_count]
+    purpose: >
+      새 지식이 기존 Research Question을 해결하거나 다시 탐색하게 만드는지 먼저 재평가한다.
+
+  - id: formulate_research_questions
+    kind: action
+    uses:
+      required: [knowledge_updates, existing_research_questions]
+      optional: [followup_questions]
+    produces: [research_questions, actionable_questions, review_id]
+    purpose: >
+      새 지식 업데이트를 기존 연구질문과 비교하여 새로운 질문을 만들거나 기존 질문을 보강하고,
+      이번 연구상태 검토의 대상으로 등록한다.
+
+  - id: prioritize_research_questions
+    kind: decision
+    authority: m2
+    when: actionable_questions
+    uses:
+      required: [actionable_questions]
+    produces: [ranked_questions]
+
+  - id: delegate_literature_review
+    kind: action
+    when: actionable_questions
+    uses:
+      required: [ranked_questions, review_id]
+    produces: [dispatched_intents]
+    emits:
+      - phenomenon: curation_intent
+        to: [m1]
+    purpose: >
+      선택된 Research Question을 M1이 실행할 Curation Intent로 변환한다.
+      Research Question과 Curation Intent는 서로 다른 업무 객체이며 lineage로 연결된다.
+
+  - id: conduct_literature_reviews
+    kind: workflow
+    workflow: m1_auto_literature_review
+    when: dispatched_intents
+    foreach: dispatched_intents
+    uses:
+      required: [dispatched_intents]
+    produces: [executions]
+
+  - id: complete_research_state_review
+    kind: action
+    uses:
+      required: [review_id, research_questions]
+      optional: [dispatched_intents, executions]
+    produces: [status, source_card_count, new_rq_count, strengthened_rq_count]
+    emits:
+      - phenomenon: advice_report
+        to: [researcher]
+
+outputs:
+  required:
+    - status
+    - source_card_count
+    - review_id
+    - research_questions
+    - new_rq_count
+    - strengthened_rq_count
+    - resolved_rq_count
+    - reinforced_rq_count
+  optional:
+    - state_transitions
+    - ranked_questions
+    - dispatched_intents
+    - executions
+
+completion:
+  criteria:
+    - consumed_knowledge_updates_are_recorded
+    - selected_questions_are_delegated_or_resolved
+
+invariants:
+  - every_generated_rq_is_traceable_to_source_card
+  - every_dispatched_intent_is_traceable_to_selected_rq
+  - consumed_knowledge_updates_are_marked_by_completed_review

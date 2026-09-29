@@ -1,0 +1,47 @@
+topology: ajd-topology/v0.1
+id: research_fellow_persistent_research
+revision: 1
+purpose: >
+  M2 Research Advisor와 M1 Research Curator가 shared phenomenon을 통해 지속적으로 연구상태를 갱신하는
+  핵심 feedback loop와, 연구자가 선택적으로 실행하는 심화 지식획득 branch를 하나의 직무 topology로 표현한다.
+  이 topology는 실행 순서를 새로 만들지 않고 이미 존재하는 workflow 관계를 조합·검증한다.
+
+roots:
+  - m2_research_cycle
+  - m1_knowledge_acquisition
+
+loops:
+  - id: research_feedback_loop
+    purpose: >
+      M2가 추가 조사가 필요한 질문을 Curation Intent로 M1에 위임하고,
+      M1의 문헌조사에서 발생한 Knowledge Update를 M2가 다시 연구상태에 반영한다.
+    links:
+      - phenomenon: curation_intent
+        from: m2_research_cycle
+        to: m1_auto_literature_review
+      - phenomenon: knowledge_update
+        from: m1_auto_literature_review
+        to: m2_research_cycle
+
+boundary_interactions:
+  - phenomenon: advice_report
+    direction: outbound
+    workflow: m2_research_cycle
+    actor: researcher
+  - phenomenon: advice_report
+    direction: outbound
+    workflow: m1_auto_literature_review
+    actor: researcher
+  - phenomenon: researcher_knowledge_acquisition_request
+    direction: inbound
+    workflow: m1_knowledge_acquisition
+    actor: researcher
+  - phenomenon: decision_request
+    direction: outbound
+    workflow: m1_knowledge_curation
+    actor: researcher
+
+invariants:
+  - core_research_feedback_loop_is_closed_by_shared_phenomena
+  - knowledge_acquisition_remains_researcher_initiated_and_approval_gated
+  - topology_does_not_create_new_python_orchestration

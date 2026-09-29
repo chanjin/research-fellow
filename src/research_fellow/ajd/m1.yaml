@@ -1,0 +1,41 @@
+ajd: ajd/v0.1
+id: m1
+role: research_curator
+purpose: >
+  문헌을 탐색하고 원문 근거를 검토하여 연구자가 사용할 수 있는
+  검증 가능한 연구 지식과 문헌 자산을 구축하고 유지한다.
+
+responsibilities:
+  - id: literature_curation
+    purpose: >
+      연구질문에 필요한 문헌을 탐색·선별·종합하고 조사 결과를 추적 가능한 형태로 보존한다.
+  - id: paper_reading
+    purpose: >
+      선택된 논문 원문을 읽어 source-intrinsic 요약과 후속 근거 확인 질문을 생성한다.
+  - id: evidence_investigation
+    purpose: >
+      연구자가 선택한 읽기 질문에 대해 원문을 재검토하여 답변을 검증·수정하고 추가 근거와 불확실성을 보존한다.
+  - id: knowledge_curation
+    purpose: >
+      논문 읽기와 근거 조사 결과를 기존 승인 지식과 비교하여 신규 지식, 보강, 충돌, 보류로 정리하고 연구자 승인 대상으로 제시한다.
+  - id: knowledge_acquisition
+    purpose: >
+      논문 읽기, 연구자 질문 선택, 근거 재검토, 지식 큐레이션을 하나의 상위 직무 흐름으로 조합한다.
+
+memory:
+  - id: search_profiles
+    access: [read, write]
+  - id: literature_history
+    access: [read]
+  - id: literature_reviews
+    access: [write]
+  - id: paper_shelf
+    access: [read]
+  - id: paper_analysis
+    access: [read, write]
+  - id: reading_questions
+    access: [read, write]
+  - id: reading_reviews
+    access: [read, write]
+  - id: knowledge_cards
+    access: [read]

@@ -1,0 +1,62 @@
+dsl: ajd-workflow/v0.2
+id: m2_research_state_update
+revision: 1
+agent: m2
+realizes: [research_state_management]
+purpose: >
+  새롭게 승인된 지식이 기존 Research Question의 의미와 탐색 필요성을 어떻게 바꾸는지 재평가하여,
+  질문을 보강·유지·종결하거나 추가 탐색 대상으로 되돌린다.
+
+trigger:
+  phenomenon: knowledge_update
+  from: m1
+  condition: existing_research_questions
+
+inputs:
+  - knowledge_updates
+  - research_question_backlog
+
+memory:
+  reads:
+    - knowledge_cards
+    - research_questions
+  writes:
+    - research_questions
+
+steps:
+  - id: assess_research_question_state
+    kind: decision
+    authority: m2
+    uses:
+      required: [knowledge_updates, research_question_backlog]
+    produces: [assessments]
+    purpose: >
+      새 지식과 기존 Research Question을 비교하여 각 질문을 reinforce, continue, resolve, explore 중 하나로 판단한다.
+
+  - id: apply_research_question_state
+    kind: action
+    uses:
+      required: [assessments, research_question_backlog]
+    produces: [status, state_transitions, followup_questions, resolved_count, reinforced_count]
+    purpose: >
+      M2의 판단을 Research Question의 상태·탐색 필요·변경 이력에 반영하고,
+      추가 문헌조사가 필요한 질문을 다음 우선순위 평가 단계로 돌려보낸다.
+
+outputs:
+  required:
+    - status
+    - state_transitions
+    - followup_questions
+    - resolved_count
+    - reinforced_count
+
+completion:
+  criteria:
+    - every_assessed_question_has_an_explicit_state_action
+    - resolved_questions_are_removed_from_active_exploration
+    - exploration_questions_are_returned_to_followup_selection
+
+invariants:
+  - research_question_identity_is_preserved_across_state_updates
+  - new_knowledge_never_silently_deletes_a_research_question
+  - every_state_change_is_traceable_to_a_reason

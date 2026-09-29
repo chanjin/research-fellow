@@ -1319,6 +1319,14 @@ class Ledger:
             )
         return run_id
 
+    def bind_auto_research_run_review(self, run_id: str, review_id: str) -> None:
+        """Attach a runtime execution record to its business research review."""
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE auto_research_runs SET review_id=?, updated_at=? WHERE run_id=?",
+                (review_id, now(), run_id),
+            )
+
     def update_auto_research_run(self, run_id: str, *, status: str | None = None, stage: str | None = None, checkpoint: dict[str, Any] | None = None, error_type: str | None = None, error_message: str | None = None, retry_count: int | None = None) -> None:
         fields, values = [], []
         mapping = {
@@ -1607,7 +1615,7 @@ class Ledger:
             else:
                 rq_id = str(candidate.get("rq_id") or f"rq-{uuid.uuid4().hex[:12]}")
                 status = str(candidate.get("status", "candidate"))
-                if status not in {"candidate", "interested", "exploring", "hold", "rejected"}:
+                if status not in {"candidate", "interested", "exploring", "hold", "resolved", "rejected"}:
                     status = "candidate"
                 conn.execute(
                     """INSERT INTO research_questions(
@@ -1650,19 +1658,19 @@ class Ledger:
         query = "SELECT * FROM research_questions WHERE deleted_at IS NULL"
         values: list[object] = []
         if statuses:
-            clean = [item for item in statuses if item in {"candidate", "interested", "exploring", "hold", "rejected"}]
+            clean = [item for item in statuses if item in {"candidate", "interested", "exploring", "hold", "resolved", "rejected"}]
             if clean:
                 marks = ",".join("?" for _ in clean)
                 query += f" AND status IN ({marks})"
                 values.extend(clean)
-        query += " ORDER BY CASE status WHEN 'exploring' THEN 0 WHEN 'interested' THEN 1 WHEN 'candidate' THEN 2 WHEN 'hold' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?"
+        query += " ORDER BY CASE status WHEN 'exploring' THEN 0 WHEN 'interested' THEN 1 WHEN 'candidate' THEN 2 WHEN 'hold' THEN 3 WHEN 'resolved' THEN 4 ELSE 5 END, updated_at DESC LIMIT ?"
         values.append(max(1, min(int(limit), 500)))
         with self.connect() as conn:
             rows = conn.execute(query, values).fetchall()
         return [self._research_question_row(row) for row in rows]
 
     def update_research_question_status(self, rq_id: str, status: str) -> bool:
-        if status not in {"candidate", "interested", "exploring", "hold", "rejected"}:
+        if status not in {"candidate", "interested", "exploring", "hold", "resolved", "rejected"}:
             raise ValueError("지원하지 않는 연구질문 상태입니다.")
         with self.connect() as conn:
             row = conn.execute("SELECT status FROM research_questions WHERE rq_id=? AND deleted_at IS NULL", (rq_id,)).fetchone()
@@ -1674,6 +1682,32 @@ class Ledger:
         if result.rowcount == 1 and previous != status:
             self.add_research_question_change(rq_id, "status_changed", f"상태가 {previous or '미지정'} → {status}로 변경되었습니다.")
         return result.rowcount == 1
+
+    def update_research_question_exploration_need(self, rq_id: str, exploration_need: str) -> bool:
+        with self.connect() as conn:
+            result = conn.execute(
+                "UPDATE research_questions SET exploration_need=?, updated_at=? WHERE rq_id=? AND deleted_at IS NULL",
+                (exploration_need.strip(), now(), rq_id),
+            )
+        return result.rowcount == 1
+
+    def add_research_question_update_source(self, rq_id: str, update_id: str, relation_reason: str = "") -> None:
+        if not update_id.strip():
+            return
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT source_update_ids_json FROM research_questions WHERE rq_id=? AND deleted_at IS NULL", (rq_id,),
+            ).fetchone()
+            if not row:
+                return
+            prior = json.loads(row[0] or "[]")
+            merged = list(dict.fromkeys([*prior, update_id.strip()]))[:100]
+            conn.execute(
+                "UPDATE research_questions SET source_update_ids_json=?, updated_at=? WHERE rq_id=? AND deleted_at IS NULL",
+                (json.dumps(merged, ensure_ascii=False), now(), rq_id),
+            )
+        if relation_reason.strip():
+            self.add_research_question_change(rq_id, "evidence_added", relation_reason.strip())
 
     def link_research_question_intent(self, rq_id: str, intent_id: str, request_id: str = "") -> None:
         with self.connect() as conn:

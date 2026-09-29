@@ -129,9 +129,7 @@ from research_fellow.application.advising import (
     store_research_question_candidates,
 )
 from research_fellow.application.advisory_workflow import (
-    AdvisoryPlan, advisory_plan_prompt, advisory_synthesis_prompt, collect_evidence_clusters,
-    deterministic_advisory, deterministic_subquestion_judgment, parse_advisory_plan,
-    subquestion_judgment_prompt,
+    execute_advisory_planning, execute_advisory_response,
 )
 from research_fellow.application.episodic_memory import recall_act_spec, recall_context, store_advisory_episode, store_researcher_curation_episode
 from research_fellow.application.prompt_tasks import (
@@ -184,7 +182,7 @@ from research_fellow.application.sensemaking import (
     knowledge_card_candidate_prompt, parse_sensemaking_card_candidate,
 )
 from research_fellow.application.paper_shelf import StoredPaperUpload, document_from_shelf_path, document_from_source_url, ensure_shelf_pdf, pasted_paper_text_upload, store_paper_upload, suggested_paper_labels
-from research_fellow.application.paper_reading import independent_card_context, parse_reading_questions, parse_reading_summary, reading_prompt, unconsumed_reading_sections
+from research_fellow.application.paper_reading import execute_paper_reading_summary, independent_card_context, parse_reading_questions, parse_reading_summary, reading_prompt, unconsumed_reading_sections
 from research_fellow.application.ontology import ontology_context_dot, ontology_dot, ontology_plotly_figure, search_cards_for_ontology
 from research_fellow.application.ontology_curation import (
     build_curation_context, parse_relation_suggestions, parse_type_suggestions,
@@ -209,6 +207,10 @@ from research_fellow.application.paper_coauthor import (
     revision_resolution_plan_prompt as short_paper_resolution_plan_prompt,
     parse_revision_resolution_plan,
     todo_grouping_prompt as short_paper_todo_grouping_prompt,
+)
+from research_fellow.application.paper_coauthor_workflow import (
+    execute_full_paper_revision, execute_paper_draft, execute_paper_proposal_review,
+    execute_paper_review, execute_targeted_paper_revision,
 )
 from research_fellow.application.paper_evidence import (
     assemble_paper_evidence_candidates, paper_evidence_query,
@@ -442,22 +444,6 @@ def show_recalled_episodes(act_spec: object) -> None:
             st.caption(f"과거 답변 요약(현재 근거가 아닌 선례): {episode.answer_summary[:700]}")
             if episode.unresolved_items:
                 st.caption("당시 미결 사항: " + "; ".join(episode.unresolved_items))
-
-
-def execute_plan_first_advisory(
-    plan: AdvisoryPlan, context: str, recipient: str, model: str, use_ollama: bool, semantic: bool, embedding_model: str,
-) -> tuple[list[tuple[object, object]], list[str], str]:
-    """LLMs judge and synthesize; card selection remains deterministic in retriever.cluster."""
-    clusters = collect_evidence_clusters(
-        plan, retriever, memory.all(), ledger.active_knowledge_relations({card["card_id"] for card in memory.all()}),
-        context=context, semantic=semantic, embedding_model=embedding_model,
-    )
-    judgments: list[str] = []
-    for subquestion, cluster in clusters:
-        draft = llm_draft(subquestion_judgment_prompt(subquestion, cluster, context), model, use_ollama)
-        judgments.append(draft or deterministic_subquestion_judgment(subquestion, cluster))
-    answer = llm_draft(advisory_synthesis_prompt(plan, judgments, [cluster for _, cluster in clusters], recipient), model, use_ollama)
-    return clusters, judgments, answer or deterministic_advisory(plan, judgments)
 
 
 def show_ollama_failure(result: OllamaDraftResult, model: str) -> None:
@@ -2308,28 +2294,35 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                         live_output.text("".join(streamed_parts))
 
                     with st.spinner("논문을 읽고 있습니다. 생성되는 내용은 아래에 바로 표시됩니다."):
-                        result = paper_draft_result(
-                            reading_prompt(document, paper, question), model, use_ollama,
-                            profile="paper_reading", on_chunk=None if selected_llm_provider("paper") == "gemini" else show_stream,
+                        reading_run = execute_paper_reading_summary(
+                            ledger, paper, analysis, document, question,
+                            drafter=lambda prompt: paper_draft_result(
+                                prompt, model, use_ollama, profile="paper_reading",
+                                on_chunk=None if selected_llm_provider("paper") == "gemini" else show_stream,
+                            ),
                         )
                     live_output.empty()
-                    questions, unconsumed_sections = persist_paper_reading_output(ledger, paper, analysis, question, result.text or "", "LLM API") if result.ok else ([], [])
+                    result = reading_run.get("draft_result")
+                    questions = reading_run.get("reading_questions", [])
+                    saved_question_ids = reading_run.get("saved_question_ids", [])
+                    unconsumed_sections = reading_run.get("unconsumed_sections", [])
                     if unconsumed_sections:
                         with st.expander(f"파싱에 반영되지 않은 응답 섹션 {len(unconsumed_sections)}개", expanded=False):
                             st.caption("카드·요약에 쓰이지 않은 필드명 또는 섹션입니다. 이 내용을 복사해 파서 보완에 활용할 수 있습니다. 원본 응답은 별도로 보존됩니다.")
                             for index, section in enumerate(unconsumed_sections, start=1):
                                 st.code(section, language="markdown")
                     if questions:
-                        saved_question_ids = ledger.add_paper_reading_questions(paper["paper_id"], questions)
                         if saved_question_ids:
                             st.success(f"논문 요약과 원문 근거 읽기 질문 {len(saved_question_ids)}건을 추가했습니다.")
                         else:
                             st.info("논문 요약은 갱신했고, 같은 읽기 질문은 이미 저장되어 있어 중복 추가하지 않았습니다.")
                         st.rerun()
-                    elif result.ok:
-                        st.warning("원문 근거 형식의 읽기 질문을 해석하지 못했습니다.")
-                    else:
+                    elif reading_run.get("generation_succeeded"):
+                        st.warning("논문 요약은 저장했지만 원문 근거 형식의 읽기 질문을 해석하지 못했습니다.")
+                    elif result is not None:
                         show_ollama_failure(result, model)
+                    else:
+                        st.error("논문 읽기 응답을 생성하지 못했습니다.")
                 except Exception as error:
                     st.error(f"논문 읽기 질문 생성에 실패했습니다: {error}")
             with st.expander("외부 채팅으로 수동 처리", expanded=False):
@@ -4380,8 +4373,11 @@ def research_advisory_screen(model: str, use_ollama: bool, semantic: bool, embed
             active_card_ids={card["card_id"] for card in memory.all()}, semantic=semantic, embedding_model=embedding_model,
         )
         precedent = recall_context(act_spec)
-        draft = llm_draft(advisory_plan_prompt("research_question", question, context, "researcher", precedent), model, use_ollama)
-        plan = parse_advisory_plan(draft or "", "research_question", question)
+        plan_result = execute_advisory_planning(
+            request_type="research_question", question=question, context=context, recipient="researcher",
+            recalled_context=precedent, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
+        )
+        plan = plan_result["plan"]
         ledger.record(
             case_id, "advice_report", "m2", ["researcher"], "research_question_response",
             {"title": "M2 · 연구자 질문 답변 계획", "question": question, "context": context,
@@ -4404,9 +4400,17 @@ def research_advisory_screen(model: str, use_ollama: bool, semantic: bool, embed
             st.write(f"{index}. {subquestion.question}")
         if st.button("계획에 따라 근거 수집·연구 의견 만들기", type="primary", key="m2-service-run-plan"):
             precedent = recall_context(act_spec) if act_spec else ""
-            clusters, judgments, answer = execute_plan_first_advisory(plan, f"{context}\n\n{precedent}", "researcher", model, use_ollama, semantic, embedding_model)
-            evidence_ids = [card_id for _, cluster in clusters for card_id in cluster.card_ids]
-            relation_ids = [relation_id for _, cluster in clusters for relation_id in cluster.relation_ids]
+            advisory_result = execute_advisory_response(
+                plan=plan, context=f"{context}\n\n{precedent}", recipient="researcher",
+                cards=memory.all(), relations=ledger.active_knowledge_relations({card["card_id"] for card in memory.all()}),
+                retriever=retriever, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
+                semantic=semantic, embedding_model=embedding_model,
+            )
+            clusters = advisory_result["evidence_clusters"]
+            judgments = advisory_result["judgments"]
+            answer = advisory_result["answer"]
+            evidence_ids = advisory_result["evidence_card_ids"]
+            relation_ids = advisory_result["evidence_relation_ids"]
             ledger.record(
                 st.session_state["m2-service-case"], "advice_report", "m2", ["researcher"], "research_question_response",
                 {"title": "M2 · 계획형 연구자 질문 대응", "question": question, "context": context, "report": answer,
@@ -7790,9 +7794,13 @@ def render_paper_project_hub(model: str, use_ollama: bool, semantic: bool, embed
             st.error(f"기획 검토 프롬프트 준비에 실패했습니다: {proposal_prompt_error}")
         st.caption("내부 LLM을 호출하거나, 아래 프롬프트를 외부 LLM에 보내고 JSON 응답을 붙여넣을 수 있습니다.")
         if st.button("내부 LLM 호출 · 논문 기획 검토",type="primary",disabled=not proposal_prompt or not title.strip() or not research_question.strip(),key="paper-proposal-internal"):
-            raw=llm_draft(proposal_prompt,model,use_ollama,profile="review") or ""
             try:
-                review=parse_paper_proposal(raw)
+                result=execute_paper_proposal_review(
+                    title=title,research_question=research_question,research_context=research_context,
+                    cards=selected_cards,papers=selected_papers,
+                    draft_fn=lambda prompt: llm_draft(prompt,model,use_ollama,profile="review"),
+                )
+                review=result["proposal_review"]
                 st.session_state["paper-project-wizard"]={**draft,"proposal_review":review,"proposal_review_source":"internal_llm","proposal_review_input":proposal_input}
                 st.rerun()
             except ValueError as error:st.error(str(error))
@@ -8261,8 +8269,13 @@ def render_m2_coauthor_workspace(model: str, use_ollama: bool, semantic: bool, e
                 st.caption("상단의 ‘자동 검사·마일스톤 승인’ 화면에서 집필 명세를 저장한 뒤 돌아오세요.")
         c1,c2=st.columns(2)
         if c1.button("내부 LLM 초안 생성",type="primary",disabled=not draft_spec_ready):
-            raw=llm_draft(prompt,model,use_ollama,profile="writing") or ""
-            try:m=parse_manuscript(raw,valid_card_ids=valid_ids,version=len(version_events)+1); ledger.add_paper_project_event(current_id,"manuscript_version",{"manuscript":m,"source":"internal_draft","diff":[]}); st.rerun()
+            try:
+                result=execute_paper_draft(
+                    project=project,cards=evidence,valid_card_ids=valid_ids,version=len(version_events)+1,
+                    draft_fn=lambda task_prompt: llm_draft(task_prompt,model,use_ollama,profile="writing"),
+                )
+                m=result["manuscript"]
+                ledger.add_paper_project_event(current_id,"manuscript_version",{"manuscript":m,"source":"internal_draft","diff":[]}); st.rerun()
             except ValueError as error:st.error(str(error))
         with st.expander("외부 LLM으로 초안 생성"):
             st.caption("집필 명세의 값뿐 아니라 각 항목의 적용 방법도 프롬프트에 포함됩니다.")
@@ -8348,10 +8361,13 @@ def render_m2_coauthor_workspace(model: str, use_ollama: bool, semantic: bool, e
                 )
             prompt=short_paper_review_prompt(project,manuscript,review_evidence)
             if st.button("내부 LLM 문장 검증 실행",disabled=current_version_reviewed):
-                raw=llm_draft(prompt,model,use_ollama,profile="review") or ""
                 try:
                     result_version=len(version_events)+1
-                    anns=parse_review(raw,manuscript); reviewed=apply_review(manuscript,anns); reviewed["version"]=result_version
+                    workflow_result=execute_paper_review(
+                        project=project,manuscript=manuscript,cards=review_evidence,version=result_version,
+                        draft_fn=lambda task_prompt: llm_draft(task_prompt,model,use_ollama,profile="review"),
+                    )
+                    anns=workflow_result["annotations"]; reviewed=workflow_result["reviewed_manuscript"]
                     review_result=_review_result_payload(
                         source="internal_llm",before_todos=todos,annotations=anns,
                         reviewed_from_version=int(manuscript.get("version") or len(version_events)),result_version=result_version,
@@ -8610,9 +8626,13 @@ def render_m2_coauthor_workspace(model: str, use_ollama: bool, semantic: bool, e
                 elif todo.get("status")=="revised_pending_review":
                     st.info("문장 리비전이 반영되었습니다. 아래 해결 여부 검증을 수행하세요.")
                 if st.button("내부 LLM으로 해당 문장 리비전",type="primary",disabled=not can_revise,key=f"m2-todo-revise-{current_id}-{todo_id}"):
-                    raw=llm_draft(revision_prompt,model,use_ollama,profile="writing") or ""
                     try:
-                        revised,diff=_apply_targeted_paper_revision(raw,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1,sentence_id=todo["sentence_id"])
+                        workflow_result=execute_targeted_paper_revision(
+                            project=project,manuscript=manuscript,comments=comments,added_cards=added,
+                            valid_card_ids=valid_ids,version=len(version_events)+1,sentence_id=todo["sentence_id"],
+                            draft_fn=lambda task_prompt: llm_draft(task_prompt,model,use_ollama,profile="writing"),
+                        )
+                        revised,diff=workflow_result["revised_manuscript"],workflow_result["diff"]
                         if not diff:st.warning("수정된 문장을 찾지 못했습니다. LLM 응답 형식을 확인하세요.")
                         else:
                             ledger.add_paper_project_event(current_id,"researcher_comment",task_payload)
@@ -8665,9 +8685,13 @@ def render_m2_coauthor_workspace(model: str, use_ollama: bool, semantic: bool, e
                     "내부 LLM으로 전체 원고 영향 리비전",type="primary",disabled=not can_full_revise,
                     key=f"m2-todo-full-revise-{current_id}-{todo_id}",
                 ):
-                    raw=llm_draft(full_revision_prompt,model,use_ollama,profile="writing") or ""
                     try:
-                        revised,diff=apply_revisions(raw,manuscript,valid_card_ids=valid_ids,version=len(version_events)+1)
+                        workflow_result=execute_full_paper_revision(
+                            project=project,manuscript=manuscript,todo=task_payload,added_cards=added,references=todo_references,
+                            valid_card_ids=valid_ids,version=len(version_events)+1,
+                            draft_fn=lambda task_prompt: llm_draft(task_prompt,model,use_ollama,profile="writing"),
+                        )
+                        revised,diff=workflow_result["revised_manuscript"],workflow_result["diff"]
                         if not diff:
                             current_version=int(manuscript.get("version") or len(version_events))
                             ledger.add_paper_project_event(current_id,"revision_full_impact_review",{
@@ -8840,8 +8864,11 @@ def external_advisory(model: str, use_ollama: bool, semantic: bool, embedding_mo
                 ledger, episodic_retriever, situation=f"외부 자문 요청: {question}\n요청자: {requester}\n맥락: {context}",
                 active_card_ids={card["card_id"] for card in memory.all()}, semantic=semantic, embedding_model=embedding_model,
             )
-            draft = llm_draft(advisory_plan_prompt("external_advisory", question, context, requester, recall_context(act_spec)), model, use_ollama)
-            plan = parse_advisory_plan(draft or "", "external_advisory", question)
+            plan_result = execute_advisory_planning(
+                request_type="external_advisory", question=question, context=context, recipient=requester,
+                recalled_context=recall_context(act_spec), draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
+            )
+            plan = plan_result["plan"]
             ledger.record(
                 st.session_state["external_case"], "advisory_exchange", "m2", ["external_requester", "researcher"],
                 "advisory_plan", {"title": "외부 자문 답변 계획", "interpretation": st.session_state["external_interpretation"],
@@ -8862,9 +8889,17 @@ def external_advisory(model: str, use_ollama: bool, semantic: bool, embedding_mo
                 st.write(f"{index}. {subquestion.question}")
             if st.button("계획에 따라 근거 수집·자문 답변 만들기", type="primary", key="external-run-plan"):
                 precedent = recall_context(act_spec) if act_spec else ""
-                clusters, judgments, answer = execute_plan_first_advisory(plan, f"{context}\n\n{precedent}", requester, model, use_ollama, semantic, embedding_model)
-                evidence_ids = [card_id for _, cluster in clusters for card_id in cluster.card_ids]
-                relation_ids = [relation_id for _, cluster in clusters for relation_id in cluster.relation_ids]
+                advisory_result = execute_advisory_response(
+                    plan=plan, context=f"{context}\n\n{precedent}", recipient=requester,
+                    cards=memory.all(), relations=ledger.active_knowledge_relations({card["card_id"] for card in memory.all()}),
+                    retriever=retriever, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
+                    semantic=semantic, embedding_model=embedding_model,
+                )
+                clusters = advisory_result["evidence_clusters"]
+                judgments = advisory_result["judgments"]
+                answer = advisory_result["answer"]
+                evidence_ids = advisory_result["evidence_card_ids"]
+                relation_ids = advisory_result["evidence_relation_ids"]
                 ledger.record(
                     st.session_state["external_case"], "advisory_exchange", "m2", ["external_requester", "researcher"],
                     "advisory_response", {"title": "계획형 외부 자문 답변", "answer": answer,

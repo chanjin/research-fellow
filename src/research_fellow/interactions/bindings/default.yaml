@@ -80,11 +80,11 @@ interactions:
 - id: submit_research_question
   renderer:
     type: text_input
-    title: 새 연구자 질문
-    help: 연구자가 직접 제기한 질문과 현재 맥락을 Research Question 입력으로 전달합니다.
+    title: 연구질문 제시
+    help: 연구위원에게 지속적으로 조사할 질문과 현재 맥락을 맡깁니다.
     fields:
     - name: question
-      label: 연구자 질문
+      label: 연구질문
       widget: text_area
       required: true
       height: 110
@@ -95,12 +95,12 @@ interactions:
       widget: text_area
       required: false
       height: 100
-    submit_label: Research Question Thread 시작
+    submit_label: 연구질문 제시
 - id: submit_external_advisory_request
   renderer:
     type: text_input
-    title: 새 외부 자문 요청
-    help: 외부 요청 원문과 요청자·맥락을 보존해 M2 해석 단계로 전달합니다.
+    title: 외부 자문 요청
+    help: 외부 요청 원문과 요청자·맥락을 보존해 Research Fellow의 전문성 해석 단계로 전달합니다.
     fields:
     - name: requester
       label: 요청자
@@ -116,7 +116,7 @@ interactions:
       widget: text_area
       required: false
       height: 100
-    submit_label: 요청 입력 저장
+    submit_label: 자문 요청 전달
 - id: inform_recent_knowledge_updates
   renderer:
     type: message

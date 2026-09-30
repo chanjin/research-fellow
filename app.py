@@ -259,6 +259,11 @@ from research_fellow.application.attention_workflow_runtime import attention_wor
 from research_fellow.application.running import running_work_snapshot, waiting_workflow_results
 from research_fellow.application.activity import activity_feed_snapshot
 from research_fellow.application.research_workspace import research_workspace_snapshot
+from research_fellow.application.research_intake import (
+    prepare_external_advisory_interpretation,
+    submit_external_advisory_interpretation,
+    submit_research_question,
+)
 from research_fellow.application.knowledge_workspace import knowledge_workspace_snapshot
 from research_fellow.application.system_workspace import system_workspace_snapshot
 from research_fellow.application.relations import (
@@ -1094,6 +1099,19 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             ontology_draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
         )
 
+    def _submit_research_question(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        return submit_research_question(ledger, payload)
+
+    def _prepare_external_advisory(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        return prepare_external_advisory_interpretation(
+            payload, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
+        )
+
+    def _submit_external_advisory(
+        request: Mapping[str, Any], review: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        return submit_external_advisory_interpretation(ledger, request, review)
+
     render_operating_desk(
         st,
         workspace_label=WORKSPACE_PROFILE.label,
@@ -1109,6 +1127,9 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         knowledge=knowledge,
         system=system,
         developer_mode=developer_mode,
+        research_submit_question=_submit_research_question,
+        research_prepare_external_advisory=_prepare_external_advisory,
+        research_submit_external_advisory=_submit_external_advisory,
         attention_interaction_inputs=_attention_inputs,
         attention_submit_response=_attention_submit,
         english=english,

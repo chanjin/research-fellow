@@ -22,6 +22,9 @@ def render_operating_desk(
     knowledge: Mapping[str, Any] | None = None,
     system: Mapping[str, Any] | None = None,
     developer_mode: bool = False,
+    research_submit_question: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    research_prepare_external_advisory: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    research_submit_external_advisory: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     attention_interaction_inputs: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     attention_submit_response: Callable[[Mapping[str, Any], Mapping[str, Any]], Any] | None = None,
     english: bool = True,
@@ -70,7 +73,12 @@ def render_operating_desk(
     next_tab = 3
     if research is not None:
         with tabs[next_tab]:
-            render_research_workspace(st, research, english=english)
+            render_research_workspace(
+                st, research, english=english,
+                submit_research_question=research_submit_question,
+                prepare_external_advisory=research_prepare_external_advisory,
+                submit_external_advisory=research_submit_external_advisory,
+            )
         next_tab += 1
     if knowledge is not None:
         with tabs[next_tab]:

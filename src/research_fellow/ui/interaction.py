@@ -184,6 +184,75 @@ def _render_review_form(st: Any, interaction_id: str, inputs: Mapping[str, Any],
             submitted = st.form_submit_button(str(renderer.get("submit_label") or "검토 결과 반영"), type="primary")
         result={"summary":proposal.get("summary", ""),"revision_achievements":proposal.get("revision_achievements") or [],"next_revision_recommendations":proposal.get("next_revision_recommendations") or [],"assessments":reviewed,"new_todos":selected_new,"existing_todos":existing}
         return InteractionRenderResult(interaction_id, bool(submitted), {output_name: result})
+    if variant == "research_question_triage":
+        rq = dict(inputs.get("research_question") or {})
+        labels = {"interested":"관심", "exploring":"탐색중", "hold":"보류", "completed":"완료", "rejected":"제외"}
+        statuses = list(labels)
+        current = str(rq.get("status") or "interested")
+        with st.form(f"interaction-{key}"):
+            st.markdown(f"**{renderer['title']}**")
+            if renderer.get("help"): st.caption(str(renderer["help"]))
+            st.write(str(rq.get("question") or ""))
+            status = st.radio("상태", statuses, index=statuses.index(current) if current in statuses else 0, horizontal=True, format_func=lambda v: labels[v], key=f"interaction-{key}-status")
+            note = st.text_input("판단 메모 (선택)", key=f"interaction-{key}-note")
+            submitted = st.form_submit_button(str(renderer.get("submit_label") or "상태 반영"), type="primary")
+        return InteractionRenderResult(interaction_id, bool(submitted), {output_name: {"rq_id": str(rq.get("rq_id") or ""), "status": status, "note": note.strip()}})
+
+    if variant == "external_advisory_interpretation":
+        request = dict(inputs.get("external_advisory_request") or {})
+        proposed = dict(inputs.get("proposed_interpretation") or {})
+        with st.form(f"interaction-{key}"):
+            st.markdown(f"**{renderer['title']}**")
+            if renderer.get("help"): st.caption(str(renderer["help"]))
+            st.caption(f"요청자: {request.get('requester') or '미지정'}")
+            st.write(str(request.get("request") or ""))
+            interpretation = st.text_area("M2 해석", value=str(proposed.get("interpretation") or proposed.get("question") or ""), height=130, key=f"interaction-{key}-interpretation")
+            question = st.text_area("Thread에서 관리할 질문", value=str(proposed.get("question") or ""), height=110, key=f"interaction-{key}-question")
+            submitted = st.form_submit_button(str(renderer.get("submit_label") or "Thread 시작"), type="primary")
+        if submitted and not question.strip():
+            st.info("Thread에서 관리할 질문을 입력하세요.")
+            submitted = False
+        return InteractionRenderResult(interaction_id, bool(submitted), {output_name: {"interpreted_question": question.strip(), "interpretation": interpretation.strip()}})
+
+    if variant == "paper_reading_claim":
+        paper = dict(inputs.get("paper") or {})
+        item = dict(inputs.get("reading_question") or {})
+        duplicates = [dict(x) for x in (inputs.get("duplicate_candidates") or [])]
+        context = str(inputs.get("research_context") or "")
+        evidence_levels = {
+            "empirical":"실증 — 논문의 데이터·실험·사례가 직접 뒷받침",
+            "theoretical":"이론 — 개념적·논리적 논증이 중심",
+            "review":"문헌 종합 — 여러 선행 연구를 검토·종합",
+            "provisional":"잠정 — 연구자의 해석이거나 추가 검증 필요",
+        }
+        with st.form(f"interaction-{key}"):
+            st.markdown(f"**{renderer['title']}**")
+            if renderer.get("help"): st.caption(str(renderer["help"]))
+            decision_options=["register","defer","irrelevant"]
+            existing = "defer" if item.get("status") == "deferred" else "irrelevant" if item.get("status") == "irrelevant" else "register"
+            decision=st.radio("연구자 결정", decision_options, index=decision_options.index(existing), horizontal=True, format_func={"register":"지식카드 등록","defer":"보류","irrelevant":"무관"}.get, key=f"interaction-{key}-decision")
+            comment=st.text_area("근거 해석·첨삭", value=str(item.get("researcher_comment") or ""), key=f"interaction-{key}-comment")
+            evidence_text=st.text_area("원문 근거 (한 줄에 하나 · 최대 5개)", value="\n".join(list(item.get("evidence") or [])[:5]), key=f"interaction-{key}-evidence")
+            card_title=st.text_input("카드 제목", value=str(item.get("suggested_title") or ""), key=f"interaction-{key}-title")
+            card_claim=st.text_area("주장 (Claim)", value=str(item.get("tentative_answer") or ""), key=f"interaction-{key}-claim")
+            card_context=st.text_area("지식 맥락", value=context, height=150, key=f"interaction-{key}-context")
+            card_labels=st.text_input("레이블 (쉼표 구분)", value=str(item.get("suggested_labels") or ""), key=f"interaction-{key}-labels")
+            card_concepts=st.text_input("핵심 개념 (쉼표 구분)", value=str(item.get("suggested_concepts") or ""), key=f"interaction-{key}-concepts")
+            card_applies_to=st.text_input("적용 대상 (쉼표 구분)", value=str(item.get("suggested_applies_to") or ""), key=f"interaction-{key}-applies")
+            card_conditions=st.text_area("적용 조건", value=str(item.get("suggested_conditions") or ""), key=f"interaction-{key}-conditions")
+            card_limits=st.text_area("한계·유보", value=str(item.get("suggested_limits") or item.get("uncertainty") or ""), key=f"interaction-{key}-limits")
+            card_evidence_level=st.selectbox("근거 수준", list(evidence_levels), format_func=evidence_levels.get, key=f"interaction-{key}-level")
+            duplicate_mode="separate"; duplicate_target_id=""
+            if duplicates:
+                duplicate_mode=st.radio("유사 카드 처리", ["enrich","separate","defer"], horizontal=True, format_func={"enrich":"기존 카드 근거 보강","separate":"별도 카드 등록","defer":"보류"}.get, key=f"interaction-{key}-duplicate-mode")
+                options={str(x.get("card_id")): f"{x.get('title','')} · {str(x.get('claim',''))[:60]}" for x in duplicates if x.get("card_id")}
+                if options:
+                    duplicate_target_id=st.selectbox("근거를 보강할 기존 카드", list(options), format_func=lambda v: options[v], key=f"interaction-{key}-duplicate-target")
+            submitted=st.form_submit_button(str(renderer.get("submit_label") or "판단 저장"), type="primary")
+        evidence=[line.strip(" -•") for line in evidence_text.splitlines() if line.strip(" -•")]
+        review={"decision":decision,"comment":comment.strip(),"evidence":evidence,"card_title":card_title.strip(),"card_claim":card_claim.strip(),"card_context":card_context.strip(),"card_labels":card_labels.strip(),"card_concepts":card_concepts.strip(),"card_applies_to":card_applies_to.strip(),"card_conditions":card_conditions.strip(),"card_limits":card_limits.strip(),"card_evidence_level":card_evidence_level,"duplicate_mode":duplicate_mode,"duplicate_target_id":duplicate_target_id}
+        return InteractionRenderResult(interaction_id, bool(submitted), {output_name: review})
+
     raise NotImplementedError(f"Unknown review_form variant {variant!r}: {interaction_id}")
 
 
@@ -261,6 +330,7 @@ def render_interaction_with_autonomy(
     signals: Mapping[str, Any] | None,
     key: str,
     profile: str = "default",
+    audit_recorder: Any | None = None,
 ) -> InteractionRenderResult:
     """Resolve an interaction autonomously when policy permits, otherwise render UI.
 
@@ -274,9 +344,18 @@ def render_interaction_with_autonomy(
     decision = evaluate_interaction_autonomy(
         interaction_id, signals or {}, inputs=inputs,
     )
+    if decision.audit_record and callable(audit_recorder):
+        audit_recorder({
+            "workflow_id": "ui_interaction",
+            "step": interaction_id,
+            **decision.as_dict(),
+        })
     if decision.action == AUTONOMY_AUTO:
         return InteractionRenderResult(interaction_id, True, dict(decision.resolution))
     if decision.action == AUTONOMY_AUTO_NOTIFY:
+        contract = interaction_contract(interaction_id)
+        if contract.requires_response:
+            return InteractionRenderResult(interaction_id, True, dict(decision.resolution))
         # ``inform`` interactions still render their notification when a UI is
         # present; they simply do not gate workflow progress.
         return render_interaction(st, interaction_id, inputs, key=key, profile=profile)

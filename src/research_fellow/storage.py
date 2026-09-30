@@ -166,6 +166,23 @@ class Ledger:
                     error TEXT NOT NULL,
                     diagnostics_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS autonomy_decisions (
+                    event_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    interaction_id TEXT NOT NULL,
+                    policy_id TEXT NOT NULL,
+                    policy_profile TEXT NOT NULL,
+                    autonomy_level TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    signals_json TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL DEFAULT '',
+                    step_id TEXT NOT NULL DEFAULT '',
+                    run_id TEXT NOT NULL DEFAULT '',
+                    notified INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_created
+                    ON autonomy_decisions(created_at DESC);
                 CREATE TABLE IF NOT EXISTS knowledge_cards (
                     card_id TEXT PRIMARY KEY,
                     card_json TEXT NOT NULL,
@@ -632,6 +649,46 @@ class Ledger:
                     "CREATE UNIQUE INDEX IF NOT EXISTS decisions_one_per_request "
                     "ON decisions(phenomenon_id)"
                 )
+
+
+    def record_autonomy_decision(self, event: dict[str, Any]) -> str:
+        """Append one operational autonomy audit event to the existing ledger."""
+        event_id = f"aut-{uuid.uuid4().hex[:12]}"
+        created_at = str(event.get("evaluated_at") or now())
+        reasons = list(event.get("reasons") or [])
+        signals = dict(event.get("signals") or {})
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO autonomy_decisions
+                   (event_id, created_at, interaction_id, policy_id, policy_profile, autonomy_level,
+                    action, reasons_json, signals_json, workflow_id, step_id, run_id, notified)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id, created_at, str(event.get("interaction_id") or ""),
+                    str(event.get("policy_id") or ""), str(event.get("policy_profile") or "default"),
+                    str(event.get("autonomy_level") or ""), str(event.get("action") or ""),
+                    json.dumps(reasons, ensure_ascii=False), json.dumps(signals, ensure_ascii=False),
+                    str(event.get("workflow_id") or ""), str(event.get("step") or event.get("step_id") or ""),
+                    str(event.get("run_id") or ""), 1 if bool((event.get("audit") or {}).get("notify")) else 0,
+                ),
+            )
+        return event_id
+
+    def autonomy_decisions(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent operational autonomy decisions for System/Activity projections."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM autonomy_decisions ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["reasons"] = json.loads(item.pop("reasons_json"))
+            item["signals"] = json.loads(item.pop("signals_json"))
+            item["notified"] = bool(item.get("notified"))
+            result.append(item)
+        return result
 
     def record_llm_call(self, *, profile_name: str, model: str, prompt: str, settings: dict[str, Any], response: str | None, error: str | None, diagnostics: dict[str, Any] | None) -> None:
         """Append-only diagnostic record. It never changes research knowledge."""

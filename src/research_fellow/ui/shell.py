@@ -1,12 +1,13 @@
 """Job-centred operational UI shell for the Research Fellow."""
 from __future__ import annotations
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from research_fellow.ui.attention import render_attention_queue
 from research_fellow.ui.running import render_running_work
 from research_fellow.ui.activity import render_activity_feed
 from research_fellow.ui.research import render_research_workspace
 from research_fellow.ui.knowledge import render_knowledge_workspace
+from research_fellow.ui.system import render_system_workspace
 
 
 def render_operating_desk(
@@ -19,6 +20,10 @@ def render_operating_desk(
     activity: Mapping[str, Any],
     research: Mapping[str, Any] | None = None,
     knowledge: Mapping[str, Any] | None = None,
+    system: Mapping[str, Any] | None = None,
+    developer_mode: bool = False,
+    attention_interaction_inputs: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
+    attention_submit_response: Callable[[Mapping[str, Any], Mapping[str, Any]], Any] | None = None,
     english: bool = True,
 ) -> None:
     st.header("Research Fellow" if english else "연구위원")
@@ -48,10 +53,16 @@ def render_operating_desk(
         labels.append("Research" if english else "연구")
     if knowledge is not None:
         labels.append("Knowledge" if english else "지식")
+    if developer_mode and system is not None:
+        labels.append("System" if english else "시스템")
     tabs = st.tabs(labels)
     attention_tab, running_tab, activity_tab = tabs[:3]
     with attention_tab:
-        render_attention_queue(st, attention, english=english)
+        render_attention_queue(
+            st, attention, english=english,
+            interaction_inputs=attention_interaction_inputs,
+            submit_response=attention_submit_response,
+        )
     with running_tab:
         render_running_work(st, running, english=english)
     with activity_tab:
@@ -64,3 +75,7 @@ def render_operating_desk(
     if knowledge is not None:
         with tabs[next_tab]:
             render_knowledge_workspace(st, knowledge, english=english)
+        next_tab += 1
+    if developer_mode and system is not None:
+        with tabs[next_tab]:
+            render_system_workspace(st, system, english=english)

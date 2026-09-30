@@ -1032,6 +1032,9 @@ def prepare_workflow_run_by_id(
 ) -> WorkflowRun:
     definition = load_workflow_definition_by_id(workflow_id)
     context = prepare_workflow_context(definition, values)
+    ledger = context.get("ledger")
+    if "autonomy_audit_recorder" not in context and callable(getattr(ledger, "record_autonomy_decision", None)):
+        context["autonomy_audit_recorder"] = ledger.record_autonomy_decision
     handlers = capability_bindings_from_catalog(definition.steps)
     namespace_handlers = capability_bindings_from_namespace(definition, namespace)
     for name, handler in namespace_handlers.items():
@@ -1052,6 +1055,9 @@ def prepare_workflow_run(
     """
     definition = load_workflow_definition(relative_path)
     context = prepare_workflow_context(definition, values)
+    ledger = context.get("ledger")
+    if "autonomy_audit_recorder" not in context and callable(getattr(ledger, "record_autonomy_decision", None)):
+        context["autonomy_audit_recorder"] = ledger.record_autonomy_decision
 
     # Action/decision implementations are resolved through the Capability Catalog.
     # Namespace binding remains only for composition adapters (subworkflows) and
@@ -1127,22 +1133,31 @@ def _execute_workflow_segment(
                 else:
                     signal_values = {}
                 autonomy = evaluate_interaction_autonomy(request.interaction_id, signal_values, inputs=request.inputs)
-                context.setdefault("autonomy_events", []).append({
+                autonomy_event = {
                     "step": str(step["id"]),
+                    "workflow_id": definition.workflow_id,
+                    "run_id": str(context.get("cycle_run_id") or context.get("run_id") or ""),
                     **autonomy.as_dict(),
-                })
+                }
+                context.setdefault("autonomy_events", []).append(autonomy_event)
+                recorder = context.get("autonomy_audit_recorder")
+                if autonomy.audit_record and callable(recorder):
+                    recorder(dict(autonomy_event))
 
-                if autonomy.action == AUTONOMY_AUTO:
+                if autonomy.action in {AUTONOMY_AUTO, AUTONOMY_AUTO_NOTIFY} and (
+                    autonomy.action == AUTONOMY_AUTO or contract.requires_response
+                ):
                     values = _validate_interaction_response(request, autonomy.resolution) if contract.requires_response else {}
                     context.update(values)
                     context["interaction_events"].append({
                         **request.as_dict(),
                         "autonomy": autonomy.action,
+                        "notify": bool(autonomy.audit_notify),
                         "resolution": dict(values),
                     })
                     context["workflow_trace"].append({
                         "step": step["id"],
-                        "status": "auto_resolved",
+                        "status": "auto_resolved_notify" if autonomy.action == AUTONOMY_AUTO_NOTIFY else "auto_resolved",
                         "interaction": request.interaction_id,
                     })
                     continue
@@ -1151,6 +1166,7 @@ def _execute_workflow_segment(
                     context["interaction_events"].append({
                         **request.as_dict(),
                         "autonomy": autonomy.action,
+                        "notify": True,
                     })
                 elif contract.requires_response:
                     context["workflow_trace"].append({

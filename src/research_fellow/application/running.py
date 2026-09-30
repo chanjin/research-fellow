@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from research_fellow.storage import Ledger
+from research_fellow.application.dsl.checkpoint import decode_checkpoint_value
 
 
 @dataclass(frozen=True)
@@ -96,14 +97,17 @@ def waiting_workflow_results(checkpoint_dir: Path | None) -> list[dict[str, Any]
         pending = payload.get("pending_interaction")
         if not isinstance(pending, dict):
             continue
+        decoded_pending = dict(pending)
+        decoded_pending["inputs"] = decode_checkpoint_value(pending.get("inputs") or {})
         results.append({
             "status": "waiting_for_interaction",
             "workflow_id": str(payload.get("workflow_id") or "workflow"),
-            "interaction": dict(pending),
+            "interaction": decoded_pending,
             "checkpoint": {
                 "checkpoint_id": str(payload.get("checkpoint_id") or path.stem),
                 "next_step_index": payload.get("next_step_index"),
             },
+            "resume_metadata": dict(payload.get("resume_metadata") or {}) if isinstance(payload.get("resume_metadata"), dict) else {},
         })
     return results
 

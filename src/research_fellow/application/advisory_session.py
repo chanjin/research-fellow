@@ -9,6 +9,7 @@ from research_fellow.application.advisory_workflow import (
 )
 from research_fellow.application.dsl import prepare_workflow_run
 from research_fellow.infrastructure.retrieval import KnowledgeRetriever
+from research_fellow.storage import Ledger
 
 DraftFunction = Callable[[str], str | None]
 
@@ -58,6 +59,7 @@ def prepare_advisory_session(
     semantic: bool = False,
     embedding_model: str = "nomic-embed-text",
     autonomy_signals: dict[str, object] | None = None,
+    ledger: Ledger | None = None,
 ):
     """Prepare the advisory workflow that pauses at researcher plan confirmation."""
     return prepare_workflow_run(
@@ -78,6 +80,30 @@ def prepare_advisory_session(
             "autonomy_signals": {
                 "confirm_advisory_plan": dict(autonomy_signals or {}),
             },
+            "autonomy_audit_recorder": ledger.record_autonomy_decision if ledger is not None else None,
         },
         globals(),
     )
+
+
+def save_advisory_session_checkpoint(
+    run: Any,
+    checkpoint_dir: Any,
+    *,
+    case_id: str,
+    question: str,
+    context: str,
+) -> str:
+    """Persist a waiting advisory session for handling from the Attention workspace."""
+    from research_fellow.infrastructure.workflow_checkpoint import JsonFileCheckpointStore
+
+    checkpoint_id = f"advisory-{case_id}"
+    payload = run.checkpoint_payload(checkpoint_id=checkpoint_id)
+    payload["resume_metadata"] = {
+        "kind": "research_advisory",
+        "case_id": case_id,
+        "question": question,
+        "context": context,
+    }
+    JsonFileCheckpointStore(checkpoint_dir).save(checkpoint_id, payload)
+    return checkpoint_id

@@ -6,6 +6,7 @@ It does not redefine the interaction itself and it does not describe UI.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from importlib import resources
 from typing import Any, Mapping
@@ -31,6 +32,10 @@ class AutonomyDecision:
     audit_record: bool
     audit_notify: bool
     signals: dict[str, Any]
+    policy_id: str
+    policy_profile: str
+    autonomy_level: str
+    evaluated_at: str
 
     @property
     def requires_human(self) -> bool:
@@ -45,6 +50,10 @@ class AutonomyDecision:
             "resolution": dict(self.resolution),
             "audit": {"record": self.audit_record, "notify": self.audit_notify},
             "signals": dict(self.signals),
+            "policy_id": self.policy_id,
+            "policy_profile": self.policy_profile,
+            "autonomy_level": self.autonomy_level,
+            "evaluated_at": self.evaluated_at,
         }
 
 
@@ -135,6 +144,10 @@ def evaluate_interaction_autonomy(
 ) -> AutonomyDecision:
     policy = autonomy_policy(interaction_id, profile)
     normalized = {str(key): value for key, value in (signals or {}).items()}
+    from research_fellow.application.dsl.autonomy_classification import load_autonomy_classification
+    classification = load_autonomy_classification(profile).get(interaction_id)
+    autonomy_level = classification.current_level if classification is not None else ""
+    evaluated_at = datetime.now(UTC).isoformat(timespec="seconds")
     if policy is None:
         return AutonomyDecision(
             interaction_id=interaction_id,
@@ -144,6 +157,10 @@ def evaluate_interaction_autonomy(
             audit_record=True,
             audit_notify=False,
             signals=normalized,
+            policy_id="no_policy",
+            policy_profile=profile,
+            autonomy_level=autonomy_level,
+            evaluated_at=evaluated_at,
         )
 
     default = str(policy.get("default") or AUTONOMY_ESCALATE)
@@ -169,7 +186,7 @@ def evaluate_interaction_autonomy(
             reasons_list = matched
         reasons = tuple(reasons_list)
 
-    resolution = _resolve_auto_resolution(interaction_id, policy, normalized, dict(inputs or {})) if action == AUTONOMY_AUTO else {}
+    resolution = _resolve_auto_resolution(interaction_id, policy, normalized, dict(inputs or {})) if action in {AUTONOMY_AUTO, AUTONOMY_AUTO_NOTIFY} else {}
     audit = policy.get("audit") or {}
     return AutonomyDecision(
         interaction_id=interaction_id,
@@ -179,6 +196,10 @@ def evaluate_interaction_autonomy(
         audit_record=bool(audit.get("record", True)),
         audit_notify=bool(audit.get("notify", False)),
         signals=normalized,
+        policy_id=str(policy.get("policy_id") or f"{profile}:{interaction_id}"),
+        policy_profile=profile,
+        autonomy_level=autonomy_level,
+        evaluated_at=evaluated_at,
     )
 
 
@@ -216,8 +237,25 @@ def validate_autonomy_policies(profile: str = DEFAULT_AUTONOMY_PROFILE) -> dict[
                     )
         elif default == AUTONOMY_AUTO_NOTIFY:
             auto_notify += 1
-            if contracts[interaction_id].requires_response:
-                raise ValueError(f"auto_notify interaction cannot require a response: {interaction_id}")
+            contract = contracts[interaction_id]
+            if contract.requires_response:
+                on_auto = policy.get("on_auto") or {}
+                resolver = str(on_auto.get("resolver") or "").strip()
+                if resolver:
+                    if resolver not in {"select_by_ids", "approve_all"}:
+                        raise ValueError(f"Unknown autonomy auto resolver {resolver!r}: {interaction_id}")
+                    output_name = str((on_auto.get("args") or {}).get("output") or "")
+                    if output_name not in contract.outputs:
+                        raise ValueError(f"AUTO_NOTIFY resolver output mismatch for {interaction_id}: {output_name!r}")
+                else:
+                    resolution = dict(on_auto.get("resolution") or {})
+                    missing_outputs = sorted(set(contract.outputs) - set(resolution))
+                    unknown_outputs = sorted(set(resolution) - set(contract.outputs))
+                    if missing_outputs or unknown_outputs:
+                        raise ValueError(
+                            f"AUTO_NOTIFY resolution mismatch for {interaction_id}: "
+                            f"missing={missing_outputs}, unknown={unknown_outputs}"
+                        )
         else:
             escalate_defaults += 1
 

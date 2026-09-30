@@ -132,7 +132,7 @@ from research_fellow.application.advising_direction import (
     direction_prompt, draft_research_direction, parse_research_context_mapping,
     record_research_direction, record_update_report, research_context_mapping_prompt,
 )
-from research_fellow.application.advisory_session import prepare_advisory_session
+from research_fellow.application.advisory_session import prepare_advisory_session, save_advisory_session_checkpoint
 from research_fellow.application.advisory_workflow import (
     AdvisoryPlan, advisory_plan_prompt, advisory_synthesis_prompt, collect_evidence_clusters,
     deterministic_advisory, deterministic_subquestion_judgment, parse_advisory_plan,
@@ -241,7 +241,10 @@ from research_fellow.application.ontology_decision_interaction import (
 )
 from research_fellow.application.ontology_review_interaction import apply_ontology_review_feedback
 from research_fellow.application.revision_review_interaction import apply_revision_reconciliation_review
-from research_fellow.application.input_interaction import create_researcher_question_thread, create_external_advisory_thread
+from research_fellow.application.input_interaction import create_researcher_question_thread
+from research_fellow.application.external_advisory_interaction import apply_external_advisory_interpretation
+from research_fellow.application.paper_reading_interaction import apply_paper_reading_review
+from research_fellow.application.research_question_interaction import apply_research_question_triage
 from research_fellow.application.revision_decision_interaction import (
     apply_revision_application_resolutions,
 )
@@ -249,10 +252,15 @@ from research_fellow.application.autonomy_signals import (
     investigation_question_signals, revision_application_signals,
 )
 from research_fellow.application.attention import attention_queue_snapshot
+from research_fellow.application.attention_resolution import (
+    apply_attention_response, interaction_inputs_for_attention_item,
+)
+from research_fellow.application.attention_workflow_runtime import attention_workflow_runtime_binding
 from research_fellow.application.running import running_work_snapshot, waiting_workflow_results
 from research_fellow.application.activity import activity_feed_snapshot
 from research_fellow.application.research_workspace import research_workspace_snapshot
 from research_fellow.application.knowledge_workspace import knowledge_workspace_snapshot
+from research_fellow.application.system_workspace import system_workspace_snapshot
 from research_fellow.application.relations import (
     RELATION_TYPES, create_relation_candidate, lineage_dot, lineage_overview_prompt,
     parse_relation_batch_drafts, relation_batch_prompt,
@@ -284,6 +292,18 @@ from research_fellow.ui.interaction import (
 )
 from research_fellow.ui.attention import render_attention_queue
 from research_fellow.ui.shell import render_operating_desk
+from research_fellow.ui.navigation import (
+    LEGACY_DEVELOPER,
+    LEGACY_DESK,
+    LEGACY_KNOWLEDGE,
+    LEGACY_M1,
+    LEGACY_M2,
+    LEGACY_PAPER,
+    OPERATING_DESK,
+    developer_mode_default,
+    normalize_workspace,
+    visible_navigation_items,
+)
 from research_fellow.domain.research import CurationIntent, ResearchState
 
 
@@ -1033,7 +1053,7 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
             st.write(f"- {report['created_at'][:10]} · {report['payload'].get('title', 'M2 보고서')} · {state.get('question', '연결된 연구질문 없음')}")
 
 
-def operating_desk() -> None:
+def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model: str, *, developer_mode: bool = False) -> None:
     """Job-centred landing workspace for continuous agent operation."""
     english = st.session_state.get("response-language", "English") == "English"
     waiting = waiting_workflow_results(WORKFLOW_CHECKPOINTS)
@@ -1053,6 +1073,27 @@ def operating_desk() -> None:
     activity = activity_feed_snapshot(ledger, limit=40)
     research = research_workspace_snapshot(ledger, limit=20)
     knowledge = knowledge_workspace_snapshot(memory, relations, ledger, limit=30)
+    system = (
+        system_workspace_snapshot(
+            ledger, checkpoint_dir=WORKFLOW_CHECKPOINTS, prompt_log_path=CACHE / "logs" / "llm_calls.jsonl", limit=50
+        )
+        if developer_mode else None
+    )
+    def _attention_inputs(item: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        return interaction_inputs_for_attention_item(item, ledger)
+
+    def _attention_submit(item: Mapping[str, Any], values: Mapping[str, Any]):
+        return apply_attention_response(
+            item, values, ledger=ledger, memory=memory, relations=relations,
+            checkpoint_dir=WORKFLOW_CHECKPOINTS,
+            runtime_binding_for=lambda workflow_id: attention_workflow_runtime_binding(
+                workflow_id, ledger=ledger, retriever=retriever,
+                draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
+                semantic=semantic, embedding_model=embedding_model,
+            ),
+            ontology_draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
+        )
+
     render_operating_desk(
         st,
         workspace_label=WORKSPACE_PROFILE.label,
@@ -1066,6 +1107,10 @@ def operating_desk() -> None:
         activity=activity,
         research=research,
         knowledge=knowledge,
+        system=system,
+        developer_mode=developer_mode,
+        attention_interaction_inputs=_attention_inputs,
+        attention_submit_response=_attention_submit,
         english=english,
     )
 
@@ -2457,6 +2502,7 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                         investigation_inputs,
                         signals=investigation_question_signals(reading_questions),
                         key=f"paper-investigation-{paper['paper_id']}",
+                        audit_recorder=ledger.record_autonomy_decision,
                     )
                     if interaction_result.submitted:
                         selected_questions = list(interaction_result.values.get("selected_questions") or [])
@@ -2523,121 +2569,35 @@ def render_paper_shelf(model: str, use_ollama: bool, semantic: bool, embedding_m
                     if item["status"] == "registered":
                         st.success("이 읽기 해석은 지식카드로 등록되었습니다.")
                         continue
-                    with st.form(f"reading-review-{item['question_id']}"):
-                        decision_options = ["register", "defer", "irrelevant"]
-                        existing_decision = (
-                            "register" if item["status"] in {"proposed", "promoted"}
-                            else "defer" if item["status"] == "deferred"
-                            else "irrelevant"
-                        )
-                        decision = st.radio("연구자 결정", decision_options, index=decision_options.index(existing_decision), horizontal=True, format_func={"register": "지식카드 등록", "defer": "보류", "irrelevant": "무관"}.get)
-                        comment = st.text_area("근거 해석·첨삭", value=item["researcher_comment"])
-                        st.caption("질문은 논문을 읽는 렌즈입니다. 카드 제목은 목록에서 구별하기 위한 짧은 요약이고, Claim은 근거와 조건을 포함한 완전한 주장입니다. 결정 전에도 제안값을 자유롭게 다듬을 수 있으며, 입력값은 ‘지식카드 등록’을 선택했을 때 카드에 반영됩니다.")
-                        evidence_text = st.text_area(
-                            "원문 근거 (선택 · 한 줄에 하나 · 최대 5개)", value="\n".join(list(item["evidence"])[:5]),
-                            help="확인 가능한 페이지와 원문 단서가 있으면 함께 남기세요. 근거 수나 p.N 형식은 카드 등록을 제한하지 않습니다.",
-                        )
-                        card_title = st.text_input("카드 제목 (짧은 요약)", value=item.get("suggested_title", ""), help="Claim을 그대로 반복하지 말고, 목록·계보에서 구별할 수 있는 짧은 명사구로 작성합니다. 예: ‘명세 우선 설계의 품질 효과’")
-                        card_claim = st.text_area("주장 (Claim)", value=item["tentative_answer"], help="근거와 적용 범위를 포함해 한 문장으로 독립적으로 이해되는 완전한 주장입니다.")
-                        card_context_default = independent_card_context(item, str(analysis.get("summary") or ""))
-                        card_context = st.text_area(
-                            "지식 맥락 · 논문 탐색·읽기 요약", value=card_context_default, height=150,
-                            help="원 논문 자체의 과업·비교·문제 설정만 간결하게 남깁니다. 현재 작성 중인 논문, 연구질문, Revision To-do 맥락은 카드 본문에 넣지 않고 origin_links 계보로만 연결됩니다.",
-                        )
-                        card_labels = st.text_input("레이블 (쉼표 구분, 선택)", value=item.get("suggested_labels", ""), help="M1 제안을 수정해 입력합니다. 관리·검색용 분류어이며 온톨로지 개념과 일치할 필요는 없습니다.")
-                        card_concepts = st.text_input("핵심 개념 (쉼표 구분)", value=item.get("suggested_concepts", ""), help="M1 제안을 수정해 입력합니다. 나중에 카드 간 관계를 만들 도메인 개념입니다.")
-                        card_applies_to = st.text_input("적용 대상 (쉼표 구분)", value=item.get("suggested_applies_to", ""), help="M1 제안을 수정해 입력합니다. 이 Claim이 다루는 객체·상황·과업의 유형입니다.")
-                        card_conditions = st.text_area("적용 조건", value=item.get("suggested_conditions", ""), help="M1 제안을 수정해 입력합니다. 주장이 성립한 전제·관찰 범위·설계 제약입니다.")
-                        card_limits = st.text_area("한계·유보", value=item.get("suggested_limits") or item["uncertainty"])
-                        evidence_levels = {
-                            "empirical": "실증 — 논문의 데이터·실험·사례가 직접 뒷받침",
-                            "theoretical": "이론 — 개념적·논리적 논증이 중심",
-                            "review": "문헌 종합 — 여러 선행 연구를 검토·종합",
-                            "provisional": "잠정 — 연구자의 해석이거나 추가 검증 필요",
-                        }
-                        card_evidence_level = st.selectbox("근거 수준", list(evidence_levels), index=0, format_func=evidence_levels.get, help="논문이 Claim을 직접 얼마나 강하게 뒷받침하는지 고릅니다. 단일 실험 결과면 실증, 저자의 논증이면 이론, 리뷰 논문이면 문헌 종합, 본문을 넘어선 연구자 해석이면 잠정이 적합합니다.")
-                        duplicate_mode = "separate"
-                        duplicate_target_id = ""
-                        if candidate_matches:
-                            duplicate_mode = st.radio("유사 카드 처리", ["enrich", "separate", "defer"], horizontal=True, format_func={"enrich": "기존 카드 근거 보강", "separate": "별도 카드 등록", "defer": "보류"}.get)
-                            target_options = {f"{match['title']} · {match['claim'][:60]}": match["card_id"] for match in candidate_matches}
-                            duplicate_target_label = st.selectbox("근거를 보강할 기존 카드", list(target_options))
-                            duplicate_target_id = target_options[duplicate_target_label]
-                        saved = st.form_submit_button("판단 저장")
-                    if saved:
-                        final_evidence = [line.strip(" -•") for line in evidence_text.splitlines() if line.strip(" -•")]
-                        if decision == "register" and (len(card_title.strip()) < 4 or len(card_claim.strip()) < 8):
-                            st.error("지식카드 등록에는 4자 이상의 카드 제목과 8자 이상의 주장(Claim)이 필요합니다.")
-                            continue
-                        if decision == "register" and len(final_evidence) > 5:
-                            st.error("원문 근거는 핵심 위치 최대 5개까지만 유지해 주세요. 중복되거나 중요도가 낮은 근거를 줄인 뒤 다시 저장하세요.")
-                            continue
-                        if decision == "register" and duplicate_mode == "defer":
-                            ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="deferred")
-                            st.success("유사 카드 검토를 위해 보류로 저장했습니다.")
+                    card_context_default = independent_card_context(item, str(analysis.get("summary") or ""))
+                    paper_review = render_interaction(
+                        st,
+                        "review_paper_reading_claim",
+                        {
+                            "paper": paper,
+                            "reading_question": item,
+                            "research_context": card_context_default,
+                            "duplicate_candidates": candidate_matches,
+                        },
+                        key=f"paper-reading-knowledge-review-{item['question_id']}",
+                    )
+                    if paper_review.submitted:
+                        try:
+                            outcome = apply_paper_reading_review(
+                                ledger, memory, paper=paper, reading_question=item,
+                                review=paper_review.values["evidence_review"],
+                            )
+                            if outcome.get("action") == "enriched":
+                                st.success("새 카드를 만들지 않고 기존 지식카드에 이 논문의 근거를 보강했습니다.")
+                            elif outcome.get("action") == "registered":
+                                st.success("연구자 판단을 지식카드로 등록했습니다.")
+                            elif outcome.get("action") == "irrelevant":
+                                st.success("현재 지식화 범위에서 제외했습니다.")
+                            else:
+                                st.success("보류로 저장했습니다.")
                             st.rerun()
-                        if decision == "register" and duplicate_mode == "enrich":
-                            enriched = memory.add_supporting_evidence(duplicate_target_id, {
-                                "source_name": paper["title"], "paper_id": paper["paper_id"],
-                                "reading_question": item["question"], "evidence_excerpt": "\n".join(final_evidence)[:1600],
-                                "citation_markers": final_evidence, "conditions": card_conditions.strip(),
-                                "limits": card_limits.strip(), "researcher_comment": comment.strip(),
-                                "research_context": card_context.strip(),
-                                "origin_links": paper.get("origin_links", []),
-                            })
-                            existing_cards = ledger.paper_card_ids(paper["paper_id"])
-                            ledger.set_paper_card_links(paper["paper_id"], [*existing_cards, enriched["card_id"]])
-                            action_case_id = ledger.create_case("research", f"Knowledge evidence enrichment: {paper['title'][:72]}")
-                            ledger.record(action_case_id, "knowledge_update", "m1", ["m2", "researcher"], "knowledge_card", {"title": f"기존 지식카드 근거 보강: {enriched['title']}", "card_id": enriched["card_id"], "paper_id": paper["paper_id"]}, enriched["card_id"], status="completed")
-                            ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="registered")
-                            st.success("새 카드를 만들지 않고 기존 지식카드에 이 논문의 근거를 보강했습니다.")
-                            st.rerun()
-                        action_case_id = ledger.create_case("research", f"Researcher paper curation: {paper['title'][:72]}")
-                        if decision == "register":
-                            card = memory.add({
-                                "title": card_title.strip(), "source_kind": "external_paper" if paper.get("asset_type") in {"paper", "web_page"} else "researcher_idea_note",
-                                "claim": card_claim.strip(), "explanation": "\n".join(part for part in [f"읽기 질문: {item['question']}", f"연구자 해석·첨삭: {comment.strip()}" if comment.strip() else ""] if part),
-                                "context": card_context.strip(),
-                                "labels": [value.strip() for value in card_labels.split(",") if value.strip()],
-                                "concepts": [value.strip() for value in card_concepts.split(",") if value.strip()],
-                                "applies_to": [value.strip() for value in card_applies_to.split(",") if value.strip()],
-                                "evidence_level": card_evidence_level, "status": "verified",
-                                "evidence_excerpt": "\n".join(final_evidence)[:1600], "evidence_pages": [],
-                                "citation_markers": final_evidence, "conditions": card_conditions.strip(), "limits": card_limits.strip(),
-                                "provenance": {"source_name": paper["title"], "paper_id": paper["paper_id"], "grounding": "paper_reading_researcher_registration", "reading_question": item["question"]},
-                                "origin_links": paper.get("origin_links", []),
-                            })
-                            existing_cards = ledger.paper_card_ids(paper["paper_id"])
-                            ledger.set_paper_card_links(paper["paper_id"], [*existing_cards, card["card_id"]])
-                            ledger.record(action_case_id, "knowledge_update", "m1", ["m2", "researcher"], "knowledge_card", {"title": f"논문 읽기에서 등록한 지식카드: {card['title']}", "card_id": card["card_id"], "paper_id": paper["paper_id"]}, card["card_id"], status="completed")
-                            ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="registered")
-                            store_researcher_curation_episode(
-                                ledger, case_id=action_case_id, episode_type="paper_card_registration", paper_title=paper["title"],
-                                situation=f"읽기 질문: {item['question']}\n원문 근거: {'; '.join(final_evidence)}",
-                                decision="이 해석을 지식카드로 등록한다.", action_summary=f"등록 카드: {card['title']}\n주장: {card['claim']}",
-                                action_steps=["원문 근거 확인", "잠정 해석 첨삭", "Claim·개념·조건·한계 입력", "지식카드 등록"],
-                                evidence_card_ids=[card["card_id"]], unresolved_items=[card["limits"]] if card.get("limits") else [],
-                            )
-                        elif decision == "irrelevant":
-                            ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="irrelevant")
-                            store_researcher_curation_episode(
-                                ledger, case_id=action_case_id, episode_type="paper_card_registration", paper_title=paper["title"],
-                                situation=f"읽기 질문: {item['question']}\n원문 근거: {'; '.join(item['evidence'])}",
-                                decision="이 해석은 현재 연구 주제의 지식카드로 등록하지 않는다.", action_summary=f"무관 판단 사유: {comment or '연구자 판단에 따라 현재 지식화 범위에서 제외'}",
-                                action_steps=["원문 근거 확인", "현재 연구 주제와의 관련성 판단", "무관 처리"], evidence_card_ids=[], unresolved_items=[],
-                            )
-                        else:
-                            ledger.update_paper_reading_question(item["question_id"], researcher_comment=comment, status="deferred")
-                            store_researcher_curation_episode(
-                                ledger, case_id=action_case_id, episode_type="paper_card_registration", paper_title=paper["title"],
-                                situation=f"읽기 질문: {item['question']}\n원문 근거: {'; '.join(final_evidence)}",
-                                decision="이 해석은 근거 또는 연구 맥락 확인이 더 필요해 보류한다.",
-                                action_summary=f"보류 사유: {comment or '근거·조건을 추가 확인한 뒤 등록 또는 무관 판단'}",
-                                action_steps=["원문 근거 확인", "Claim·조건 보완 필요성 판단", "보류 처리"],
-                                evidence_card_ids=[], unresolved_items=[item["question"]],
-                            )
-                        st.success("연구자 판단을 저장했습니다.")
-                        st.rerun()
+                        except ValueError as error:
+                            st.error(str(error))
             events = ledger.paper_asset_events(paper["paper_id"])
             if events:
                 with st.expander(f"이 논문의 이력 · {len(events)}건"):
@@ -4514,7 +4474,7 @@ def research_advisory_screen(model: str, use_ollama: bool, semantic: bool, embed
             request_type="research_question", question=question, context=f"{context}\n\n{precedent}",
             recipient="researcher", recalled_context=precedent, cards=cards, relations=active_relations,
             retriever=retriever, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
-            semantic=semantic, embedding_model=embedding_model,
+            semantic=semantic, embedding_model=embedding_model, ledger=ledger,
         )
         waiting = run.execute()
         plan = run.context.get("plan")
@@ -4527,67 +4487,12 @@ def research_advisory_screen(model: str, use_ollama: bool, semantic: bool, embed
                  "subquestions": [item.question for item in getattr(plan, "subquestions", ())],
              }}, status="completed",
         )
-        st.session_state["m2-service-case"] = case_id
-        st.session_state["m2-service-run"] = run
-        st.session_state["m2-service-waiting"] = waiting
-        st.session_state["m2-service-act-spec"] = act_spec
-        st.session_state.pop("m2-service-answer-result", None)
-        st.session_state.pop("m2-service-clusters", None)
-
-    act_spec = st.session_state.get("m2-service-act-spec")
-    if act_spec:
-        show_recalled_episodes(act_spec)
-
-    run = st.session_state.get("m2-service-run")
-    waiting = st.session_state.get("m2-service-waiting")
-    if run is not None and isinstance(waiting, dict) and waiting.get("status") == "waiting_for_interaction":
-        interaction_result = render_waiting_workflow_interaction(
-            st, waiting, key="m2-service-confirm-plan"
+        checkpoint_id = save_advisory_session_checkpoint(
+            run, WORKFLOW_CHECKPOINTS, case_id=case_id, question=question, context=context,
         )
-        if interaction_result.submitted:
-            result = run.resume(interaction_result.values)
-            st.session_state["m2-service-waiting"] = result
-            if interaction_result.values.get("advisory_plan_confirmed"):
-                clusters = result.get("evidence_clusters") or []
-                answer = result.get("answer") or ""
-                judgments = result.get("judgments") or []
-                evidence_ids = result.get("evidence_card_ids") or []
-                relation_ids = result.get("evidence_relation_ids") or []
-                unresolved_items = result.get("unresolved_items") or []
-                case_id = st.session_state["m2-service-case"]
-                ledger.record(
-                    case_id, "advice_report", "m2", ["researcher"], "research_question_response",
-                    {"title": "M2 · 계획형 연구자 질문 대응", "question": question, "context": context,
-                     "report": answer, "evidence_card_ids": list(evidence_ids),
-                     "evidence_relation_ids": list(relation_ids), "subquestion_judgments": list(judgments)},
-                    status="completed",
-                )
-                plan = run.context.get("plan")
-                episode = store_advisory_episode(
-                    ledger, case_id=case_id, episode_type="research_question",
-                    situation_summary=f"연구자 질문: {question}\n연구 맥락: {context}",
-                    decision_question=plan.decision_question,
-                    advisory_plan=[item.question for item in plan.subquestions], answer=answer,
-                    evidence_card_ids=list(evidence_ids), evidence_relation_ids=list(relation_ids),
-                    unresolved_items=list(unresolved_items),
-                )
-                st.session_state["m2-service-episode-id"] = episode.episode_id
-                st.session_state["m2-service-clusters"] = clusters
-                st.session_state["m2-service-answer-result"] = answer
-            else:
-                st.info("자문 계획은 저장했고, 근거 수집과 최종 답변 생성은 진행하지 않았습니다.")
-
-    if "m2-service-clusters" in st.session_state:
-        show_evidence_clusters(st.session_state["m2-service-clusters"])
-    if "m2-service-answer-result" in st.session_state:
-        st.markdown("### M2 의견")
-        st.markdown(st.session_state["m2-service-answer-result"])
-        if not any(cluster.members for _, cluster in st.session_state.get("m2-service-clusters", [])):
-            st.info("현재 승인 지식만으로는 충분한 근거를 찾지 못했습니다. 연구 상태·방향 검토에서 M1 탐색 Intent를 제안하세요.")
-        episode_id = st.session_state.get("m2-service-episode-id")
-        if episode_id and st.button("이 답변을 확인된 연구 선례로 표시", key="m2-confirm-episode"):
-            ledger.update_episode_memory_outcome(episode_id, "confirmed", "연구자가 답변을 유사 사례의 재사용 가능한 선례로 확인함")
-            st.success("다음 유사 질문에서 선례 기반 빠른 경로로 리콜할 수 있습니다.")
+        st.session_state["_navigate_workspace"] = "운영 데스크"
+        st.session_state["attention-last-checkpoint"] = checkpoint_id
+        st.rerun()
 
 
 
@@ -4681,21 +4586,22 @@ def render_research_question_backlog() -> None:
             if linked_intents:
                 st.caption(f"연결된 M1 탐색 Intent {len(linked_intents)}건")
 
-            c1, c2, c3, c4, c5 = st.columns(5)
-            if c1.button("관심", key=f"rq-interest-{rq_id}", disabled=rq.get("status") == "interested"):
-                ledger.update_research_question_status(rq_id, "interested")
-                st.rerun()
-            if c2.button("보류", key=f"rq-hold-{rq_id}", disabled=rq.get("status") == "hold"):
-                ledger.update_research_question_status(rq_id, "hold")
-                st.rerun()
-            if c3.button("제외", key=f"rq-reject-{rq_id}", disabled=rq.get("status") == "rejected"):
-                ledger.update_research_question_status(rq_id, "rejected")
-                st.rerun()
-            if c4.button("이 질문 검토", key=f"rq-review-{rq_id}"):
+            triage = render_interaction(
+                st, "triage_research_question", {"research_question": rq},
+                key=f"rq-triage-{rq_id}",
+            )
+            if triage.submitted:
+                try:
+                    apply_research_question_triage(ledger, triage.values["research_question_triage"])
+                    st.rerun()
+                except ValueError as error:
+                    st.error(str(error))
+            c1, c2 = st.columns(2)
+            if c1.button("이 질문 검토", key=f"rq-review-{rq_id}"):
                 st.session_state["p4-selected-rq-id"] = rq_id
                 st.session_state["p4-question-mode"] = "RQ Backlog에서 검토"
                 st.rerun()
-            if c5.button("M1 탐색 Intent", key=f"rq-intent-{rq_id}"):
+            if c2.button("M1 탐색 Intent", key=f"rq-intent-{rq_id}"):
                 _, request_id = create_exploration_intent_for_rq(ledger, rq)
                 st.session_state["p4-last-rq-intent-request"] = request_id
                 st.rerun()
@@ -4872,21 +4778,28 @@ def _render_external_question_intake(model: str, use_ollama: bool) -> None:
         interpreted = llm_draft(prompt, model, use_ollama) or request
         st.session_state["m2-thread-external-interpretation"] = interpreted
         st.session_state["m2-thread-external-question"] = interpreted
-    interpretation = st.session_state.get("m2-thread-external-interpretation", "")
-    if interpretation:
-        st.markdown("**M2 요청 해석**")
-        st.markdown(interpretation)
-    interpreted_question = st.text_area(
-        "Thread에서 관리할 질문", value=st.session_state.get("m2-thread-external-question", request),
-        key="m2-thread-external-question", height=100,
-        placeholder="외부 요청을 M2 전문성에 비추어 내부적으로 관리할 질문으로 정리하세요.",
+    interpretation = str(st.session_state.get("m2-thread-external-interpretation") or request)
+    advisory_review = render_interaction(
+        st,
+        "review_external_advisory_interpretation",
+        {
+            "external_advisory_request": intake,
+            "proposed_interpretation": {
+                "question": str(st.session_state.get("m2-thread-external-question") or interpretation),
+                "interpretation": interpretation,
+            },
+        },
+        key="m2-thread-external-interpretation-review",
     )
-    if st.button("외부 자문 Thread 시작", key="m2-thread-create-external", type="primary", disabled=not interpreted_question.strip()):
-        rq = create_external_advisory_thread(
-            ledger, intake, interpreted_question=interpreted_question, interpretation=interpretation
-        )
-        st.session_state["m2-selected-external-thread-id"] = str(rq["rq_id"])
-        st.rerun()
+    if advisory_review.submitted:
+        try:
+            rq = apply_external_advisory_interpretation(
+                ledger, intake, advisory_review.values["reviewed_advisory_interpretation"]
+            )
+            st.session_state["m2-selected-external-thread-id"] = str(rq["rq_id"])
+            st.rerun()
+        except ValueError as error:
+            st.error(str(error))
 
 
 def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bool, embedding_model: str) -> None:
@@ -4917,18 +4830,16 @@ def _render_thread_detail(rq_id: str, model: str, use_ollama: bool, semantic: bo
         refresh_callback=lambda: _update_rq_current_state(rq_id, model, use_ollama),
     )
 
-    status_cols = st.columns(5)
-    status_actions = [
-        ("interested", ui_text("관심", "Interested")),
-        ("exploring", ui_text("탐색중", "Exploring")),
-        ("hold", ui_text("보류", "On hold")),
-        ("completed", ui_text("완료", "Completed")),
-        ("rejected", ui_text("제외", "Rejected")),
-    ]
-    for col, (status, label) in zip(status_cols, status_actions):
-        if col.button(label, key=f"thread-status-{rq_id}-{status}", disabled=rq.get("status") == status):
-            ledger.update_research_question_status(rq_id, status)
+    triage = render_interaction(
+        st, "triage_research_question", {"research_question": rq},
+        key=f"thread-triage-{rq_id}",
+    )
+    if triage.submitted:
+        try:
+            apply_research_question_triage(ledger, triage.values["research_question_triage"])
             st.rerun()
+        except ValueError as error:
+            st.error(str(error))
 
     source_ids = list(rq.get("source_card_ids", []))
     cards_by_id = {str(card.get("card_id", "")): card for card in memory.all()}
@@ -5237,20 +5148,11 @@ def _render_all_question_threads(model: str, use_ollama: bool, semantic: bool, e
             latest_change = ledger.latest_research_question_change(rq_id)
             if latest_change and latest_change.get("summary"):
                 st.caption(f"{ui_text('최근 변화', 'Latest change')} · {latest_change.get('summary')}")
-            cols = st.columns([1.2, 1.4, 4.4])
+            cols = st.columns([1.4, 5.6])
             if cols[0].button(ui_text("닫기", "Close") if is_selected else ui_text("열기", "Open"), key=f"m2-all-open-{rq_id}"):
                 st.session_state["m2-selected-all-thread-id"] = "" if is_selected else rq_id
                 st.rerun()
-            if status not in {"completed", "rejected"}:
-                if cols[1].button(ui_text("완료", "Complete"), key=f"m2-all-complete-{rq_id}"):
-                    ledger.update_research_question_status(rq_id, "completed")
-                    st.session_state["m2-selected-all-thread-id"] = ""
-                    st.rerun()
-            elif status == "completed":
-                if cols[1].button(ui_text("다시 열기", "Reopen"), key=f"m2-all-reopen-{rq_id}"):
-                    ledger.update_research_question_status(rq_id, "interested")
-                    st.rerun()
-            cols[2].caption(rq_id)
+            cols[1].caption(rq_id + " · 상태 변경은 Thread를 열어 Interaction에서 처리")
         if is_selected:
             with st.container(border=True):
                 _render_thread_detail(rq_id, model, use_ollama, semantic, embedding_model)
@@ -7269,6 +7171,7 @@ def _render_revision_resolution_workflow(
                 revision_inputs,
                 signals=revision_application_signals([revision_candidate]),
                 key=f"revision-application-decision-{project_id}-{todo_id}",
+                audit_recorder=ledger.record_autonomy_decision,
             )
             if revision_decision.submitted:
                 try:
@@ -9240,38 +9143,58 @@ def main() -> None:
             st.sidebar.warning("초안 없이도 P1·P2 흐름은 동작합니다.")
     if paper_provider == "gemini":
         st.sidebar.caption("본문 원문은 Gemini 외부 API로 전송됩니다.")
+    with st.sidebar.expander(ui_text("개발자 모드", "Developer mode"), expanded=False):
+        developer_mode = st.checkbox(
+            ui_text("Legacy·System 도구 표시", "Show Legacy / System tools"),
+            value=developer_mode_default(),
+            key="developer-mode",
+            help=ui_text(
+                "일반 연구자 화면에서는 숨겨진 호환·복구·설계 도구를 표시합니다. 업무 상태의 source of truth를 만들지는 않습니다.",
+                "Shows compatibility, recovery, and design tools hidden from the researcher surface. It does not create job-state sources of truth.",
+            ),
+        )
+        if developer_mode:
+            st.warning(ui_text(
+                "Developer mode는 이전 기능 화면과 시스템 진단을 위한 호환 영역입니다.",
+                "Developer mode exposes compatibility workspaces and system diagnostics.",
+            ))
+
     pending_workspace = st.session_state.pop("_navigate_workspace", None)
-    if pending_workspace:
-        st.session_state["main-workspace"] = pending_workspace
-    workspace_items = [
-        ("운영 데스크", ui_text("운영 데스크", "Operating Desk")),
-        ("기존 연구위원 데스크", ui_text("기존 연구위원 데스크", "Legacy Research Fellow Desk")),
-        ("M1 · 문헌조사·지식화", ui_text("M1 · 문헌조사·지식화", "M1 · Literature & Knowledge")),
-        ("M2 · 지식 기반 자문", ui_text("M2 · 논문 프로젝트", "M2 · Paper Projects")),
-        ("논문 작업실", ui_text("논문 작업실", "Paper Workspace")),
-        ("지식 베이스·운영", ui_text("지식 베이스·운영", "Knowledge Base & Operations")),
-        ("개발·프롬프트", ui_text("개발·프롬프트", "Development & Prompts")),
-    ]
-    workspace_labels = {key: label for key, label in workspace_items}
-    if st.session_state.get("main-workspace") == "연구위원 데스크":
-        st.session_state["main-workspace"] = "운영 데스크"
-    screen = st.sidebar.radio(
-        ui_text("작업공간", "Workspace"),
-        [key for key, _ in workspace_items],
-        format_func=lambda value: workspace_labels[value],
-        key="main-workspace",
-    )
-    if screen == "운영 데스크":
-        operating_desk()
-    elif screen == "기존 연구위원 데스크":
+    requested_workspace = pending_workspace or st.session_state.get("main-workspace")
+    normalized_workspace = normalize_workspace(requested_workspace, developer_mode=developer_mode)
+    if st.session_state.get("main-workspace") != normalized_workspace:
+        st.session_state["main-workspace"] = normalized_workspace
+
+    if developer_mode:
+        navigation_items = visible_navigation_items(developer_mode=True)
+        workspace_labels = {item.key: ui_text(item.ko, item.en) for item in navigation_items}
+        screen = st.sidebar.radio(
+            ui_text("Developer / Legacy 작업공간", "Developer / Legacy workspace"),
+            [item.key for item in navigation_items],
+            format_func=lambda value: workspace_labels[value],
+            key="main-workspace",
+        )
+    else:
+        # R48: the normal researcher surface has a single job-centred entry point.
+        # Legacy deep links/session values are normalized above rather than exposed
+        # as alternative feature menus.
+        screen = OPERATING_DESK
+        st.sidebar.caption(ui_text(
+            "업무 화면 · Operating Desk",
+            "Job surface · Operating Desk",
+        ))
+
+    if screen == OPERATING_DESK:
+        operating_desk(model, use_ollama, semantic, embedding_model, developer_mode=developer_mode)
+    elif screen == LEGACY_DESK:
         home(model, use_ollama, semantic, embedding_model)
-    elif screen == "M1 · 문헌조사·지식화":
+    elif screen == LEGACY_M1:
         m1_screen(model, use_ollama, semantic, embedding_model)
-    elif screen == "M2 · 지식 기반 자문":
+    elif screen == LEGACY_M2:
         m2_screen(model, use_ollama, semantic, embedding_model)
-    elif screen == "논문 작업실":
+    elif screen == LEGACY_PAPER:
         render_m2_coauthor_workspace(model, use_ollama, semantic, embedding_model)
-    elif screen == "지식 베이스·운영":
+    elif screen == LEGACY_KNOWLEDGE:
         overview_tab, delta_tab, manage_tab = st.tabs([ui_text("승인 지식·관계", "Approved Knowledge & Relations"), ui_text("연구 활동 Delta", "Research Activity Delta"), ui_text("지식 관리", "Knowledge Management")])
         with overview_tab:
             st.header(ui_text("지식 베이스", "Knowledge Base"))
@@ -9287,8 +9210,9 @@ def main() -> None:
             meaning_summary_screen(model, use_ollama)
         with manage_tab:
             management_screen()
-    elif screen == "개발·프롬프트":
+    elif screen == LEGACY_DEVELOPER:
         render_developer_screen(memory.all(), model, use_ollama, EXTRACTION_CACHE, ledger, CACHE / "logs" / "llm_calls.jsonl", provider=internal_provider)
+
 
 
 if __name__ == "__main__":

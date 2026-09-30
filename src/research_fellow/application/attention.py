@@ -111,7 +111,11 @@ def attention_from_waiting_workflow(waiting_result: Mapping[str, Any]) -> Attent
         title=contract.raw.get("purpose", interaction_id).split("\n", 1)[0].strip(),
         summary=f"{workflow_id} · {contract.mode}",
         priority="medium",
-        payload={"workflow_id": workflow_id, "interaction": dict(request)},
+        payload={
+            "workflow_id": workflow_id,
+            "interaction": dict(request),
+            "resume_metadata": dict(waiting_result.get("resume_metadata") or {}) if isinstance(waiting_result.get("resume_metadata"), Mapping) else {},
+        },
     )
 
 

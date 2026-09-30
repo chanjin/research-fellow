@@ -58,6 +58,48 @@ def activity_feed_snapshot(ledger: Ledger, *, limit: int = 50) -> dict[str, Any]
             autonomy=str(payload.get("autonomy") or ""),
             reversible=payload.get("reversible") if isinstance(payload.get("reversible"), bool) else None,
         ))
+
+    # Autonomy decisions are operational audit events in the same Ledger, not new
+    # research/domain state. Surface AUTO_NOTIFY and escalations in the activity feed.
+    for event in ledger.autonomy_decisions(limit=max(1, min(int(limit), 50))):
+        action = str(event.get("action") or "")
+        if action not in {"auto_notify", "escalate"}:
+            continue
+        interaction_id = str(event.get("interaction_id") or "")
+        reasons = ", ".join(str(x) for x in (event.get("reasons") or []))
+        items.append(ActivityItem(
+            activity_id=f"autonomy:{event.get('event_id')}",
+            created_at=str(event.get("created_at") or ""),
+            actor="Agent",
+            action="Autonomy executed + notify" if action == "auto_notify" else "Human escalation requested",
+            title=f"{interaction_id}" + (f" · {reasons}" if reasons else ""),
+            category="attention" if action == "escalate" else "autonomy",
+            source_type="autonomy_decision",
+            source_id=str(event.get("event_id") or ""),
+            autonomy=action,
+        ))
+
+    # Ontology review state is durable outside the generic phenomenon ledger.
+    # Project it into Activity rather than duplicating it as another write model.
+    for review in ledger.ontology_change_reviews(limit=max(1, min(int(limit), 50))):
+        status = str(review.get("status") or "proposed")
+        comment = str(review.get("researcher_comment") or "").strip()
+        if status == "proposed" and not comment:
+            continue
+        review_id = str(review.get("review_id") or "")
+        items.append(ActivityItem(
+            activity_id=f"ontology_change_review:{review_id}:{status}:{bool(comment)}",
+            created_at=str(review.get("updated_at") or review.get("created_at") or ""),
+            actor="Researcher" if comment or status in {"approved", "rejected"} else "Agent",
+            action="Ontology review updated",
+            title=str((review.get("proposal") or {}).get("summary") or "Ontology change review"),
+            category="human" if comment or status != "proposed" else "knowledge",
+            source_type="ontology_change_review",
+            source_id=review_id,
+        ))
+
+    items.sort(key=lambda item: item.created_at, reverse=True)
+    items = items[: max(1, min(int(limit), 200))]
     return {
         "total": len(items),
         "items": [item.as_dict() for item in items],

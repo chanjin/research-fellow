@@ -1,0 +1,34 @@
+interaction: ajd-interaction/v0.1
+id: resolve_ontology_change_reviews
+actor: researcher
+purpose: >
+  제안된 Ontology 변경안을 최종 검토하여 새 Ontology 버전으로 발행할지,
+  계속 검토할지, 또는 반려할지 연구자가 결정한다.
+mode: decide
+uses:
+  required:
+    - ontology_change_reviews
+  optional: []
+produces:
+  - ontology_change_resolutions
+data:
+  ontology_change_reviews:
+    type: OntologyChangeReview
+    cardinality: many
+  ontology_change_resolutions:
+    type: OntologyChangeResolution
+    cardinality: many
+constraints:
+  min_selection: 1
+  decisions:
+    - approved
+    - deferred
+    - rejected
+authority:
+  holder: researcher
+boundary:
+  phenomenon: ontology_change_review
+  recipient: researcher
+  status: proposed
+completion:
+  requires_response: true

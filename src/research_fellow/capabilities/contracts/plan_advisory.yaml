@@ -1,0 +1,30 @@
+capability: ajd-capability-contract/v0.2
+id: plan_advisory
+kind: decision
+purpose: 요청을 바로 답하지 않고 최종 판단 질문과 최대 세 개의 하위 검증 질문으로 분해한다.
+uses:
+  required:
+  - request_type
+  - question
+  - context
+  - recipient
+  - recalled_context
+  optional: []
+produces:
+- plan
+- plan_draft
+data:
+  request_type:
+    type: Text
+  question:
+    type: Text
+  context:
+    type: Context
+  recipient:
+    type: Text
+  recalled_context:
+    type: Context
+  plan:
+    type: AdvisoryPlan
+  plan_draft:
+    type: DraftResult

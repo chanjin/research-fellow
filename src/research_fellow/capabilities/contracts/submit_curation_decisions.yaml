@@ -1,0 +1,32 @@
+capability: ajd-capability-contract/v0.2
+id: submit_curation_decisions
+kind: action
+purpose: 신규·충돌 후보 또는 기존 카드 보강 제안을 연구자 승인 요청으로 발행하며, hold 판단은 semantic memory를 변경하지
+  않고 검토 결과로 남긴다.
+uses:
+  required:
+  - paper
+  - candidates
+  - assessments
+  optional: []
+produces:
+- request_ids
+- held_assessments
+- action_counts
+data:
+  paper:
+    type: PaperRef
+  candidates:
+    type: KnowledgeCandidate
+    cardinality: many
+  assessments:
+    type: KnowledgeAssessment
+    cardinality: many
+  request_ids:
+    type: Identifier
+    cardinality: many
+  held_assessments:
+    type: KnowledgeAssessment
+    cardinality: many
+  action_counts:
+    type: ActionCounts

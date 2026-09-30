@@ -1,0 +1,27 @@
+capability: ajd-capability-contract/v0.2
+id: collect_advisory_evidence
+kind: action
+purpose: 각 하위 질문별로 승인 지식의 직접 일치와 관계 확장을 이용해 근거 클러스터를 만든다.
+uses:
+  required:
+  - plan
+  - context
+  - cards
+  - relations
+  optional: []
+produces:
+- evidence_clusters
+data:
+  plan:
+    type: AdvisoryPlan
+  context:
+    type: Context
+  cards:
+    type: KnowledgeCard
+    cardinality: many
+  relations:
+    type: KnowledgeRelation
+    cardinality: many
+  evidence_clusters:
+    type: EvidenceCluster
+    cardinality: many

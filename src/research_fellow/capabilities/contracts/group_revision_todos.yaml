@@ -1,0 +1,25 @@
+capability: ajd-capability-contract/v0.2
+id: group_revision_todos
+kind: decision
+purpose: Capability for workflow step 'group_revision_todos'.
+uses:
+  required:
+  - project
+  - manuscript
+  - todos
+  optional: []
+produces:
+- group_plan
+- raw_response
+data:
+  project:
+    type: PaperProject
+  manuscript:
+    type: Manuscript
+  todos:
+    type: RevisionTodo
+    cardinality: many
+  group_plan:
+    type: RevisionTodoGroup
+  raw_response:
+    type: RawLLMOutput

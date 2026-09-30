@@ -28,4 +28,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-research_fellow = ["prompts/*.j2", "workflows/**/*.yaml", "ajd/*.yaml", "topologies/*.yaml"]
+research_fellow = ["prompts/*.j2", "workflows/**/*.yaml", "ajd/*.yaml", "topologies/*.yaml", "capabilities/*.yaml", "capabilities/contracts/*.yaml", "capabilities/bindings/*.yaml", "interactions/contracts/*.yaml", "interactions/bindings/*.yaml", "autonomy/policies/*.yaml", "autonomy/*.yaml"]

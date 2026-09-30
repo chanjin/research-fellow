@@ -1,0 +1,28 @@
+interaction: ajd-interaction/v0.1
+id: review_external_advisory_interpretation
+actor: researcher
+purpose: >
+  외부 자문 요청의 원문을 보존하면서 M2가 제안한 내부 연구질문 해석을 검토하고
+  실제 Research Question Thread에서 사용할 질문으로 확정한다.
+mode: review
+uses:
+  required:
+    - external_advisory_request
+    - proposed_interpretation
+  optional: []
+produces:
+  - reviewed_advisory_interpretation
+
+data:
+  external_advisory_request:
+    type: ExternalAdvisoryRequest
+  proposed_interpretation:
+    type: ResearchQuestionInput
+  reviewed_advisory_interpretation:
+    type: ResearchQuestionInput
+boundary:
+  phenomenon: external_advisory_interpretation_review
+  recipient: researcher
+  status: proposed
+completion:
+  requires_response: true

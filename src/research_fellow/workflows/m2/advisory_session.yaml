@@ -1,0 +1,79 @@
+dsl: ajd-workflow/v0.2
+id: m2_advisory_session
+revision: 1
+agent: m2
+realizes: [advisory_response]
+purpose: >
+  연구자 또는 외부 요청에 대해 먼저 자문 계획을 만들고, 연구자의 확인을 받은 경우에만
+  승인 지식 기반의 근거 수집·하위 판단·최종 자문 작성으로 진행한다.
+
+trigger:
+  phenomenon: advisory_request
+
+inputs:
+  - request_type
+  - question
+  - context
+  - recipient
+  - recalled_context
+  - cards
+  - relations
+
+memory:
+  reads:
+    - knowledge_cards
+
+steps:
+  - id: plan_advisory_session
+    kind: workflow
+    workflow: m2_advisory_planning
+    uses:
+      required: [request_type, question, context, recipient, recalled_context]
+      optional: []
+    produces: [plan, plan_draft]
+
+  - id: confirm_advisory_plan
+    kind: interaction
+    interaction: confirm_advisory_plan
+    actor: researcher
+    uses:
+      required: [plan]
+      optional: []
+    produces: [advisory_plan_confirmed]
+
+  - id: execute_confirmed_advisory_plan
+    kind: workflow
+    workflow: m2_advisory_response
+    when: advisory_plan_confirmed
+    uses:
+      required: [plan, context, recipient, cards, relations]
+      optional: []
+    produces:
+      - evidence_clusters
+      - judgments
+      - answer
+      - evidence_card_ids
+      - evidence_relation_ids
+      - unresolved_items
+
+outputs:
+  required:
+    - plan
+    - advisory_plan_confirmed
+  optional:
+    - plan_draft
+    - evidence_clusters
+    - judgments
+    - answer
+    - evidence_card_ids
+    - evidence_relation_ids
+    - unresolved_items
+
+completion:
+  criteria:
+    - the_researcher_reviews_the_plan_before_evidence_judgment
+    - evidence_judgment_runs_only_after_plan_confirmation
+
+invariants:
+  - no_evidence_judgment_occurs_before_researcher_confirmation
+  - cancelling_the_plan_does_not_generate_a_final_advisory_answer

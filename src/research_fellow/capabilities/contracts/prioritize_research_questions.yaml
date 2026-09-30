@@ -1,0 +1,17 @@
+capability: ajd-capability-contract/v0.2
+id: prioritize_research_questions
+kind: decision
+purpose: Capability for workflow step 'prioritize_research_questions'.
+uses:
+  required:
+  - actionable_questions
+  optional: []
+produces:
+- ranked_questions
+data:
+  actionable_questions:
+    type: ResearchQuestion
+    cardinality: many
+  ranked_questions:
+    type: ResearchQuestion
+    cardinality: many

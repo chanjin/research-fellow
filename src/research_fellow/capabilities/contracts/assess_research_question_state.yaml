@@ -1,0 +1,22 @@
+capability: ajd-capability-contract/v0.2
+id: assess_research_question_state
+kind: decision
+purpose: 새 지식과 기존 Research Question을 비교하여 각 질문을 reinforce, continue, resolve, explore
+  중 하나로 판단한다.
+uses:
+  required:
+  - knowledge_updates
+  - research_question_backlog
+  optional: []
+produces:
+- assessments
+data:
+  knowledge_updates:
+    type: KnowledgeUpdate
+    cardinality: many
+  research_question_backlog:
+    type: ResearchQuestion
+    cardinality: many
+  assessments:
+    type: ResearchQuestionAssessment
+    cardinality: many

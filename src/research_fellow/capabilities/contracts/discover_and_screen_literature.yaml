@@ -1,0 +1,24 @@
+capability: ajd-capability-contract/v0.2
+id: discover_and_screen_literature
+kind: action
+purpose: 문헌을 탐색하고 초록 수준에서 조사 목적과의 관련성을 검토한다.
+uses:
+  required:
+  - search_profile
+  - search_strategy
+  optional: []
+produces:
+- search_outcome
+- search_succeeded
+- search_failed
+data:
+  search_profile:
+    type: SearchProfile
+  search_strategy:
+    type: SearchStrategy
+  search_outcome:
+    type: SearchOutcome
+  search_succeeded:
+    type: Boolean
+  search_failed:
+    type: Boolean

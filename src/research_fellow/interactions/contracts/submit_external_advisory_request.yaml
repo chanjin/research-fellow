@@ -1,0 +1,18 @@
+interaction: ajd-interaction/v0.1
+id: submit_external_advisory_request
+actor: researcher
+purpose: >
+  외부 요청자의 원문, 요청자 정보, 맥락을 보존한 채 M2가 해석할 자문 입력으로 전달한다.
+mode: request_input
+uses:
+  required: []
+  optional: []
+produces:
+  - external_advisory_request
+data:
+  external_advisory_request:
+    type: ExternalAdvisoryRequest
+completion:
+  requires_response: true
+boundary:
+  phenomenon: external_advisory_request

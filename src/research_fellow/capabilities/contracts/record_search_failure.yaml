@@ -1,0 +1,25 @@
+capability: ajd-capability-contract/v0.2
+id: record_search_failure
+kind: action
+purpose: Capability for workflow step 'record_search_failure'.
+uses:
+  required:
+  - search_outcome
+  optional: []
+produces:
+- status
+- report
+- run
+- papers
+data:
+  search_outcome:
+    type: SearchOutcome
+  status:
+    type: Status
+  report:
+    type: LiteratureReport
+  run:
+    type: ExecutionRun
+  papers:
+    type: PaperRef
+    cardinality: many

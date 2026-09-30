@@ -1,0 +1,150 @@
+bindings: ajd-interaction-binding/v0.1
+profile: default
+interactions:
+- id: select_questions_for_investigation
+  renderer:
+    type: multi_select
+    title: 추가 근거 조사할 질문 선택
+    help: 1차 논문 읽기에서 생성된 질문 중 원문을 다시 확인해 근거를 보강할 질문을 선택합니다.
+    item_label: question
+    item_detail:
+    - tentative_answer
+    - uncertainty
+    submit_label: 선택한 질문 심화 조사
+    empty_label: 선택한 질문이 없습니다.
+- id: confirm_advisory_plan
+  renderer:
+    type: confirm
+    title: 자문 계획 확인
+    help: M2가 제안한 판단 질문과 하위 질문을 확인한 뒤 이 계획으로 근거 수집과 자문 작성을 진행합니다.
+    confirm_label: 이 계획으로 진행
+    cancel_label: 계획까지만 저장
+- id: resolve_pending_decision_requests
+  renderer:
+    type: approval
+    title: 연구자 검토·승인함
+    help: M1·M2가 제안한 안건을 선택하고 승인, 보완 요청, 반려 중 하나를 결정합니다.
+    item_id: phenomenon_id
+    item_label: payload.title
+    select_all_label: 검토할 대기 안건
+    approve_label: 선택 안건 승인
+    defer_label: 선택 안건 보완 요청
+    reject_label: 선택 안건 반려
+    comment_label: 공통 의견 (선택)
+    empty_label: 결정할 안건을 하나 이상 선택하세요.
+- id: resolve_ontology_change_reviews
+  renderer:
+    type: approval
+    title: Ontology 변경안 최종 결정
+    help: 검토 중인 Ontology 변경안을 새 버전으로 발행하거나, 계속 검토하거나, 반려합니다.
+    item_id: review_id
+    item_label: proposal.summary
+    output_id_field: review_id
+    default_all: true
+    select_all_label: 결정할 Ontology 변경안
+    approve_label: 선택 변경안 승인·발행
+    defer_label: 계속 검토
+    reject_label: 선택 변경안 반려
+    comment_label: 연구자 의견 (선택)
+    empty_label: 결정할 Ontology 변경안을 선택하세요.
+- id: resolve_revision_applications
+  renderer:
+    type: approval
+    title: Revision 해결안 원고 반영 결정
+    help: 제안된 원고 변경을 실제 원고 버전과 Revision To-do 상태에 반영할지 결정합니다.
+    item_id: candidate_id
+    item_label: title
+    output_id_field: candidate_id
+    default_all: true
+    select_all_label: 결정할 Revision 해결안
+    approve_label: 원고 반영·To-do 완료
+    defer_label: 보류
+    reject_label: 해결안 반려
+    comment_label: 연구자 의견 (선택)
+    empty_label: 결정할 Revision 해결안을 선택하세요.
+- id: review_ontology_change
+  renderer:
+    type: review_form
+    title: Ontology 변경안 수정·보완 검토
+    help: 변경안에 대한 구조화 의견과 자유 의견을 작성하고 저장하거나 수정 Diff 재생성을 요청합니다.
+    variant: ontology_change
+    submit_label: 검토 의견 저장
+    regenerate_label: 의견 반영 Diff 재생성
+- id: review_revision_todo_reconciliation
+  renderer:
+    type: review_form
+    title: Revision To-do 재평가 검토
+    help: Agent가 제안한 To-do 상태와 다음 작업 내용을 수정하고, 다음 Revision 백로그에 반영할 항목을 선택합니다.
+    variant: revision_reconciliation
+    submit_label: 검토 결과 반영 · 다음 Revision 백로그 구성
+- id: submit_research_question
+  renderer:
+    type: text_input
+    title: 새 연구자 질문
+    help: 연구자가 직접 제기한 질문과 현재 맥락을 Research Question 입력으로 전달합니다.
+    fields:
+    - name: question
+      label: 연구자 질문
+      widget: text_area
+      required: true
+      height: 110
+      placeholder: '예: Architect Agent의 working memory에 NFR dependency를 명시적으로 표현해야
+        하는가?'
+    - name: context
+      label: 연구자 코멘트 / 현재 맥락 (선택)
+      widget: text_area
+      required: false
+      height: 100
+    submit_label: Research Question Thread 시작
+- id: submit_external_advisory_request
+  renderer:
+    type: text_input
+    title: 새 외부 자문 요청
+    help: 외부 요청 원문과 요청자·맥락을 보존해 M2 해석 단계로 전달합니다.
+    fields:
+    - name: requester
+      label: 요청자
+      widget: text_input
+      required: false
+    - name: request
+      label: 외부 자문 요청 원문
+      widget: text_area
+      required: true
+      height: 140
+    - name: context
+      label: 요청 맥락·제약 (선택)
+      widget: text_area
+      required: false
+      height: 100
+    submit_label: 요청 입력 저장
+- id: inform_recent_knowledge_updates
+  renderer:
+    type: message
+    title: 최근 Knowledge Update
+    help: M1에서 연구자에게 전달된 최근 지식 업데이트입니다.
+    item_label: payload.title
+    item_detail:
+    - created_at
+    empty_label: 최근 Knowledge Update가 없습니다.
+
+- id: triage_research_question
+  renderer:
+    type: review_form
+    title: Research Question 상태 결정
+    help: 이 질문을 지속 연구 백로그에서 어떻게 다룰지 결정합니다.
+    variant: research_question_triage
+    submit_label: 상태 반영
+- id: review_external_advisory_interpretation
+  renderer:
+    type: review_form
+    title: 외부 자문 요청 해석 검토
+    help: 외부 요청 원문은 보존하고, M2가 제안한 내부 질문을 검토하여 Thread를 시작합니다.
+    variant: external_advisory_interpretation
+    submit_label: 이 해석으로 자문 Thread 시작
+- id: review_paper_reading_claim
+  renderer:
+    type: review_form
+    title: 논문 읽기 결과 지식화 판단
+    help: 원문 근거와 잠정 해석을 검토하여 지식자산에 반영할 방식을 결정합니다.
+    variant: paper_reading_claim
+    submit_label: 판단 저장

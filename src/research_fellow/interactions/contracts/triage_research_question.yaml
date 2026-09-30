@@ -1,0 +1,25 @@
+interaction: ajd-interaction/v0.1
+id: triage_research_question
+actor: researcher
+purpose: >
+  Research Question의 현재 업무 상태를 관심, 탐색중, 보류, 완료, 제외 중 하나로
+  결정하여 지속 연구 백로그의 durable state에 반영한다.
+mode: review
+uses:
+  required:
+    - research_question
+  optional: []
+produces:
+  - research_question_triage
+
+data:
+  research_question:
+    type: ResearchQuestion
+  research_question_triage:
+    type: StateTransition
+boundary:
+  phenomenon: research_question_status_review
+  recipient: researcher
+  status: proposed
+completion:
+  requires_response: true

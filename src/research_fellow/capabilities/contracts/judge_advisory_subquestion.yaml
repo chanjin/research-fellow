@@ -1,0 +1,20 @@
+capability: ajd-capability-contract/v0.2
+id: judge_advisory_subquestion
+kind: decision
+purpose: 각 하위 질문에 대해 현재 승인 근거가 지지하는 판단과 유보 범위를 작성한다.
+uses:
+  required:
+  - evidence_clusters
+  - context
+  optional: []
+produces:
+- judgments
+data:
+  evidence_clusters:
+    type: EvidenceCluster
+    cardinality: many
+  context:
+    type: Context
+  judgments:
+    type: AdvisoryJudgment
+    cardinality: many

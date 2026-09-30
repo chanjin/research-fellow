@@ -1,0 +1,31 @@
+capability: ajd-capability-contract/v0.2
+id: reconcile_revision_todos
+kind: decision
+purpose: Capability for workflow step 'reconcile_revision_todos'.
+uses:
+  required:
+  - project
+  - before_manuscript
+  - after_manuscript
+  - before_todos
+  - revision_diff
+  optional: []
+produces:
+- reconciliation
+- raw_response
+data:
+  project:
+    type: PaperProject
+  before_manuscript:
+    type: Manuscript
+  after_manuscript:
+    type: Manuscript
+  before_todos:
+    type: RevisionTodo
+    cardinality: many
+  revision_diff:
+    type: ManuscriptDiff
+  reconciliation:
+    type: ReconciliationResult
+  raw_response:
+    type: RawLLMOutput

@@ -1,0 +1,36 @@
+capability: ajd-capability-contract/v0.2
+id: complete_research_state_review
+kind: action
+purpose: Capability for workflow step 'complete_research_state_review'.
+uses:
+  required:
+  - review_id
+  - research_questions
+  optional:
+  - dispatched_intents
+  - executions
+produces:
+- status
+- source_card_count
+- new_rq_count
+- strengthened_rq_count
+data:
+  review_id:
+    type: Identifier
+  research_questions:
+    type: ResearchQuestion
+    cardinality: many
+  dispatched_intents:
+    type: CurationIntent
+    cardinality: many
+  executions:
+    type: ExecutionRun
+    cardinality: many
+  status:
+    type: Status
+  source_card_count:
+    type: Count
+  new_rq_count:
+    type: Count
+  strengthened_rq_count:
+    type: Count

@@ -1,0 +1,23 @@
+capability: ajd-capability-contract/v0.2
+id: commit_evidence_reviews
+kind: action
+purpose: 질문별 재검토 결과를 1차 읽기 질문과 분리된 evidence review 자산으로 보존한다.
+uses:
+  required:
+  - paper
+  - reviews
+  optional: []
+produces:
+- saved_review_count
+- reading_reviews
+data:
+  paper:
+    type: PaperRef
+  reviews:
+    type: EvidenceReview
+    cardinality: many
+  saved_review_count:
+    type: Count
+  reading_reviews:
+    type: EvidenceReview
+    cardinality: many

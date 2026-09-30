@@ -166,6 +166,23 @@ class Ledger:
                     error TEXT NOT NULL,
                     diagnostics_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS autonomy_decisions (
+                    event_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    interaction_id TEXT NOT NULL,
+                    policy_id TEXT NOT NULL,
+                    policy_profile TEXT NOT NULL,
+                    autonomy_level TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    signals_json TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL DEFAULT '',
+                    step_id TEXT NOT NULL DEFAULT '',
+                    run_id TEXT NOT NULL DEFAULT '',
+                    notified INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_created
+                    ON autonomy_decisions(created_at DESC);
                 CREATE TABLE IF NOT EXISTS knowledge_cards (
                     card_id TEXT PRIMARY KEY,
                     card_json TEXT NOT NULL,
@@ -632,6 +649,46 @@ class Ledger:
                     "CREATE UNIQUE INDEX IF NOT EXISTS decisions_one_per_request "
                     "ON decisions(phenomenon_id)"
                 )
+
+
+    def record_autonomy_decision(self, event: dict[str, Any]) -> str:
+        """Append one operational autonomy audit event to the existing ledger."""
+        event_id = f"aut-{uuid.uuid4().hex[:12]}"
+        created_at = str(event.get("evaluated_at") or now())
+        reasons = list(event.get("reasons") or [])
+        signals = dict(event.get("signals") or {})
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO autonomy_decisions
+                   (event_id, created_at, interaction_id, policy_id, policy_profile, autonomy_level,
+                    action, reasons_json, signals_json, workflow_id, step_id, run_id, notified)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id, created_at, str(event.get("interaction_id") or ""),
+                    str(event.get("policy_id") or ""), str(event.get("policy_profile") or "default"),
+                    str(event.get("autonomy_level") or ""), str(event.get("action") or ""),
+                    json.dumps(reasons, ensure_ascii=False), json.dumps(signals, ensure_ascii=False),
+                    str(event.get("workflow_id") or ""), str(event.get("step") or event.get("step_id") or ""),
+                    str(event.get("run_id") or ""), 1 if bool((event.get("audit") or {}).get("notify")) else 0,
+                ),
+            )
+        return event_id
+
+    def autonomy_decisions(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent operational autonomy decisions for System/Activity projections."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM autonomy_decisions ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["reasons"] = json.loads(item.pop("reasons_json"))
+            item["signals"] = json.loads(item.pop("signals_json"))
+            item["notified"] = bool(item.get("notified"))
+            result.append(item)
+        return result
 
     def record_llm_call(self, *, profile_name: str, model: str, prompt: str, settings: dict[str, Any], response: str | None, error: str | None, diagnostics: dict[str, Any] | None) -> None:
         """Append-only diagnostic record. It never changes research knowledge."""
@@ -1352,6 +1409,23 @@ class Ledger:
             return None
         item = dict(row); item["checkpoint"] = json.loads(item.pop("checkpoint_json") or "{}")
         return item
+
+    def auto_research_runs(self, *, statuses: tuple[str, ...] = ("running", "needs_attention"), limit: int = 50) -> list[dict[str, Any]]:
+        statuses = tuple(str(status) for status in statuses if str(status))
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM auto_research_runs WHERE status IN ({placeholders}) ORDER BY updated_at DESC LIMIT ?",
+                (*statuses, max(1, min(int(limit), 200))),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["checkpoint"] = json.loads(item.pop("checkpoint_json") or "{}")
+            result.append(item)
+        return result
 
     def record_auto_research_failure(self, payload: dict[str, Any], *, run_id: str = "", review_id: str = "", intent_id: str = "", item_key: str = "") -> str:
         failure_id = str(payload.get("failure_id") or f"arf-{uuid.uuid4().hex[:12]}")
@@ -2233,6 +2307,33 @@ class Ledger:
         with self.connect() as conn:
             result = conn.execute("UPDATE ontology_change_reviews SET researcher_comment=?, updated_at=? WHERE review_id=? AND status='proposed'", (comment.strip(), now(), review_id))
         return result.rowcount == 1
+
+    def resolve_ontology_change_review(self, review_id: str, decision: str, *, note: str = "") -> dict[str, Any]:
+        """Apply a researcher decision to a proposed ontology change review.
+
+        ``approved`` publishes a new ontology version using the existing approval path.
+        ``deferred`` preserves the proposed state and stores the researcher's note.
+        ``rejected`` closes the proposal without changing the ontology.
+        """
+        if decision not in {"approved", "deferred", "rejected"}:
+            raise ValueError(f"Unsupported ontology review decision: {decision}")
+        review = next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), None)
+        if not review or review.get("status") != "proposed":
+            raise ValueError("결정 가능한 온톨지 변경 검토를 찾을 수 없습니다.")
+        if note.strip():
+            self.update_ontology_change_review_comment(review_id, note)
+        if decision == "approved":
+            return self.approve_ontology_change_review(
+                review_id, summary=str((review.get("proposal") or {}).get("summary") or "")
+            )
+        if decision == "deferred":
+            return next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), review)
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE ontology_change_reviews SET status='rejected', updated_at=? WHERE review_id=? AND status='proposed'",
+                (now(), review_id),
+            )
+        return next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), review)
 
     def approve_ontology_change_review(self, review_id: str, *, summary: str = "", approved_by: str = "researcher") -> dict[str, Any]:
         review = next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), None)

@@ -1,0 +1,32 @@
+interaction: ajd-interaction/v0.1
+id: review_ontology_change
+actor: researcher
+purpose: >
+  Ontology 변경안을 검토하면서 구조화된 수정 의견과 자유 보완 의견을 작성하고,
+  변경안 재생성 또는 의견 저장에 사용할 검토 결과를 만든다.
+mode: review
+uses:
+  required:
+    - ontology_change_review
+    - ontology_types
+    - ontology_relations
+  optional: []
+produces:
+  - ontology_review_feedback
+data:
+  ontology_change_review:
+    type: OntologyChangeReview
+  ontology_types:
+    type: OntologyType
+    cardinality: many
+  ontology_relations:
+    type: OntologyRelation
+    cardinality: many
+  ontology_review_feedback:
+    type: OntologyReviewFeedback
+boundary:
+  phenomenon: ontology_change_review
+  recipient: researcher
+  status: proposed
+completion:
+  requires_response: true

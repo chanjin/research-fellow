@@ -1,0 +1,22 @@
+capability: ajd-capability-contract/v0.2
+id: synthesize_literature_report
+kind: action
+purpose: Capability for workflow step 'synthesize_literature_report'.
+uses:
+  required:
+  - search_profile
+  - report_run
+  - reviewed_papers
+  optional: []
+produces:
+- synthesis
+data:
+  search_profile:
+    type: SearchProfile
+  report_run:
+    type: LiteratureReviewRun
+  reviewed_papers:
+    type: PaperRef
+    cardinality: many
+  synthesis:
+    type: LiteratureReport

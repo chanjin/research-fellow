@@ -1,0 +1,31 @@
+interaction: ajd-interaction/v0.1
+id: resolve_pending_decision_requests
+actor: researcher
+purpose: >
+  M1·M2가 decision_request로 제안한 변경이나 실행 요청을 연구자가 검토하고
+  승인, 보완 요청, 반려 중 하나로 결정한다. 이 결정은 durable state 변경의 권한 경계다.
+mode: decide
+boundary:
+  phenomenon: decision_request
+  recipient: researcher
+  status: proposed
+uses:
+  required:
+    - decision_requests
+  optional: []
+produces:
+  - decision_resolutions
+data:
+  decision_requests:
+    type: DecisionRequest
+    cardinality: many
+  decision_resolutions:
+    type: DecisionResolution
+    cardinality: many
+constraints:
+  min_selection: 1
+  decisions: [approved, deferred, rejected]
+authority:
+  holder: researcher
+completion:
+  requires_response: true

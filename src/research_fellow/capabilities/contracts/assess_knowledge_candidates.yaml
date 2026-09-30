@@ -1,0 +1,37 @@
+capability: ajd-capability-contract/v0.2
+id: assess_knowledge_candidates
+kind: decision
+purpose: 후보를 기존 승인 지식과 비교하여 new, reinforce, conflict, hold 중 하나로 판단한다.
+uses:
+  required:
+  - candidates
+  - similar_cards
+  - approved_cards
+  optional: []
+produces:
+- assessments
+- assessment_succeeded
+- assessment_failed
+- validation_error
+- draft_result
+data:
+  candidates:
+    type: KnowledgeCandidate
+    cardinality: many
+  similar_cards:
+    type: KnowledgeCard
+    cardinality: many
+  approved_cards:
+    type: KnowledgeCard
+    cardinality: many
+  assessments:
+    type: KnowledgeAssessment
+    cardinality: many
+  assessment_succeeded:
+    type: Boolean
+  assessment_failed:
+    type: Boolean
+  validation_error:
+    type: ValidationError
+  draft_result:
+    type: DraftResult

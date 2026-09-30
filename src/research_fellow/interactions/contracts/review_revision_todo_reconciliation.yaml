@@ -1,0 +1,28 @@
+interaction: ajd-interaction/v0.1
+id: review_revision_todo_reconciliation
+actor: researcher
+purpose: >
+  Agent가 제안한 Revision To-do 재평가 결과를 항목별로 수정·선택하여
+  다음 Revision 백로그에 반영할 연구자 검토 결과를 만든다.
+mode: review
+uses:
+  required:
+    - reconciliation_result
+    - existing_todos
+  optional: []
+produces:
+  - reviewed_reconciliation
+data:
+  reconciliation_result:
+    type: ReconciliationResult
+  existing_todos:
+    type: RevisionTodo
+    cardinality: many
+  reviewed_reconciliation:
+    type: ReviewedReconciliation
+boundary:
+  phenomenon: revision_todo_reconciliation_proposed
+  recipient: researcher
+  status: proposed
+completion:
+  requires_response: true

@@ -1,0 +1,18 @@
+interaction: ajd-interaction/v0.1
+id: submit_research_question
+actor: researcher
+purpose: >
+  연구자가 직접 제기하는 연구 질문과 현재 맥락을 하나의 업무 입력으로 전달한다.
+mode: request_input
+uses:
+  required: []
+  optional: []
+produces:
+  - research_question_input
+data:
+  research_question_input:
+    type: ResearchQuestionInput
+completion:
+  requires_response: true
+boundary:
+  phenomenon: researcher_question_request

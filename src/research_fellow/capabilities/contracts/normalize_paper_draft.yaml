@@ -1,0 +1,22 @@
+capability: ajd-capability-contract/v0.2
+id: normalize_paper_draft
+kind: action
+purpose: Capability for workflow step 'normalize_paper_draft'.
+uses:
+  required:
+  - raw_response
+  - valid_card_ids
+  - version
+  optional: []
+produces:
+- manuscript
+data:
+  raw_response:
+    type: RawLLMOutput
+  valid_card_ids:
+    type: Identifier
+    cardinality: many
+  version:
+    type: Identifier
+  manuscript:
+    type: Manuscript

@@ -1,0 +1,107 @@
+policy: ajd-autonomy/v0.1
+profile: default
+interactions:
+  - id: submit_research_question
+    policy_id: H0-task-entry-research-question
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: submit_external_advisory_request
+    policy_id: H0-task-entry-external-advisory
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: select_questions_for_investigation
+    policy_id: H2-single-question-auto-notify
+    default: auto_notify
+    required_signals: [selection_case, selected_question_ids]
+    missing_signals: escalate
+    escalate_when:
+      any:
+        - selection_case: none
+        - selection_case: multiple
+    on_auto:
+      resolver: select_by_ids
+      args:
+        input: reading_questions
+        output: selected_questions
+        item_id: question_id
+        signal_ids: selected_question_ids
+    audit: {record: true, notify: true}
+
+  - id: confirm_advisory_plan
+    policy_id: H2-routine-advisory-plan-auto-notify
+    default: auto_notify
+    required_signals: [novelty, evidence_sufficiency, impact, conflict]
+    missing_signals: escalate
+    escalate_when:
+      any:
+        - novelty: novel
+        - evidence_sufficiency: insufficient
+        - impact: high
+        - conflict: material
+    on_auto:
+      resolution:
+        advisory_plan_confirmed: true
+    audit: {record: true, notify: true}
+
+  - id: resolve_pending_decision_requests
+    policy_id: H1-generic-durable-decision-human
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: resolve_ontology_change_reviews
+    policy_id: H0-ontology-publish-authority
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: resolve_revision_applications
+    policy_id: H2-low-risk-revision-auto-notify
+    default: auto_notify
+    required_signals: [impact, reversibility, evidence_sufficiency]
+    missing_signals: escalate
+    escalate_when:
+      any:
+        - impact: [medium, high]
+        - reversibility: [moderate, hard]
+        - evidence_sufficiency: [partial, insufficient]
+    on_auto:
+      resolver: approve_all
+      args:
+        input: revision_application_candidates
+        output: revision_application_resolutions
+        item_id: candidate_id
+        output_id: candidate_id
+        decision: approved
+        note: auto_approved_low_risk_revision
+    audit: {record: true, notify: true}
+
+  - id: review_ontology_change
+    policy_id: H1-ontology-proposal-review-human
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: review_revision_todo_reconciliation
+    policy_id: H1-revision-backlog-reconciliation-human
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: inform_recent_knowledge_updates
+    policy_id: H3-knowledge-update-notify
+    default: auto_notify
+    audit: {record: true, notify: true}
+
+  - id: triage_research_question
+    policy_id: H1-research-question-state-human
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: review_external_advisory_interpretation
+    policy_id: H1-external-meaning-review-human
+    default: escalate
+    audit: {record: true, notify: false}
+
+  - id: review_paper_reading_claim
+    policy_id: H1-knowledge-asset-review-human
+    default: escalate
+    audit: {record: true, notify: false}

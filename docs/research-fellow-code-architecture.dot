@@ -8,7 +8,7 @@ digraph ResearchFellowCodeArchitecture {
     fontname="Helvetica",
     label="Research Fellow — AJD / DSL / Topology / Workflow / Prompt Code Structure",
     labelloc=t,
-    dpi=300,
+    //dpi=300,
     fontsize=16
   ];
 

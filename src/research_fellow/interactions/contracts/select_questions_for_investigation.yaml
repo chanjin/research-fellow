@@ -1,0 +1,23 @@
+interaction: ajd-interaction/v0.1
+id: select_questions_for_investigation
+actor: researcher
+purpose: >
+  1차 논문 읽기에서 생성된 질문 중 추가 근거 조사가 필요한 질문을 연구자가 선택한다.
+mode: select
+uses:
+  required:
+    - reading_questions
+  optional: []
+produces:
+  - selected_questions
+data:
+  reading_questions:
+    type: ReadingQuestion
+    cardinality: many
+  selected_questions:
+    type: ReadingQuestion
+    cardinality: many
+completion:
+  requires_response: true
+constraints:
+  min_selection: 0

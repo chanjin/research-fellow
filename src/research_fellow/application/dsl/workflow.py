@@ -7,7 +7,7 @@ LLM calls, retry, parsing, and execution observation.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import resources
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -18,6 +18,10 @@ from research_fellow.application.dsl.ajd import validate_ajd_traceability, valid
 from research_fellow.application.dsl.capability import (
     capability_bindings_from_catalog,
     validate_capability_catalog,
+)
+from research_fellow.application.dsl.interaction import interaction_contract, validate_interaction_contracts
+from research_fellow.application.dsl.autonomy import (
+    AUTONOMY_AUTO, AUTONOMY_AUTO_NOTIFY, evaluate_interaction_autonomy,
 )
 
 
@@ -152,6 +156,11 @@ def _workflow_catalog() -> dict[str, tuple[str, dict[str, Any]]]:
             raise ValueError(f"Duplicate workflow id {workflow_id}: {other_path}, {relative_path}")
         catalog[workflow_id] = (relative_path, raw)
     return catalog
+
+
+def workflow_catalog_snapshot() -> dict[str, tuple[str, dict[str, Any]]]:
+    """Return a shallow copy of the loaded workflow catalog for validators/tooling."""
+    return dict(_workflow_catalog())
 
 
 def _step_uses(step: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -407,15 +416,23 @@ def validate_workflow_catalog(
     capabilities = validate_capability_catalog(
         validate_imports=True, validate_workflows=True, strict_orphans=True
     )
-    return {**phenomena, "ajd_traceability": traceability, "capability_catalog": capabilities}
+    interactions = validate_interaction_contracts(workflow_catalog=catalog, strict_orphans=True)
+    return {**phenomena, "ajd_traceability": traceability, "capability_catalog": capabilities, "interaction_contracts": interactions}
 
 def validate_workflow_bindings(
     definition: WorkflowDefinition,
     handlers: dict[str, WorkflowHandler],
 ) -> None:
-    """Validate all semantic capability/subworkflow bindings before execution."""
+    """Validate executable bindings before execution.
+
+    Interaction steps are resolved from Interaction Contracts by the runtime and
+    therefore deliberately do not require Python handlers. Action/decision
+    capabilities and subworkflow adapters still require executable bindings.
+    """
     missing: list[str] = []
     for step in definition.steps:
+        if str(step.get("kind") or "") == "interaction":
+            continue
         name = _binding_name(step)
         if name not in handlers and name not in missing:
             missing.append(name)
@@ -470,6 +487,8 @@ def _validate_v02(raw: dict[str, Any], relative_path: str) -> None:
             if not step.get("workflow"):
                 raise ValueError(f"Workflow step {step_id} needs workflow: {relative_path}")
         elif kind == "interaction":
+            if not str(step.get("interaction") or "").strip():
+                raise ValueError(f"Interaction step {step_id} needs interaction contract id: {relative_path}")
             if not str(step.get("actor") or "").strip():
                 raise ValueError(f"Interaction step {step_id} needs actor: {relative_path}")
         else:
@@ -684,6 +703,14 @@ def _validate_v02_dataflow(raw: dict[str, Any], relative_path: str) -> None:
         raise ValueError(f"invariants must be a list of non-empty strings: {relative_path}")
 
 
+def load_workflow_definition_by_id(workflow_id: str) -> WorkflowDefinition:
+    entry = _workflow_catalog().get(str(workflow_id))
+    if entry is None:
+        raise KeyError(f"Unknown workflow id: {workflow_id}")
+    relative_path, _raw = entry
+    return load_workflow_definition(relative_path)
+
+
 def load_workflow_definition(relative_path: str) -> WorkflowDefinition:
     root = resources.files("research_fellow")
     text = root.joinpath("workflows", relative_path).read_text(encoding="utf-8")
@@ -772,35 +799,186 @@ def prepare_workflow_context(
 RecoveryHandler = Callable[[dict[str, Any], Exception, WorkflowDefinition], dict[str, Any]]
 
 
+WORKFLOW_STATUS_READY = "ready"
+WORKFLOW_STATUS_RUNNING = "running"
+WORKFLOW_STATUS_WAITING = "waiting_for_interaction"
+WORKFLOW_STATUS_COMPLETED = "completed"
+
+
+@dataclass(frozen=True)
+class InteractionRequest:
+    workflow_id: str
+    step_id: str
+    interaction_id: str
+    actor: str
+    mode: str
+    inputs: dict[str, Any]
+    outputs: list[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "workflow_id": self.workflow_id,
+            "step_id": self.step_id,
+            "interaction_id": self.interaction_id,
+            "actor": self.actor,
+            "mode": self.mode,
+            "inputs": dict(self.inputs),
+            "outputs": list(self.outputs),
+        }
+
+
+def _interaction_request(
+    definition: WorkflowDefinition,
+    step: dict[str, Any],
+    context: dict[str, Any],
+) -> InteractionRequest:
+    contract = interaction_contract(str(step.get("interaction") or ""))
+    names = [*contract.required_inputs, *contract.optional_inputs]
+    values = {name: context.get(name) for name in names if name in context}
+    missing = [name for name in contract.required_inputs if name not in context]
+    if missing:
+        raise ValueError(
+            f"Missing interaction inputs {missing} for {contract.interaction_id}: "
+            f"{definition.workflow_id}"
+        )
+    return InteractionRequest(
+        workflow_id=definition.workflow_id,
+        step_id=str(step["id"]),
+        interaction_id=contract.interaction_id,
+        actor=contract.actor,
+        mode=contract.mode,
+        inputs=values,
+        outputs=contract.outputs,
+    )
+
+
+def _validate_interaction_response(request: InteractionRequest, values: Mapping[str, Any]) -> dict[str, Any]:
+    supplied = {str(key): value for key, value in values.items()}
+    expected = list(request.outputs)
+    missing = [name for name in expected if name not in supplied]
+    unknown = sorted(set(supplied) - set(expected))
+    if missing or unknown:
+        raise ValueError(
+            f"Interaction response contract mismatch for {request.interaction_id}; "
+            f"missing={missing}, unknown={unknown}"
+        )
+    contract = interaction_contract(request.interaction_id)
+    constraints = contract.raw.get("constraints") or {}
+    for name in expected:
+        spec = contract.data_spec(name)
+        value = supplied[name]
+        if spec.cardinality == "many" and not isinstance(value, (list, tuple)):
+            raise ValueError(
+                f"Interaction response {name} must be a collection: {request.interaction_id}"
+            )
+    min_selection = constraints.get("min_selection")
+    if min_selection is not None and expected:
+        first = supplied[expected[0]]
+        if isinstance(first, (list, tuple)) and len(first) < int(min_selection):
+            raise ValueError(
+                f"Interaction response needs at least {min_selection} selection(s): "
+                f"{request.interaction_id}"
+            )
+    return supplied
+
+
 @dataclass
 class WorkflowRun:
-    """Prepared execution of one workflow definition.
+    """Prepared execution of one workflow definition with interaction suspension.
 
-    Application modules supply domain/runtime dependencies and a Python namespace.
-    The runtime derives semantic capability bindings from the DSL instead of
-    requiring each entrypoint to repeat a handler registry. Common exception
-    dispatch and public-result projection also live here so application modules
-    only define domain-specific recovery behavior.
+    The run keeps its in-memory context and current step index. Response-required
+    interaction steps suspend execution without requiring a Python handler. A
+    caller can render the returned interaction request, then call ``resume`` with
+    the contract outputs to continue from the next step. Existing workflows with
+    no interactions still complete in one ``execute`` call.
     """
 
     definition: WorkflowDefinition
     context: dict[str, Any]
     handlers: dict[str, WorkflowHandler]
+    next_step_index: int = 0
+    status: str = WORKFLOW_STATUS_READY
+    pending_interaction: InteractionRequest | None = None
+
+    def _public_waiting_result(self) -> dict[str, Any]:
+        if self.pending_interaction is None:
+            raise RuntimeError("Workflow is not waiting for an interaction")
+        return {
+            "status": WORKFLOW_STATUS_WAITING,
+            "workflow_id": self.definition.workflow_id,
+            "workflow_trace": list(self.context.get("workflow_trace") or []),
+            "interaction": self.pending_interaction.as_dict(),
+            "checkpoint": {
+                "workflow_id": self.definition.workflow_id,
+                "next_step_index": self.next_step_index,
+                "interaction_step_id": self.pending_interaction.step_id,
+            },
+        }
+
+    def _run(
+        self,
+        *,
+        recover: Sequence[tuple[type[BaseException], RecoveryHandler]] = (),
+    ) -> dict[str, Any]:
+        try:
+            self.status = WORKFLOW_STATUS_RUNNING
+            outcome = _execute_workflow_segment(
+                self.definition,
+                self.context,
+                self.handlers,
+                start_index=self.next_step_index,
+            )
+            self.next_step_index = int(outcome["next_step_index"])
+            self.pending_interaction = outcome.get("pending_interaction")
+            if self.pending_interaction is not None:
+                self.status = WORKFLOW_STATUS_WAITING
+                return self._public_waiting_result()
+        except Exception as error:
+            for error_type, handler in recover:
+                if isinstance(error, error_type):
+                    return handler(self.context, error, self.definition)
+            raise
+        self.status = WORKFLOW_STATUS_COMPLETED
+        return project_workflow_outputs(self.definition, self.context)
 
     def execute(
         self,
         *,
         recover: Sequence[tuple[type[BaseException], RecoveryHandler]] = (),
     ) -> dict[str, Any]:
-        try:
-            execute_workflow(self.definition, self.context, self.handlers)
-        except Exception as error:
-            for error_type, handler in recover:
-                if isinstance(error, error_type):
-                    return handler(self.context, error, self.definition)
-            raise
-        return project_workflow_outputs(self.definition, self.context)
+        if self.status == WORKFLOW_STATUS_WAITING:
+            return self._public_waiting_result()
+        if self.status == WORKFLOW_STATUS_COMPLETED:
+            return project_workflow_outputs(self.definition, self.context)
+        return self._run(recover=recover)
 
+    def checkpoint_payload(self, *, checkpoint_id: str | None = None) -> dict[str, Any]:
+        from research_fellow.application.dsl.checkpoint import checkpoint_payload
+        return checkpoint_payload(self, checkpoint_id=checkpoint_id)
+
+    def save_checkpoint(self, store: Any, *, checkpoint_id: str | None = None) -> str:
+        from research_fellow.application.dsl.checkpoint import save_workflow_checkpoint
+        return save_workflow_checkpoint(self, store, checkpoint_id=checkpoint_id)
+
+    def resume(
+        self,
+        response: Mapping[str, Any],
+        *,
+        recover: Sequence[tuple[type[BaseException], RecoveryHandler]] = (),
+    ) -> dict[str, Any]:
+        if self.status != WORKFLOW_STATUS_WAITING or self.pending_interaction is None:
+            raise ValueError(f"Workflow {self.definition.workflow_id} is not waiting for interaction")
+        request = self.pending_interaction
+        values = _validate_interaction_response(request, response)
+        self.context.update(values)
+        self.context.setdefault("workflow_trace", []).append({
+            "step": request.step_id,
+            "status": "completed",
+            "interaction": request.interaction_id,
+        })
+        self.pending_interaction = None
+        self.status = WORKFLOW_STATUS_READY
+        return self._run(recover=recover)
 
 
 
@@ -845,6 +1023,21 @@ def capability_bindings_from_namespace(
         if handler is not None:
             bindings[binding_name] = handler
     return bindings
+
+
+def prepare_workflow_run_by_id(
+    workflow_id: str,
+    values: dict[str, Any],
+    namespace: Mapping[str, Any],
+) -> WorkflowRun:
+    definition = load_workflow_definition_by_id(workflow_id)
+    context = prepare_workflow_context(definition, values)
+    handlers = capability_bindings_from_catalog(definition.steps)
+    namespace_handlers = capability_bindings_from_namespace(definition, namespace)
+    for name, handler in namespace_handlers.items():
+        handlers.setdefault(name, handler)
+    validate_workflow_bindings(definition, handlers)
+    return WorkflowRun(definition=definition, context=context, handlers=handlers)
 
 
 def prepare_workflow_run(
@@ -901,33 +1094,90 @@ def project_workflow_outputs(
     return result
 
 
-def execute_workflow(
+def _execute_workflow_segment(
     definition: WorkflowDefinition,
     context: dict[str, Any],
     handlers: dict[str, WorkflowHandler],
+    *,
+    start_index: int = 0,
 ) -> dict[str, Any]:
-    """Execute declared job-level orchestration using semantic capability bindings."""
+    """Execute a workflow segment until completion or a response-required interaction."""
     validate_workflow_bindings(definition, handlers)
     context.setdefault("workflow_id", definition.workflow_id)
     context.setdefault("workflow_trace", [])
-    for step in definition.steps:
+    context.setdefault("interaction_events", [])
+    steps = definition.steps
+
+    for index in range(start_index, len(steps)):
+        step = steps[index]
         if not _condition_is_true(step.get("when"), context):
             context["workflow_trace"].append({"step": step["id"], "status": "skipped"})
             continue
 
         context["current_step"] = step
         try:
-            foreach_key = step.get("foreach")
-            if foreach_key:
-                items = list(context.get(str(foreach_key)) or [])
-                for index, item in enumerate(items):
-                    context["current_item"] = item
-                    context["current_index"] = index
-                    _execute_bound_step(step, context, handlers)
-                context.pop("current_item", None)
-                context.pop("current_index", None)
+            if str(step.get("kind") or "") == "interaction":
+                request = _interaction_request(definition, step, context)
+                contract = interaction_contract(request.interaction_id)
+                autonomy_map = context.get("autonomy_signals") or {}
+                if isinstance(autonomy_map, Mapping):
+                    signal_values = autonomy_map.get(request.interaction_id, {})
+                    if not isinstance(signal_values, Mapping):
+                        signal_values = {}
+                else:
+                    signal_values = {}
+                autonomy = evaluate_interaction_autonomy(request.interaction_id, signal_values, inputs=request.inputs)
+                context.setdefault("autonomy_events", []).append({
+                    "step": str(step["id"]),
+                    **autonomy.as_dict(),
+                })
+
+                if autonomy.action == AUTONOMY_AUTO:
+                    values = _validate_interaction_response(request, autonomy.resolution) if contract.requires_response else {}
+                    context.update(values)
+                    context["interaction_events"].append({
+                        **request.as_dict(),
+                        "autonomy": autonomy.action,
+                        "resolution": dict(values),
+                    })
+                    context["workflow_trace"].append({
+                        "step": step["id"],
+                        "status": "auto_resolved",
+                        "interaction": request.interaction_id,
+                    })
+                    continue
+
+                if autonomy.action == AUTONOMY_AUTO_NOTIFY and not contract.requires_response:
+                    context["interaction_events"].append({
+                        **request.as_dict(),
+                        "autonomy": autonomy.action,
+                    })
+                elif contract.requires_response:
+                    context["workflow_trace"].append({
+                        "step": step["id"],
+                        "status": WORKFLOW_STATUS_WAITING,
+                        "interaction": request.interaction_id,
+                        "autonomy": autonomy.action,
+                    })
+                    context.pop("current_step", None)
+                    return {
+                        "next_step_index": index + 1,
+                        "pending_interaction": request,
+                    }
+                else:
+                    context["interaction_events"].append(request.as_dict())
             else:
-                _execute_bound_step(step, context, handlers)
+                foreach_key = step.get("foreach")
+                if foreach_key:
+                    items = list(context.get(str(foreach_key)) or [])
+                    for item_index, item in enumerate(items):
+                        context["current_item"] = item
+                        context["current_index"] = item_index
+                        _execute_bound_step(step, context, handlers)
+                    context.pop("current_item", None)
+                    context.pop("current_index", None)
+                else:
+                    _execute_bound_step(step, context, handlers)
         except Exception as error:
             context["workflow_trace"].append({
                 "step": step["id"],
@@ -939,5 +1189,21 @@ def execute_workflow(
             context.pop("current_step", None)
             raise
         context["workflow_trace"].append({"step": step["id"], "status": "completed"})
+
     context.pop("current_step", None)
+    return {"next_step_index": len(steps), "pending_interaction": None}
+
+
+def execute_workflow(
+    definition: WorkflowDefinition,
+    context: dict[str, Any],
+    handlers: dict[str, WorkflowHandler],
+) -> dict[str, Any]:
+    """Execute from the first step and return the mutable workflow context.
+
+    This preserves the public v0.2 helper contract for direct callers. Response-
+    required interactions stop execution at the interaction boundary; callers
+    that need resume semantics should use ``WorkflowRun``.
+    """
+    _execute_workflow_segment(definition, context, handlers, start_index=0)
     return context

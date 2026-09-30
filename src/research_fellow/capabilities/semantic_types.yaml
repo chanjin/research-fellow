@@ -103,3 +103,27 @@ types:
     extends: Artifact
   - id: ActionCounts
     extends: Any
+  - id: OntologyType
+    extends: Artifact
+  - id: OntologyRelation
+    extends: Artifact
+  - id: OntologyReviewFeedback
+    extends: Artifact
+  - id: ReviewedReconciliation
+    extends: Artifact
+  - id: OntologyChangeReview
+    extends: Artifact
+  - id: OntologyChangeResolution
+    extends: Artifact
+  - id: RevisionApplicationCandidate
+    extends: Artifact
+  - id: RevisionApplicationResolution
+    extends: Artifact
+  - id: DecisionRequest
+    extends: Artifact
+  - id: DecisionResolution
+    extends: Artifact
+  - id: ResearchQuestionInput
+    extends: Artifact
+  - id: ExternalAdvisoryRequest
+    extends: Artifact

@@ -1353,6 +1353,23 @@ class Ledger:
         item = dict(row); item["checkpoint"] = json.loads(item.pop("checkpoint_json") or "{}")
         return item
 
+    def auto_research_runs(self, *, statuses: tuple[str, ...] = ("running", "needs_attention"), limit: int = 50) -> list[dict[str, Any]]:
+        statuses = tuple(str(status) for status in statuses if str(status))
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM auto_research_runs WHERE status IN ({placeholders}) ORDER BY updated_at DESC LIMIT ?",
+                (*statuses, max(1, min(int(limit), 200))),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["checkpoint"] = json.loads(item.pop("checkpoint_json") or "{}")
+            result.append(item)
+        return result
+
     def record_auto_research_failure(self, payload: dict[str, Any], *, run_id: str = "", review_id: str = "", intent_id: str = "", item_key: str = "") -> str:
         failure_id = str(payload.get("failure_id") or f"arf-{uuid.uuid4().hex[:12]}")
         with self.connect() as conn:
@@ -2233,6 +2250,33 @@ class Ledger:
         with self.connect() as conn:
             result = conn.execute("UPDATE ontology_change_reviews SET researcher_comment=?, updated_at=? WHERE review_id=? AND status='proposed'", (comment.strip(), now(), review_id))
         return result.rowcount == 1
+
+    def resolve_ontology_change_review(self, review_id: str, decision: str, *, note: str = "") -> dict[str, Any]:
+        """Apply a researcher decision to a proposed ontology change review.
+
+        ``approved`` publishes a new ontology version using the existing approval path.
+        ``deferred`` preserves the proposed state and stores the researcher's note.
+        ``rejected`` closes the proposal without changing the ontology.
+        """
+        if decision not in {"approved", "deferred", "rejected"}:
+            raise ValueError(f"Unsupported ontology review decision: {decision}")
+        review = next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), None)
+        if not review or review.get("status") != "proposed":
+            raise ValueError("결정 가능한 온톨지 변경 검토를 찾을 수 없습니다.")
+        if note.strip():
+            self.update_ontology_change_review_comment(review_id, note)
+        if decision == "approved":
+            return self.approve_ontology_change_review(
+                review_id, summary=str((review.get("proposal") or {}).get("summary") or "")
+            )
+        if decision == "deferred":
+            return next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), review)
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE ontology_change_reviews SET status='rejected', updated_at=? WHERE review_id=? AND status='proposed'",
+                (now(), review_id),
+            )
+        return next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), review)
 
     def approve_ontology_change_review(self, review_id: str, *, summary: str = "", approved_by: str = "researcher") -> dict[str, Any]:
         review = next((item for item in self.ontology_change_reviews(limit=200) if item["review_id"] == review_id), None)

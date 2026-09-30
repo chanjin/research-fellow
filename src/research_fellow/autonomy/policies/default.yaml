@@ -1,0 +1,75 @@
+policy: ajd-autonomy/v0.1
+profile: default
+interactions:
+  - id: inform_recent_knowledge_updates
+    default: auto_notify
+    audit:
+      record: true
+      notify: true
+
+  - id: confirm_advisory_plan
+    default: auto
+    required_signals:
+      - novelty
+      - evidence_sufficiency
+      - impact
+      - conflict
+    missing_signals: escalate
+    escalate_when:
+      any:
+        - novelty: novel
+        - evidence_sufficiency: insufficient
+        - impact: high
+        - conflict: material
+    on_auto:
+      resolution:
+        advisory_plan_confirmed: true
+    audit:
+      record: true
+      notify: false
+
+  - id: select_questions_for_investigation
+    default: auto
+    required_signals:
+      - selection_case
+      - selected_question_ids
+    missing_signals: escalate
+    escalate_when:
+      any:
+        - selection_case: none
+        - selection_case: multiple
+    on_auto:
+      resolver: select_by_ids
+      args:
+        input: reading_questions
+        output: selected_questions
+        item_id: question_id
+        signal_ids: selected_question_ids
+    audit:
+      record: true
+      notify: false
+
+  - id: resolve_revision_applications
+    default: auto
+    required_signals:
+      - impact
+      - reversibility
+      - evidence_sufficiency
+    missing_signals: escalate
+    escalate_when:
+      any:
+        - impact: [medium, high]
+        - reversibility: [moderate, hard]
+        - evidence_sufficiency: [partial, insufficient]
+    on_auto:
+      resolver: approve_all
+      args:
+        input: revision_application_candidates
+        output: revision_application_resolutions
+        item_id: candidate_id
+        output_id: candidate_id
+        decision: approved
+        note: auto_approved_low_risk_revision
+    audit:
+      record: true
+      notify: true

@@ -47,6 +47,7 @@ steps:
 
   - id: select_questions_for_investigation
     kind: interaction
+    interaction: select_questions_for_investigation
     actor: researcher
     when: generation_succeeded
     uses:

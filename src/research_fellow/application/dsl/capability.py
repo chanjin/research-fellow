@@ -451,7 +451,7 @@ def validate_workflow_semantic_compatibility(
     for workflow_id, items in workflows.items():
         produced: dict[str, tuple[str, CapabilityDataSpec]] = {}
         for path, step in items:
-            if str(step.get("kind") or "") == "workflow":
+            if str(step.get("kind") or "") in {"workflow", "interaction"}:
                 # Subworkflow outputs do not yet carry semantic types in Workflow DSL.
                 for name in step.get("produces") or []:
                     produced.pop(str(name), None)
@@ -507,7 +507,7 @@ def validate_capability_contracts(
     mismatches: list[dict[str, Any]] = []
     if validate_workflows:
         for workflow_id, path, step in _workflow_steps_from_resources():
-            if str(step.get("kind") or "") == "workflow":
+            if str(step.get("kind") or "") in {"workflow", "interaction"}:
                 continue
             capability_id = str(step.get("capability") or step.get("id") or "")
             contract = contracts.get(capability_id)
@@ -711,7 +711,7 @@ def capability_bindings_from_catalog(
     bindings: dict[str, CapabilityHandler] = {}
     for step in steps:
         kind = str(step.get("kind") or "")
-        if kind == "workflow":
+        if kind in {"workflow", "interaction"}:
             continue
         capability_id = str(step.get("capability") or step.get("id") or "")
         binding = capability_binding(capability_id, profile=profile)

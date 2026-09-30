@@ -1,3 +1,26 @@
+from research_fellow.application.dsl.checkpoint import (
+    CHECKPOINT_VERSION,
+    CheckpointStore,
+    checkpoint_payload,
+    decode_checkpoint_value,
+    encode_checkpoint_value,
+    load_workflow_checkpoint,
+    restore_workflow_run,
+    save_workflow_checkpoint,
+    semantic_context_snapshot,
+)
+from research_fellow.application.dsl.interaction_binding import (
+    DEFAULT_INTERACTION_BINDING_PROFILE, INTERACTION_BINDING_VERSION, InteractionBinding,
+    interaction_binding, load_interaction_bindings, validate_interaction_bindings,
+)
+from research_fellow.application.dsl.interaction import (
+    INTERACTION_CONTRACT_VERSION,
+    INTERACTION_MODES,
+    InteractionContract,
+    interaction_contract,
+    load_interaction_contracts,
+    validate_interaction_contracts,
+)
 from research_fellow.application.dsl.capability import (
     CAPABILITY_BINDING_VERSION,
     CAPABILITY_CATALOG_VERSION,
@@ -25,6 +48,17 @@ from research_fellow.application.dsl.capability import (
     validate_capability_contracts,
     validate_workflow_semantic_compatibility,
 )
+from research_fellow.application.dsl.capability_analyzer import (
+    CAPABILITY_REQUIREMENT_VERSION,
+    CapabilityGap,
+    CapabilityRequirement,
+    analyze_capability_requirement,
+    analyze_capability_requirements,
+    analyze_workflow_capability_gaps,
+    analyze_workflow_catalog_capability_gaps,
+    capability_requirement_from_raw,
+    workflow_capability_requirements,
+)
 from research_fellow.application.dsl.topology import (
     TOPOLOGY_VERSION,
     TopologyDefinition,
@@ -38,14 +72,21 @@ from research_fellow.application.dsl.ajd import (
     validate_workflow_against_ajd,
 )
 from research_fellow.application.dsl.workflow import (
+    InteractionRequest,
     WorkflowDefinition,
     WorkflowRun,
+    WORKFLOW_STATUS_COMPLETED,
+    WORKFLOW_STATUS_READY,
+    WORKFLOW_STATUS_RUNNING,
+    WORKFLOW_STATUS_WAITING,
     capability_bindings_from_namespace,
     capability_bindings,
     execute_workflow,
     load_workflow_definition,
+    load_workflow_definition_by_id,
     prepare_workflow_context,
     prepare_workflow_run,
+    prepare_workflow_run_by_id,
     workflow_result,
     project_workflow_outputs,
     validate_shared_phenomenon_compatibility,
@@ -55,6 +96,36 @@ from research_fellow.application.dsl.workflow import (
 )
 
 __all__ = [
+    "CHECKPOINT_VERSION",
+    "CheckpointStore",
+    "checkpoint_payload",
+    "decode_checkpoint_value",
+    "encode_checkpoint_value",
+    "load_workflow_checkpoint",
+    "restore_workflow_run",
+    "save_workflow_checkpoint",
+    "semantic_context_snapshot",
+    "DEFAULT_INTERACTION_BINDING_PROFILE",
+    "INTERACTION_BINDING_VERSION",
+    "InteractionBinding",
+    "interaction_binding",
+    "load_interaction_bindings",
+    "validate_interaction_bindings",
+    "INTERACTION_CONTRACT_VERSION",
+    "INTERACTION_MODES",
+    "InteractionContract",
+    "interaction_contract",
+    "load_interaction_contracts",
+    "validate_interaction_contracts",
+    "CAPABILITY_REQUIREMENT_VERSION",
+    "CapabilityGap",
+    "CapabilityRequirement",
+    "analyze_capability_requirement",
+    "analyze_capability_requirements",
+    "analyze_workflow_capability_gaps",
+    "analyze_workflow_catalog_capability_gaps",
+    "capability_requirement_from_raw",
+    "workflow_capability_requirements",
     "CAPABILITY_BINDING_VERSION",
     "CAPABILITY_CATALOG_VERSION",
     "CAPABILITY_CONTRACT_VERSION",
@@ -80,8 +151,13 @@ __all__ = [
     "validate_capability_catalog",
     "validate_capability_contracts",
     "validate_workflow_semantic_compatibility",
+    "InteractionRequest",
     "WorkflowDefinition",
     "WorkflowRun",
+    "WORKFLOW_STATUS_COMPLETED",
+    "WORKFLOW_STATUS_READY",
+    "WORKFLOW_STATUS_RUNNING",
+    "WORKFLOW_STATUS_WAITING",
     "load_ajd_catalog",
     "validate_ajd_traceability",
     "validate_workflow_against_ajd",
@@ -89,8 +165,10 @@ __all__ = [
     "capability_bindings_from_namespace",
     "execute_workflow",
     "load_workflow_definition",
+    "load_workflow_definition_by_id",
     "prepare_workflow_context",
     "prepare_workflow_run",
+    "prepare_workflow_run_by_id",
     "workflow_result",
     "project_workflow_outputs",
     "validate_shared_phenomenon_compatibility",
@@ -103,3 +181,20 @@ __all__ = [
     "topology_graph",
     "validate_topology",
 ]
+
+from research_fellow.application.dsl.autonomy import (
+    AUTONOMY_POLICY_VERSION,
+    AUTONOMY_AUTO,
+    AUTONOMY_AUTO_NOTIFY,
+    AUTONOMY_ESCALATE,
+    AutonomyDecision,
+    autonomy_policy,
+    evaluate_interaction_autonomy,
+    load_autonomy_policies,
+    validate_autonomy_policies,
+)
+
+from research_fellow.application.dsl.autonomy_classification import (
+    AUTONOMY_CLASSIFICATION_VERSION, AUTONOMY_LEVELS, InteractionAutonomyClass,
+    load_autonomy_classification, validate_autonomy_classification,
+)

@@ -1,0 +1,77 @@
+classification: ajd-autonomy-classification/v0.1
+profile: default
+levels:
+  H0: mandatory-human
+  H1: human-by-default
+  H2: conditional-human
+  H3: auto-audit-notify
+interactions:
+  - id: submit_research_question
+    category: task_entry
+    current_level: H0
+    target_level: H0
+    rationale: External research intent originates from the researcher; this is an entry boundary, not an automation target.
+    escalation_dimensions: []
+
+  - id: submit_external_advisory_request
+    category: task_entry
+    current_level: H0
+    target_level: H0
+    rationale: An external advisory request is an exogenous input that must preserve the requester's original intent and context.
+    escalation_dimensions: []
+
+  - id: select_questions_for_investigation
+    category: oversight
+    current_level: H2
+    target_level: H2
+    rationale: Low-ambiguity cases can be selected automatically; multiple competing questions still require researcher judgment.
+    escalation_dimensions: [impact, evidence_sufficiency, novelty]
+
+  - id: confirm_advisory_plan
+    category: oversight
+    current_level: H2
+    target_level: H2
+    rationale: Routine advisory plans can proceed automatically, while novel, weakly evidenced, high-impact, or conflicting cases escalate.
+    escalation_dimensions: [impact, evidence_sufficiency, novelty, conflict]
+
+  - id: resolve_pending_decision_requests
+    category: oversight
+    current_level: H1
+    target_level: H2
+    rationale: Generic durable-state decisions remain human-by-default until request kinds are risk-tiered explicitly.
+    escalation_dimensions: [impact, reversibility, evidence_sufficiency, conflict]
+
+  - id: resolve_ontology_change_reviews
+    category: oversight
+    current_level: H0
+    target_level: H1
+    rationale: Publishing ontology structure has broad downstream impact and should remain a strong human authority boundary; only low-impact changes may later become conditional.
+    escalation_dimensions: [impact, reversibility, novelty, conflict]
+
+  - id: resolve_revision_applications
+    category: oversight
+    current_level: H2
+    target_level: H2
+    rationale: Low-impact, reversible, evidence-backed revisions may auto-apply; substantive manuscript changes continue to escalate.
+    escalation_dimensions: [impact, reversibility, evidence_sufficiency]
+
+  - id: review_ontology_change
+    category: oversight
+    current_level: H1
+    target_level: H2
+    rationale: Researcher review remains the default for ontology proposals, with future exception-only review for familiar low-conflict changes.
+    escalation_dimensions: [impact, novelty, conflict]
+
+  - id: review_revision_todo_reconciliation
+    category: oversight
+    current_level: H1
+    target_level: H2
+    rationale: Backlog restructuring is human-by-default today but can move to exception review when changes are low-impact and evidence-backed.
+    escalation_dimensions: [impact, reversibility, evidence_sufficiency]
+
+  - id: inform_recent_knowledge_updates
+    category: notification
+    current_level: H3
+    target_level: H3
+    rationale: Knowledge updates do not require a response and belong in an autonomous activity/audit feed.
+    escalation_dimensions: []

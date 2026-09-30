@@ -1,0 +1,21 @@
+interaction: ajd-interaction/v0.1
+id: inform_recent_knowledge_updates
+actor: researcher
+purpose: >
+  M1에서 발생한 최근 Knowledge Update를 연구자에게 읽기 전용으로 알린다.
+mode: inform
+uses:
+  required:
+    - knowledge_updates
+  optional: []
+produces: []
+data:
+  knowledge_updates:
+    type: KnowledgeUpdate
+    cardinality: many
+completion:
+  requires_response: false
+boundary:
+  phenomenon: knowledge_update
+  recipient: researcher
+  status: completed

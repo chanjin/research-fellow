@@ -22,6 +22,7 @@ PHENOMENON_TYPES = {
     "knowledge_update",
     "advisory_exchange",
     "activity_summary",
+    "research_task",
 }
 
 
@@ -214,6 +215,9 @@ class Ledger:
                     authors_json TEXT NOT NULL DEFAULT '[]',
                     publication_year TEXT NOT NULL DEFAULT '',
                     source_url TEXT NOT NULL DEFAULT '',
+                    abstract_url TEXT NOT NULL DEFAULT '',
+                    full_text_url TEXT NOT NULL DEFAULT '',
+                    pdf_url TEXT NOT NULL DEFAULT '',
                     source_id TEXT NOT NULL DEFAULT '',
                     pdf_path TEXT NOT NULL DEFAULT '',
                     labels_json TEXT NOT NULL DEFAULT '[]',
@@ -245,6 +249,21 @@ class Ledger:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
                 );
+                CREATE TABLE IF NOT EXISTS paper_question_analyses (
+                    analysis_id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    research_question_id TEXT NOT NULL DEFAULT '',
+                    intent_id TEXT NOT NULL DEFAULT '',
+                    research_question TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    reading_raw_output TEXT NOT NULL DEFAULT '',
+                    generated_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(paper_id, research_question_id),
+                    FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_question_analyses_paper
+                    ON paper_question_analyses(paper_id, updated_at DESC);
                 CREATE TABLE IF NOT EXISTS paper_card_links (
                     paper_id TEXT NOT NULL,
                     card_id TEXT NOT NULL,
@@ -614,6 +633,17 @@ class Ledger:
                 conn.execute("ALTER TABLE paper_shelf ADD COLUMN intake_source TEXT NOT NULL DEFAULT 'manual'")
             if "origin_links_json" not in paper_columns:
                 conn.execute("ALTER TABLE paper_shelf ADD COLUMN origin_links_json TEXT NOT NULL DEFAULT '[]'")
+            if "abstract_url" not in paper_columns:
+                conn.execute("ALTER TABLE paper_shelf ADD COLUMN abstract_url TEXT NOT NULL DEFAULT ''")
+            if "full_text_url" not in paper_columns:
+                conn.execute("ALTER TABLE paper_shelf ADD COLUMN full_text_url TEXT NOT NULL DEFAULT ''")
+            if "pdf_url" not in paper_columns:
+                conn.execute("ALTER TABLE paper_shelf ADD COLUMN pdf_url TEXT NOT NULL DEFAULT ''")
+            # Backfill the new semantic URL columns from legacy fields without
+            # changing their historical meaning. source_url was the abstract/
+            # landing page; remote PDF URLs were sometimes stored in pdf_path.
+            conn.execute("UPDATE paper_shelf SET abstract_url=source_url WHERE abstract_url='' AND source_url<>''")
+            conn.execute("UPDATE paper_shelf SET pdf_url=pdf_path WHERE pdf_url='' AND (pdf_path LIKE 'http://%' OR pdf_path LIKE 'https://%')")
             analysis_columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_analyses)").fetchall()}
             if "reading_raw_output" not in analysis_columns:
                 conn.execute("ALTER TABLE paper_analyses ADD COLUMN reading_raw_output TEXT NOT NULL DEFAULT ''")
@@ -638,7 +668,7 @@ class Ledger:
                 conn.execute("ALTER TABLE ontology_versions ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
             if "change_json" not in ontology_version_columns:
                 conn.execute("ALTER TABLE ontology_versions ADD COLUMN change_json TEXT NOT NULL DEFAULT '{}'")
-            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "18"))
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES (?, ?)", ("schema_version", "20"))
             duplicates = conn.execute(
                 "SELECT phenomenon_id FROM decisions GROUP BY phenomenon_id HAVING COUNT(*) > 1"
             ).fetchone()
@@ -2465,18 +2495,23 @@ class Ledger:
             origin_links = merge_origin_links(prior_origin_links, paper.get("origin_links", []))
             conn.execute(
                 """INSERT INTO paper_shelf
-                   (paper_id, title, authors_json, publication_year, source_url, source_id, pdf_path, labels_json, shelf_status, reading_status, asset_type, intake_source, origin_links_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (paper_id, title, authors_json, publication_year, source_url, abstract_url, full_text_url, pdf_url, source_id, pdf_path, labels_json, shelf_status, reading_status, asset_type, intake_source, origin_links_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(paper_id) DO UPDATE SET
                      title=excluded.title, authors_json=excluded.authors_json, publication_year=excluded.publication_year,
-                     source_url=excluded.source_url, source_id=excluded.source_id,
+                     source_url=CASE WHEN excluded.source_url <> '' THEN excluded.source_url ELSE paper_shelf.source_url END,
+                     abstract_url=CASE WHEN excluded.abstract_url <> '' THEN excluded.abstract_url ELSE paper_shelf.abstract_url END,
+                     full_text_url=CASE WHEN excluded.full_text_url <> '' THEN excluded.full_text_url ELSE paper_shelf.full_text_url END,
+                     pdf_url=CASE WHEN excluded.pdf_url <> '' THEN excluded.pdf_url ELSE paper_shelf.pdf_url END,
+                     source_id=excluded.source_id,
                      pdf_path=CASE WHEN excluded.pdf_path <> '' THEN excluded.pdf_path ELSE paper_shelf.pdf_path END,
                      labels_json=CASE WHEN excluded.labels_json <> '[]' THEN excluded.labels_json ELSE paper_shelf.labels_json END,
                      shelf_status=excluded.shelf_status, reading_status=excluded.reading_status,
                      asset_type=excluded.asset_type, intake_source=excluded.intake_source,
                      origin_links_json=excluded.origin_links_json, updated_at=excluded.updated_at""",
                 (paper_id, title, json.dumps(paper.get("authors", []), ensure_ascii=False), str(paper.get("publication_year", "")),
-                 str(paper.get("source_url", "")), source_id, str(paper.get("pdf_path", "")),
+                 str(paper.get("source_url", "")), str(paper.get("abstract_url", paper.get("source_url", ""))),
+                 str(paper.get("full_text_url", "")), str(paper.get("pdf_url", "")), source_id, str(paper.get("pdf_path", "")),
                  json.dumps(_clean_paper_labels(paper.get("labels", [])), ensure_ascii=False),
                  str(paper.get("shelf_status", "reference")), str(paper.get("reading_status", "unread")),
                  str(paper.get("asset_type", "paper")), str(paper.get("intake_source", "manual")),
@@ -2527,7 +2562,8 @@ class Ledger:
     def update_shelf_paper(
         self, paper_id: str, *, shelf_status: str, reading_status: str, labels: list[str] | None = None,
         title: str | None = None, authors: list[str] | None = None, publication_year: str | None = None,
-        source_url: str | None = None,
+        source_url: str | None = None, abstract_url: str | None = None,
+        full_text_url: str | None = None, pdf_url: str | None = None,
     ) -> None:
         if shelf_status not in {"core", "reference", "held", "excluded"}:
             raise ValueError("지원하지 않는 서재 상태입니다.")
@@ -2552,6 +2588,15 @@ class Ledger:
             if source_url is not None:
                 sets.append("source_url=?")
                 values.append(source_url.strip())
+            if abstract_url is not None:
+                sets.append("abstract_url=?")
+                values.append(abstract_url.strip())
+            if full_text_url is not None:
+                sets.append("full_text_url=?")
+                values.append(full_text_url.strip())
+            if pdf_url is not None:
+                sets.append("pdf_url=?")
+                values.append(pdf_url.strip())
             values.extend([now(), paper_id])
             conn.execute(f"UPDATE paper_shelf SET {', '.join(sets)}, updated_at=? WHERE paper_id=?", values)
             self._record_paper_event(conn, paper_id, "state_updated", {"importance": shelf_status, "reading_status": reading_status})
@@ -2597,6 +2642,9 @@ class Ledger:
                 "DELETE FROM paper_reading_questions WHERE paper_id=?", (paper_id,)
             ).rowcount
             conn.execute("DELETE FROM paper_abstracts WHERE paper_id=?", (paper_id,))
+            deleted["question_analyses"] = conn.execute(
+                "DELETE FROM paper_question_analyses WHERE paper_id=?", (paper_id,)
+            ).rowcount
             deleted["analysis"] = conn.execute(
                 "DELETE FROM paper_analyses WHERE paper_id=?", (paper_id,)
             ).rowcount
@@ -2631,6 +2679,53 @@ class Ledger:
                  reading_raw_output or previous.get("reading_raw_output", ""), researcher_note, timestamp if generated else "", timestamp),
             )
             self._record_paper_event(conn, paper_id, "analysis_generated" if generated else "researcher_note_updated", {})
+
+    def paper_question_analyses(self, paper_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_question_analyses WHERE paper_id=? ORDER BY updated_at DESC",
+                (paper_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def paper_question_analysis(self, paper_id: str, research_question_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_question_analyses WHERE paper_id=? AND research_question_id=?",
+                (paper_id, research_question_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_paper_question_analysis(
+        self, paper_id: str, *, research_question_id: str, intent_id: str = "",
+        research_question: str = "", summary: str = "", reading_raw_output: str = "",
+        generated: bool = False,
+    ) -> None:
+        rq_id = str(research_question_id or "").strip()
+        if not rq_id:
+            raise ValueError("연구질문별 논문 분석에는 research_question_id가 필요합니다.")
+        timestamp = now()
+        previous = self.paper_question_analysis(paper_id, rq_id) or {}
+        analysis_id = str(previous.get("analysis_id") or f"pqa-{uuid.uuid4().hex[:12]}")
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO paper_question_analyses
+                   (analysis_id, paper_id, research_question_id, intent_id, research_question, summary, reading_raw_output, generated_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(paper_id, research_question_id) DO UPDATE SET
+                     intent_id=CASE WHEN excluded.intent_id <> '' THEN excluded.intent_id ELSE paper_question_analyses.intent_id END,
+                     research_question=CASE WHEN excluded.research_question <> '' THEN excluded.research_question ELSE paper_question_analyses.research_question END,
+                     summary=CASE WHEN excluded.summary <> '' THEN excluded.summary ELSE paper_question_analyses.summary END,
+                     reading_raw_output=CASE WHEN excluded.reading_raw_output <> '' THEN excluded.reading_raw_output ELSE paper_question_analyses.reading_raw_output END,
+                     generated_at=CASE WHEN excluded.generated_at <> '' THEN excluded.generated_at ELSE paper_question_analyses.generated_at END,
+                     updated_at=excluded.updated_at""",
+                (analysis_id, paper_id, rq_id, str(intent_id or ""), str(research_question or previous.get("research_question", "")),
+                 str(summary or previous.get("summary", "")), str(reading_raw_output or previous.get("reading_raw_output", "")),
+                 timestamp if generated else str(previous.get("generated_at") or ""), timestamp),
+            )
+            self._record_paper_event(conn, paper_id, "question_analysis_generated", {
+                "research_question_id": rq_id, "intent_id": str(intent_id or ""),
+            })
 
     def paper_card_ids(self, paper_id: str) -> list[str]:
         with self.connect() as conn:

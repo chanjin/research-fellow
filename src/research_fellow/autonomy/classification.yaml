@@ -6,94 +6,149 @@ levels:
   H2: conditional-human
   H3: auto-audit-notify
 interactions:
-  - id: submit_research_question
-    category: task_entry
-    current_level: H0
-    target_level: H0
-    rationale: External research intent originates from the researcher; this is an entry boundary, not an automation target.
-    escalation_dimensions: []
-
-  - id: submit_external_advisory_request
-    category: task_entry
-    current_level: H0
-    target_level: H0
-    rationale: An external advisory request is an exogenous input that must preserve the requester's original intent and context.
-    escalation_dimensions: []
-
-  - id: select_questions_for_investigation
-    category: oversight
-    current_level: H2
-    target_level: H2
-    rationale: Low-ambiguity cases can be selected automatically; multiple competing questions still require researcher judgment.
-    escalation_dimensions: [impact, evidence_sufficiency, novelty]
-
-  - id: confirm_advisory_plan
-    category: oversight
-    current_level: H2
-    target_level: H2
-    rationale: Routine advisory plans can proceed automatically, while novel, weakly evidenced, high-impact, or conflicting cases escalate.
-    escalation_dimensions: [impact, evidence_sufficiency, novelty, conflict]
-
-  - id: resolve_pending_decision_requests
-    category: oversight
-    current_level: H1
-    target_level: H2
-    rationale: Generic durable-state decisions remain human-by-default until request kinds are risk-tiered explicitly.
-    escalation_dimensions: [impact, reversibility, evidence_sufficiency, conflict]
-
-  - id: resolve_ontology_change_reviews
-    category: oversight
-    current_level: H0
-    target_level: H1
-    rationale: Publishing ontology structure has broad downstream impact and should remain a strong human authority boundary; only low-impact changes may later become conditional.
-    escalation_dimensions: [impact, reversibility, novelty, conflict]
-
-  - id: resolve_revision_applications
-    category: oversight
-    current_level: H2
-    target_level: H2
-    rationale: Low-impact, reversible, evidence-backed revisions may auto-apply; substantive manuscript changes continue to escalate.
-    escalation_dimensions: [impact, reversibility, evidence_sufficiency]
-
-  - id: review_ontology_change
-    category: oversight
-    current_level: H1
-    target_level: H2
-    rationale: Researcher review remains the default for ontology proposals, with future exception-only review for familiar low-conflict changes.
-    escalation_dimensions: [impact, novelty, conflict]
-
-  - id: review_revision_todo_reconciliation
-    category: oversight
-    current_level: H1
-    target_level: H2
-    rationale: Backlog restructuring is human-by-default today but can move to exception review when changes are low-impact and evidence-backed.
-    escalation_dimensions: [impact, reversibility, evidence_sufficiency]
-
-  - id: inform_recent_knowledge_updates
-    category: notification
-    current_level: H3
-    target_level: H3
-    rationale: Knowledge updates do not require a response and belong in an autonomous activity/audit feed.
-    escalation_dimensions: []
-
-
-  - id: triage_research_question
-    category: oversight
-    current_level: H1
-    target_level: H2
-    rationale: Research Question 상태 변경은 연구 백로그 우선순위와 후속 탐색에 영향을 주므로 현재는 사람 기본 판단으로 유지한다.
-    escalation_dimensions: [impact, novelty, evidence_sufficiency]
-
-  - id: review_external_advisory_interpretation
-    category: oversight
-    current_level: H1
-    target_level: H2
-    rationale: 외부 요청을 내부 연구질문으로 재해석하는 과정은 의미 왜곡 위험이 있어 현재는 연구자 검토를 기본으로 한다.
-    escalation_dimensions: [impact, novelty, conflict]
-
-  - id: review_paper_reading_claim
-    category: oversight
-    current_level: H1
-    target_level: H2
-    rationale: 검토 결과가 장기 지식자산을 직접 생성하거나 기존 지식을 보강하므로 현재는 사람 기본 판단으로 유지한다.
-    escalation_dimensions: [evidence_sufficiency, novelty, conflict, impact]
+- id: submit_research_question
+  category: task_entry
+  current_level: H0
+  target_level: H0
+  rationale: External research intent originates from the researcher; this is an entry
+    boundary, not an automation target.
+  escalation_dimensions: []
+- id: submit_external_advisory_request
+  category: task_entry
+  current_level: H0
+  target_level: H0
+  rationale: An external advisory request is an exogenous input that must preserve
+    the requester's original intent and context.
+  escalation_dimensions: []
+- id: select_questions_for_investigation
+  category: oversight
+  current_level: H2
+  target_level: H2
+  rationale: Low-ambiguity cases can be selected automatically; multiple competing
+    questions still require researcher judgment.
+  escalation_dimensions:
+  - impact
+  - evidence_sufficiency
+  - novelty
+- id: confirm_advisory_plan
+  category: oversight
+  current_level: H2
+  target_level: H2
+  rationale: Routine advisory plans can proceed automatically, while novel, weakly
+    evidenced, high-impact, or conflicting cases escalate.
+  escalation_dimensions:
+  - impact
+  - evidence_sufficiency
+  - novelty
+  - conflict
+- id: resolve_pending_decision_requests
+  category: oversight
+  current_level: H1
+  target_level: H2
+  rationale: Generic durable-state decisions remain human-by-default until request
+    kinds are risk-tiered explicitly.
+  escalation_dimensions:
+  - impact
+  - reversibility
+  - evidence_sufficiency
+  - conflict
+- id: resolve_ontology_change_reviews
+  category: oversight
+  current_level: H0
+  target_level: H1
+  rationale: Publishing ontology structure has broad downstream impact and should
+    remain a strong human authority boundary; only low-impact changes may later become
+    conditional.
+  escalation_dimensions:
+  - impact
+  - reversibility
+  - novelty
+  - conflict
+- id: resolve_revision_applications
+  category: oversight
+  current_level: H2
+  target_level: H2
+  rationale: Low-impact, reversible, evidence-backed revisions may auto-apply; substantive
+    manuscript changes continue to escalate.
+  escalation_dimensions:
+  - impact
+  - reversibility
+  - evidence_sufficiency
+- id: review_ontology_change
+  category: oversight
+  current_level: H1
+  target_level: H2
+  rationale: Researcher review remains the default for ontology proposals, with future
+    exception-only review for familiar low-conflict changes.
+  escalation_dimensions:
+  - impact
+  - novelty
+  - conflict
+- id: review_revision_todo_reconciliation
+  category: oversight
+  current_level: H1
+  target_level: H2
+  rationale: Backlog restructuring is human-by-default today but can move to exception
+    review when changes are low-impact and evidence-backed.
+  escalation_dimensions:
+  - impact
+  - reversibility
+  - evidence_sufficiency
+- id: inform_recent_knowledge_updates
+  category: notification
+  current_level: H3
+  target_level: H3
+  rationale: Knowledge updates do not require a response and belong in an autonomous
+    activity/audit feed.
+  escalation_dimensions: []
+- id: triage_research_question
+  category: oversight
+  current_level: H1
+  target_level: H2
+  rationale: Research Question 상태 변경은 연구 백로그 우선순위와 후속 탐색에 영향을 주므로 현재는 사람 기본 판단으로 유지한다.
+  escalation_dimensions:
+  - impact
+  - novelty
+  - evidence_sufficiency
+- id: review_external_advisory_interpretation
+  category: oversight
+  current_level: H1
+  target_level: H2
+  rationale: 외부 요청을 내부 연구질문으로 재해석하는 과정은 의미 왜곡 위험이 있어 현재는 연구자 검토를 기본으로 한다.
+  escalation_dimensions:
+  - impact
+  - novelty
+  - conflict
+- id: review_paper_reading_claim
+  category: oversight
+  current_level: H1
+  target_level: H2
+  rationale: 검토 결과가 장기 지식자산을 직접 생성하거나 기존 지식을 보강하므로 현재는 사람 기본 판단으로 유지한다.
+  escalation_dimensions:
+  - evidence_sufficiency
+  - novelty
+  - conflict
+  - impact
+- id: provide_external_llm_result
+  category: oversight
+  current_level: H0
+  target_level: H3
+  rationale: 현재 로컬 인프라 제약 때문에 외부 고성능 LLM 실행을 사람이 매개한다. 향후 충분한 로컬 서버가 확보되면 이 경계는 제거
+    가능한 실행 인프라 경계다.
+  escalation_dimensions: []
+- id: review_literature_candidates
+  category: oversight
+  current_level: H1
+  target_level: H2
+  rationale: 논문을 연구자 서재함에 편입하는 것은 연구자-facing 근거 자산의 범위를 정하는 판단이므로 명시적 위임 전까지 사람 기본
+    판단으로 유지한다.
+  escalation_dimensions:
+  - impact
+  - evidence_sufficiency
+  - novelty
+- id: request_followup_literature_direction
+  category: task_entry
+  current_level: H0
+  target_level: H1
+  rationale: 추가 문헌 조사의 방향은 연구자가 현재 연구상황에서 새로 위임하는 탐색 범위이므로 현재는 명시적 사람 입력을 요구한다. 향후 Agent가 지식 공백 후보를 제안하더라도 최종 방향 선택은 연구자에게 둔다.
+  escalation_dimensions: []

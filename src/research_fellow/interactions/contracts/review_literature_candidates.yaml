@@ -1,0 +1,23 @@
+interaction: ajd-interaction/v0.1
+id: review_literature_candidates
+actor: researcher
+purpose: >
+  외부 LLM이 발견한 문헌 후보를 한 편씩 검토한다. 보존할 논문은 현재 연구질문과 연결하여 서재함에 등록하고, 같은 Review 단계에서 연구질문 관점의 원문 해석·요약·지식카드 후보 생성까지 수행한다. Knowledge Card 승인은 별도 Decision에서 수행한다.
+mode: select
+uses:
+  required:
+    - discovered_candidates
+  optional: []
+produces:
+  - selected_papers
+data:
+  discovered_candidates:
+    type: PaperRef
+    cardinality: many
+  selected_papers:
+    type: PaperRef
+    cardinality: many
+completion:
+  requires_response: true
+constraints:
+  min_selection: 0

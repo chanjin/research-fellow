@@ -1,0 +1,37 @@
+capability: ajd-capability-contract/v0.2
+id: start_research_question_exploration
+kind: action
+purpose: 신규 Research Question을 기존 M2→M1 Curation Intent 경로에 연결하여 근거 탐색을 시작한다.
+uses:
+  required:
+    - research_question
+    - review_id
+    - matched_knowledge_count
+    - exploration_need
+    - inspection_summary
+  optional: []
+produces:
+  - status
+  - dispatched_intents
+  - next_action
+  - human_attention_required
+data:
+  research_question:
+    type: ResearchQuestion
+  review_id:
+    type: Identifier
+  matched_knowledge_count:
+    type: Count
+  exploration_need:
+    type: Text
+  inspection_summary:
+    type: Text
+  status:
+    type: Status
+  dispatched_intents:
+    type: CurationIntent
+    cardinality: many
+  next_action:
+    type: Text
+  human_attention_required:
+    type: Boolean

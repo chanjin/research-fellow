@@ -74,8 +74,8 @@ BASE_POLICY = PromptPolicy(
             "Do not claim that an abstract establishes findings that require full-text verification.",
         ),
         "search_strategy": (
-            "Generate English scholarly search concepts and Boolean variants that retain the research context, not only isolated keywords.",
-            "Use synonyms and related terminology while keeping each query interpretable and reasonably selective.",
+            "Find real academic papers directly with web-enabled external search while preserving the full approved research context.",
+            "Verify paper identity and source links; never invent bibliographic metadata or reduce the task to Boolean-query generation.",
         ),
         "knowledge_card": (
             "Draft an atomic reusable knowledge claim with enough context to interpret it later.",

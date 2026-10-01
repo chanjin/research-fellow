@@ -67,15 +67,14 @@ def request_curation_intent(ledger: Ledger, title: str, question: str, labels: l
 
 
 def complete_intent(ledger: Ledger, intent: dict[str, Any], finding: str) -> bool:
-    """Close an approved M1 task once and publish one observable result."""
-    if not ledger.transition(intent["phenomenon_id"], "ready", "completed"):
-        return False
-    ledger.record(
-        intent["case_id"], "knowledge_update", "m1", ["m2", "researcher"], "curation_result",
-        {"title": f"M1 탐색 결과: {intent['payload']['title']}", "finding": finding},
-        intent["phenomenon_id"], status="completed",
-    )
-    return True
+    """Close an approved M1 literature task without promoting it to knowledge.
+
+    The researcher-facing literature report is recorded by the workflow before
+    this transition. Literature discovery/comparison is provisional evidence; a
+    ``knowledge_update`` is emitted only after an explicit knowledge approval
+    path (for example ``decide_request`` or ``review_paper_reading_claim``).
+    """
+    return ledger.transition(intent["phenomenon_id"], "ready", "completed")
 
 
 def create_external_case(ledger: Ledger, requester: str, question: str, context: str, interpretation: str) -> str:

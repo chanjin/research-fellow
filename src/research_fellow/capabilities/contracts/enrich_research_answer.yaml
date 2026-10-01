@@ -1,0 +1,14 @@
+capability: ajd-capability-contract/v0.2
+id: enrich_research_answer
+kind: action
+purpose: RQ 직접 근거 기반 1차 문서를 기존 워크스페이스 지식카드와 문헌정보로 보강하여 2차 최종 문서를 만든다.
+uses:
+  required: [research_question, first_answer_document, supporting_cards, supporting_papers]
+  optional: []
+produces: [answer_draft]
+data:
+  research_question: {type: ResearchQuestion}
+  first_answer_document: {type: ResearchAnswerDraft}
+  supporting_cards: {type: KnowledgeCard, cardinality: many}
+  supporting_papers: {type: PaperRef, cardinality: many}
+  answer_draft: {type: ResearchAnswerDraft}

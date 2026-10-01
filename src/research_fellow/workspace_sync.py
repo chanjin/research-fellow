@@ -30,6 +30,7 @@ SYNC_TABLES = (
     "paper_shelf",
     "paper_abstracts",
     "paper_analyses",
+    "paper_question_analyses",
     "paper_card_links",
     "paper_reading_questions",
     "paper_reading_reviews",
@@ -59,6 +60,7 @@ SYNC_TABLES = (
     "auto_research_runs",
     "auto_research_failures",
     "manual_recovery_attempts",
+    "autonomy_decisions",
 )
 
 # Every durable table must be classified explicitly. User-visible research
@@ -438,6 +440,53 @@ class WorkspaceSync:
                            DO UPDATE SET row_hash=excluded.row_hash, synced_at=excluded.synced_at""",
                         (self.server_id, table, key, row_hash, timestamp),
                     )
+
+    def pull_from_server(self) -> SyncPreview:
+        """Apply only non-conflicting server-to-local changes.
+
+        This is safe for startup hydration: it never uploads local rows or overwrites
+        conflicts. Missing/stale local replicas can therefore recover durable workspace
+        state without turning application startup into a bidirectional sync operation.
+        """
+        if not self.server_exists:
+            return SyncPreview([])
+        preview = self.preview()
+        applied: list[SyncChange] = []
+        touched: dict[str, set[str]] = {}
+        for change in preview.actionable:
+            if change.direction != "server→local":
+                continue
+            self._copy_row(self.server_db, self.local_db, change.table, change.key)
+            applied.append(change)
+            touched.setdefault(change.table, set()).add(change.key)
+
+        # Establish a baseline for rows that are already identical as well as
+        # rows just hydrated. This prevents a later absence from being mistaken
+        # for a newly-created local/server row.
+        for table in SYNC_TABLES:
+            local_rows, _ = self._rows(self.local_db, table)
+            server_rows, _ = self._rows(self.server_db, table)
+            baseline = self._baseline(table)
+            for key in set(local_rows) & set(server_rows):
+                if key not in baseline and _row_hash(table, local_rows[key]) == _row_hash(table, server_rows[key]):
+                    touched.setdefault(table, set()).add(key)
+        for table, keys in touched.items():
+            self._refresh_baseline(table, keys)
+
+        if applied:
+            timestamp = _utcnow()
+            summary = {
+                "startup_pull": True,
+                "applied": len(applied),
+                "conflicts": len(preview.conflicts),
+                "counts": {"server→local": len(applied)},
+            }
+            with self._connect(self.local_db) as conn:
+                conn.execute(
+                    "INSERT INTO sync_runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (f"sync-{uuid.uuid4().hex[:12]}", self.server_id, timestamp, timestamp, len(applied), len(preview.conflicts), _canonical_json(summary)),
+                )
+        return SyncPreview(applied + preview.conflicts)
 
     def apply(self) -> SyncPreview:
         if not self.server_exists:

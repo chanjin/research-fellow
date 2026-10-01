@@ -71,6 +71,11 @@ capabilities:
     type: python
     module: research_fellow.application.paper_todo_workflow
     symbol: _group_revision_todos
+- id: inspect_research_question_context
+  implementation:
+    type: python
+    module: research_fellow.application.research_question_progression
+    symbol: _inspect_research_question_context
 - id: investigate_evidence
   implementation:
     type: python
@@ -101,6 +106,11 @@ capabilities:
     type: python
     module: research_fellow.application.knowledge_curation
     symbol: _prepare_knowledge_candidates
+- id: preserve_selected_literature_candidates
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _preserve_selected_literature_candidates
 - id: prioritize_research_questions
   implementation:
     type: python
@@ -131,11 +141,6 @@ capabilities:
     type: python
     module: research_fellow.application.auto_literature
     symbol: _record_search_failure
-- id: review_full_texts
-  implementation:
-    type: python
-    module: research_fellow.application.auto_literature
-    symbol: _review_full_texts
 - id: review_manuscript
   implementation:
     type: python
@@ -156,6 +161,11 @@ capabilities:
     type: python
     module: research_fellow.application.paper_coauthor_workflow
     symbol: _revise_target_sentence
+- id: start_research_question_exploration
+  implementation:
+    type: python
+    module: research_fellow.application.research_question_progression
+    symbol: _start_research_question_exploration
 - id: submit_curation_decisions
   implementation:
     type: python
@@ -166,13 +176,49 @@ capabilities:
     type: python
     module: research_fellow.application.advisory_workflow
     symbol: _synthesize_advisory_response
-- id: synthesize_literature_report
+- id: prepare_selected_paper_review
   implementation:
     type: python
     module: research_fellow.application.auto_literature
-    symbol: _synthesize_literature_report
+    symbol: _prepare_selected_paper_review
+- id: apply_selected_paper_review
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _apply_selected_paper_review
+- id: synthesize_literature_report_deterministic
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _synthesize_literature_report_deterministic
+- id: stage_literature_knowledge_candidates
+  implementation:
+    type: python
+    module: research_fellow.application.auto_literature
+    symbol: _stage_literature_knowledge_candidates
 - id: verify_todo_resolution
   implementation:
     type: python
     module: research_fellow.application.paper_todo_workflow
     symbol: _verify_todo_resolution
+
+- id: prepare_research_answer_context
+  implementation:
+    type: python
+    module: research_fellow.application.research_answer
+    symbol: _prepare_research_answer_context
+- id: draft_research_answer
+  implementation:
+    type: python
+    module: research_fellow.application.research_answer
+    symbol: _draft_research_answer
+- id: enrich_research_answer
+  implementation:
+    type: python
+    module: research_fellow.application.research_answer
+    symbol: _enrich_research_answer
+- id: publish_research_answer_draft
+  implementation:
+    type: python
+    module: research_fellow.application.research_answer
+    symbol: _publish_research_answer_draft

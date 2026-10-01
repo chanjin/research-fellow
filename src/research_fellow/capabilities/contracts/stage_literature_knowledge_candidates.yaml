@@ -1,0 +1,14 @@
+capability: ajd-capability-contract/v0.2
+id: stage_literature_knowledge_candidates
+kind: action
+purpose: Review 단계에서 이미 저장된 Paper Summary와 Knowledge Card 승인 요청을 읽어 문헌조사 라운드의 결과 ID로 집계한다. 새 지식후보를 중복 생성하지 않는다.
+uses:
+  required: [reviewed_papers, preserved_papers, search_profile]
+  optional: []
+produces: [paper_analysis_ids, knowledge_request_ids]
+data:
+  reviewed_papers: {type: PaperRef, cardinality: many}
+  preserved_papers: {type: PaperRef, cardinality: many}
+  search_profile: {type: SearchProfile}
+  paper_analysis_ids: {type: Identifier, cardinality: many}
+  knowledge_request_ids: {type: Identifier, cardinality: many}

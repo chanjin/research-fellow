@@ -1,0 +1,27 @@
+capability: ajd-capability-contract/v0.2
+id: preserve_selected_literature_candidates
+kind: action
+purpose: 연구자가 선택한 문헌 후보만 Paper Shelf에 보존하고 심화 검토 대상을 제한한다.
+uses:
+  required:
+    - selected_papers
+    - search_outcome
+    - search_profile
+  optional: []
+produces:
+  - preserved_papers
+  - search_outcome
+  - paper_selection_completed
+data:
+  selected_papers:
+    type: PaperRef
+    cardinality: many
+  search_outcome:
+    type: SearchOutcome
+  search_profile:
+    type: SearchProfile
+  preserved_papers:
+    type: PaperRef
+    cardinality: many
+  paper_selection_completed:
+    type: Boolean

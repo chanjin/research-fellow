@@ -28,17 +28,231 @@ def _render_multi_select(st: Any, interaction_id: str, inputs: Mapping[str, Any]
     input_name = contract.required_inputs[0]; output_name = contract.outputs[0]
     items = list(inputs.get(input_name) or []); option_by_key = {str(index): item for index, item in enumerate(items)}
     with st.form(f"interaction-{key}"):
-        selected_keys = st.multiselect(str(renderer["title"]), list(option_by_key), format_func=lambda value: _item_label(option_by_key[value], str(renderer["item_label"])), help=str(renderer.get("help") or "") or None, key=f"interaction-{key}-selection")
-        for selected_key in selected_keys:
-            item = option_by_key[selected_key]
-            if isinstance(item, Mapping):
+        st.markdown(f"**{renderer['title']}**")
+        help_text = str(renderer.get("help") or "").strip()
+        if help_text:
+            st.caption(help_text)
+        if items:
+            st.caption(f"후보 {len(items)}건 · 아래 결과를 확인한 뒤 보존할 항목을 선택하세요.")
+            for index, item in enumerate(items, start=1):
+                if not isinstance(item, Mapping):
+                    continue
+                st.markdown(f"**{index}. {_item_label(item, str(renderer['item_label']))}**")
                 values = [str(item.get(field) or "").strip() for field in list(renderer.get("item_detail") or [])]
                 values = [value for value in values if value]
-                if values: st.caption(" · ".join(values))
+                if values:
+                    st.caption(" · ".join(values))
+                link = str(item.get("url") or item.get("source_url") or "").strip()
+                pdf_link = str(item.get("pdf_url") or "").strip()
+                links = []
+                if link:
+                    links.append(f"[원문]({link})")
+                if pdf_link and pdf_link != link:
+                    links.append(f"[PDF]({pdf_link})")
+                if links:
+                    st.markdown(" · ".join(links))
+                if index < len(items):
+                    st.divider()
+        selected_keys = st.multiselect("서재함에 보존할 항목", list(option_by_key), format_func=lambda value: _item_label(option_by_key[value], str(renderer["item_label"])), key=f"interaction-{key}-selection")
         submitted = st.form_submit_button(str(renderer.get("submit_label") or "Submit"), type="primary")
     selected = [option_by_key[value] for value in selected_keys]
-    if submitted and not selected and renderer.get("empty_label"): st.info(str(renderer["empty_label"]))
+    min_selection = int((contract.raw.get("constraints") or {}).get("min_selection") or 0)
+    if submitted and len(selected) < min_selection:
+        st.info(str(renderer.get("empty_label") or f"최소 {min_selection}개를 선택하세요."))
+        submitted = False
+    elif submitted and not selected and renderer.get("empty_label"):
+        st.info(str(renderer["empty_label"]))
     return InteractionRenderResult(interaction_id, submitted, {output_name: selected})
+
+
+
+def _render_sequential_paper_review(
+    st: Any,
+    interaction_id: str,
+    inputs: Mapping[str, Any],
+    *,
+    key: str,
+    profile: str,
+    item_action: Any | None = None,
+) -> InteractionRenderResult:
+    """Review one literature candidate completely before moving to the next.
+
+    Preserved papers are linked to the current RQ immediately, then reviewed
+    against that RQ in the same Review card.  The generated Knowledge Card
+    candidates are shown read-only here; approval is intentionally deferred to
+    Attention > Decisions.
+    """
+    contract = interaction_contract(interaction_id)
+    renderer = interaction_binding(interaction_id, profile).renderer
+    input_name = contract.required_inputs[0]
+    output_name = contract.outputs[0]
+    items = [dict(item) for item in list(inputs.get(input_name) or []) if isinstance(item, Mapping)]
+    index_key = f"interaction-{key}-paper-index"
+    selected_key = f"interaction-{key}-paper-selected"
+    reviewed_key = f"interaction-{key}-paper-reviewed"
+    active_key = f"interaction-{key}-paper-active"
+    index = int(st.session_state.get(index_key, 0) or 0)
+    selected = list(st.session_state.get(selected_key, []) or [])
+    reviewed = list(st.session_state.get(reviewed_key, []) or [])
+    active = dict(st.session_state.get(active_key, {}) or {})
+
+    st.markdown(f"**{renderer['title']}**")
+    if renderer.get('help'):
+        st.caption(str(renderer['help']))
+    if not items:
+        return InteractionRenderResult(interaction_id, True, {output_name: []})
+
+    if index >= len(items):
+        st.success(f"후보 {len(items)}편 검토 완료 · 서재함 연결 {len(selected)}편")
+        st.caption("보존한 논문의 RQ 관점 요약과 Knowledge Card 후보 생성까지 완료되었습니다. Knowledge Card 승인은 Decisions에서 계속합니다.")
+        submitted = st.button(str(renderer.get('submit_label') or '문헌조사 Review 완료'), type='primary', key=f"interaction-{key}-paper-finish")
+        if submitted:
+            result_selected = list(selected)
+            for state_key in (index_key, selected_key, reviewed_key, active_key):
+                st.session_state.pop(state_key, None)
+            return InteractionRenderResult(interaction_id, True, {output_name: result_selected})
+        return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
+
+    item = items[index]
+    title = str(item.get('title') or 'Untitled paper')
+    st.caption(f"논문 {index + 1} / {len(items)}")
+    st.markdown(f"### {title}")
+    authors = item.get('authors') or []
+    authors_text = ', '.join(str(x) for x in authors if str(x).strip()) if isinstance(authors, list) else str(authors)
+    meta = [x for x in [authors_text, str(item.get('published') or item.get('publication_year') or ''), f"relevance {item.get('relevance_score')}" if item.get('relevance_score') is not None else ''] if x]
+    if meta:
+        st.caption(' · '.join(meta))
+
+    if bool(item.get('already_in_library')):
+        linked = [str(x.get('question') or '').strip() for x in (item.get('linked_research_questions') or []) if str(x.get('question') or '').strip()]
+        st.info("이미 서재함에 있는 논문입니다." + ((" 연결된 연구질문: " + " · ".join(linked[:4])) if linked else ""))
+
+    why = str(item.get('why_relevant') or '').strip()
+    if why:
+        st.write(f"**Why relevant:** {why}")
+    summary = str(item.get('summary') or item.get('abstract_or_summary') or '').strip()
+    if summary:
+        with st.expander('초록 / 탐색 요약', expanded=True):
+            st.write(summary)
+
+    abstract_url = str(item.get('abstract_url') or item.get('source_url') or item.get('url') or '').strip()
+    full_text_url = str(item.get('full_text_url') or '').strip()
+    pdf_url = str(item.get('pdf_url') or '').strip()
+    link_cols = st.columns(3)
+    if abstract_url:
+        link_cols[0].link_button('초록 / 서지', abstract_url, use_container_width=True)
+    if full_text_url:
+        link_cols[1].link_button('원문 URL', full_text_url, use_container_width=True)
+    if pdf_url:
+        link_cols[2].link_button('PDF', pdf_url, use_container_width=True)
+    if not any((abstract_url, full_text_url, pdf_url)):
+        st.warning('검증된 논문 URL이 없습니다.')
+
+    edited_full_text = st.text_input(
+        '원문 URL 직접 보정',
+        value=str(active.get('full_text_url') or full_text_url),
+        key=f"interaction-{key}-paper-fulltext-{index}",
+        help='탐색 결과에 원문 URL이 없거나 잘못된 경우 연구자가 직접 입력할 수 있습니다.',
+    ).strip()
+
+    # Once preserved, this paper stays in review mode until its summary/cards are
+    # generated. This prevents the Review card from disappearing into another tab.
+    if active and int(active.get('index', -1)) == index:
+        paper_id = str(active.get('paper_id') or '')
+        st.success('서재함에 연결되었습니다. 이제 이 연구질문 관점에서 논문을 해석합니다.')
+        prompt = str(active.get('prompt') or '').strip()
+        if prompt:
+            st.caption('외부 LLM에 아래 Prompt를 전달하고 결과 JSON을 붙여넣으세요.')
+            st.code(prompt, language=None)
+        response = st.text_area(
+            'LLM 응답 붙여넣기',
+            value=str(active.get('response') or ''),
+            height=260,
+            key=f"interaction-{key}-paper-review-response-{index}",
+        )
+        if not active.get('review_result'):
+            if st.button('논문 해석 · Knowledge Card 후보 생성', type='primary', key=f"interaction-{key}-paper-apply-review-{index}"):
+                if not response.strip():
+                    st.error('LLM 응답을 붙여넣어 주세요.')
+                else:
+                    enriched = dict(item)
+                    enriched['paper_id'] = paper_id
+                    enriched['full_text_url'] = edited_full_text
+                    enriched['review_response'] = response
+                    try:
+                        result = item_action(enriched, 'review_response') if callable(item_action) else {}
+                    except Exception as error:
+                        st.error(f"논문 리뷰 결과를 반영하지 못했습니다: {error}")
+                        return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
+                    active['response'] = response
+                    active['review_result'] = dict(result or {})
+                    st.session_state[active_key] = active
+                    st.rerun()
+        else:
+            result = dict(active.get('review_result') or {})
+            paper_summary = str(result.get('summary') or '').strip()
+            if paper_summary:
+                st.markdown('#### Summary')
+                st.write(paper_summary)
+            cards = list(result.get('knowledge_cards') or [])
+            st.markdown(f"#### Knowledge Card 후보 · {len(cards)}건")
+            if not cards:
+                st.caption('생성된 Knowledge Card 후보가 없습니다.')
+            for card_index, card in enumerate(cards, start=1):
+                with st.container(border=True):
+                    st.markdown(f"**{card_index}. {card.get('title') or 'Untitled'}**")
+                    if card.get('claim'):
+                        st.markdown(f"**Claim**  \n{card.get('claim')}")
+                    if card.get('evidence_excerpt'):
+                        st.markdown(f"**Evidence**  \n{card.get('evidence_excerpt')}")
+                    if card.get('limits'):
+                        st.markdown(f"**Limits**  \n{card.get('limits')}")
+                    labels = list(card.get('labels') or [])
+                    if labels:
+                        st.caption('Labels · ' + ' · '.join(str(x) for x in labels))
+            st.caption('이 후보들은 읽기 전용입니다. 승인·보류·거절은 Attention > Decisions에서 진행합니다.')
+            if st.button('이 논문 검토 완료 · 다음', type='primary', key=f"interaction-{key}-paper-reviewed-next-{index}"):
+                chosen = dict(item)
+                chosen['paper_id'] = paper_id
+                chosen['full_text_url'] = edited_full_text
+                chosen['paper_summary'] = paper_summary
+                chosen['knowledge_candidates'] = list((result.get('reviewed') or {}).get('knowledge_candidates') or [])
+                chosen['knowledge_request_ids'] = list(result.get('knowledge_request_ids') or [])
+                selected.append(chosen)
+                reviewed.append({'source_id': str(item.get('source_id') or ''), 'decision': 'preserve_and_review'})
+                st.session_state[selected_key] = selected
+                st.session_state[reviewed_key] = reviewed
+                st.session_state[index_key] = index + 1
+                st.session_state.pop(active_key, None)
+                st.rerun()
+        return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
+
+    col_keep, col_skip = st.columns(2)
+    keep_label = '서재함 연결 · 논문 리뷰' if bool(item.get('already_in_library')) else '서재함에 보존 · 논문 리뷰'
+    keep = col_keep.button(keep_label, type='primary', key=f"interaction-{key}-paper-keep-{index}")
+    skip = col_skip.button('이번 라운드에서 제외 · 다음', key=f"interaction-{key}-paper-skip-{index}")
+    if keep:
+        updated = dict(item)
+        updated['full_text_url'] = edited_full_text
+        try:
+            persisted = item_action(updated, 'preserve') if callable(item_action) else {}
+        except Exception as error:
+            st.error(f"서재함 연결에 실패했습니다: {error}")
+            return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
+        paper = persisted.get('paper') if isinstance(persisted, Mapping) and isinstance(persisted.get('paper'), Mapping) else {}
+        paper_id = str(paper.get('paper_id') or '')
+        if not paper_id:
+            st.error('서재함 논문 ID를 확인하지 못했습니다.')
+            return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
+        prompt = str((persisted or {}).get('review_prompt') or '') if isinstance(persisted, Mapping) else ''
+        st.session_state[active_key] = {'index': index, 'paper_id': paper_id, 'prompt': prompt, 'full_text_url': edited_full_text}
+        st.rerun()
+    if skip:
+        reviewed.append({'source_id': str(item.get('source_id') or ''), 'decision': 'exclude'})
+        st.session_state[reviewed_key] = reviewed
+        st.session_state[index_key] = index + 1
+        st.rerun()
+    return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
 
 def _render_confirm(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, key: str, profile: str) -> InteractionRenderResult:
     contract = interaction_contract(interaction_id)
@@ -66,6 +280,84 @@ def _render_confirm(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, 
 
 
 
+def _render_knowledge_card_decision(
+    st: Any,
+    interaction_id: str,
+    request: Mapping[str, Any],
+    *,
+    key: str,
+    output_name: str,
+) -> InteractionRenderResult:
+    payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+    card = payload.get("card") if isinstance(payload.get("card"), Mapping) else {}
+    request_id = str(request.get("phenomenon_id") or request.get("request_id") or "")
+
+    st.markdown("**지식카드 후보 검토**")
+    rq = str(payload.get("research_question") or "").strip()
+    if rq:
+        st.caption(f"Research Question · {rq}")
+
+    title = str(card.get("title") or payload.get("title") or "지식카드 후보").strip()
+    st.markdown(f"### {title}")
+
+    claim = str(card.get("claim") or "").strip()
+    if claim:
+        st.markdown("**Claim**")
+        st.write(claim)
+
+    context = str(card.get("context") or "").strip()
+    if context:
+        st.markdown("**Context**")
+        st.write(context)
+
+    implication = str(card.get("implication") or "").strip()
+    if implication:
+        st.markdown("**Implication**")
+        st.write(implication)
+
+    evidence = str(card.get("evidence_excerpt") or card.get("source_excerpt") or "").strip()
+    if evidence:
+        st.markdown("**Evidence**")
+        st.write(evidence)
+
+    conditions = str(card.get("conditions") or "").strip()
+    if conditions:
+        st.markdown("**Conditions**")
+        st.write(conditions)
+
+    limits = str(card.get("limits") or "").strip()
+    if limits:
+        st.markdown("**Limits**")
+        st.write(limits)
+
+    labels = [str(x).strip() for x in (card.get("labels") or []) if str(x).strip()]
+    if labels:
+        st.caption("Labels · " + " · ".join(labels))
+
+    provenance = card.get("provenance") if isinstance(card.get("provenance"), Mapping) else {}
+    source_name = str(provenance.get("source_name") or "").strip()
+    if source_name:
+        st.caption(f"Source · {source_name}")
+
+    note = st.text_area("연구자 의견 (선택)", key=f"interaction-{key}-comment", height=80)
+    c1, c2, c3 = st.columns(3)
+    approved = c1.button("지식카드 승인", type="primary", key=f"interaction-{key}-approve")
+    deferred = c2.button("보완 요청", key=f"interaction-{key}-defer")
+    rejected = c3.button("반려", key=f"interaction-{key}-reject")
+
+    if approved:
+        decision = "approved"
+    elif deferred:
+        decision = "deferred"
+    elif rejected:
+        decision = "rejected"
+    else:
+        decision = ""
+    submitted = bool(decision and request_id)
+    resolutions = [{"request_id": request_id, "decision": decision, "note": note.strip()}] if submitted else []
+    return InteractionRenderResult(interaction_id, submitted, {output_name: resolutions})
+
+
 def _render_approval(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, key: str, profile: str) -> InteractionRenderResult:
     contract = interaction_contract(interaction_id)
     binding = interaction_binding(interaction_id, profile)
@@ -73,6 +365,12 @@ def _render_approval(st: Any, interaction_id: str, inputs: Mapping[str, Any], *,
     input_name = contract.required_inputs[0]
     output_name = contract.outputs[0]
     items = list(inputs.get(input_name) or [])
+    if interaction_id == "resolve_pending_decision_requests" and len(items) == 1:
+        request = items[0] if isinstance(items[0], Mapping) else {}
+        payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+        card = payload.get("card") if isinstance(payload.get("card"), Mapping) else {}
+        if str(request.get("subject_type") or "") == "knowledge_card" and card:
+            return _render_knowledge_card_decision(st, interaction_id, request, key=key, output_name=output_name)
     id_field = str(renderer["item_id"])
     label_field = str(renderer["item_label"])
     item_by_id = {str(_field_value(item, id_field)): item for item in items}
@@ -308,16 +606,45 @@ def _render_message(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, 
             st.caption(" · ".join(details))
     return InteractionRenderResult(interaction_id, False, {})
 
-def render_interaction(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, key: str, profile: str = "default") -> InteractionRenderResult:
+
+def _render_external_llm(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, key: str, profile: str) -> InteractionRenderResult:
+    contract = interaction_contract(interaction_id)
+    binding = interaction_binding(interaction_id, profile)
+    renderer = binding.renderer
+    task = dict(inputs.get(contract.required_inputs[0]) or {})
+    prompt = str(task.get("prompt") or "")
+    with st.form(f"interaction-{key}"):
+        st.markdown(f"**{renderer['title']}**")
+        if renderer.get("help"):
+            st.caption(str(renderer["help"]))
+        stage = str(task.get("stage") or "")
+        if stage:
+            st.caption(f"Stage: `{stage}` · local auto-call disabled by execution policy")
+        st.caption(str(renderer.get("prompt_label") or "Prompt") + " · 오른쪽 위 복사 버튼으로 전체 프롬프트를 복사할 수 있습니다.")
+        # st.code intentionally replaces a disabled text area: Streamlit renders a
+        # native copy-to-clipboard control while preserving the exact prompt text.
+        st.code(prompt, language=None)
+        response = st.text_area(str(renderer.get("response_label") or "Response"), value="", height=300, key=f"interaction-{key}-response", placeholder="외부 LLM의 전체 응답을 붙여 넣으세요.")
+        submitted = st.form_submit_button(str(renderer.get("submit_label") or "Validate and continue"), type="primary")
+    if submitted and not response.strip():
+        st.info("외부 LLM 응답을 붙여 넣으세요.")
+        submitted = False
+    return InteractionRenderResult(interaction_id, bool(submitted), {contract.outputs[0]: response.strip()})
+
+def render_interaction(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, key: str, profile: str = "default", item_action: Any | None = None) -> InteractionRenderResult:
     contract = interaction_contract(interaction_id); binding = interaction_binding(interaction_id, profile)
     missing = [name for name in contract.required_inputs if name not in inputs]
     if missing: raise ValueError(f"Missing interaction inputs {missing}: {interaction_id}")
     if binding.renderer_type == "message": return _render_message(st, interaction_id, inputs, key=key, profile=profile)
     if binding.renderer_type == "text_input": return _render_text_input(st, interaction_id, inputs, key=key, profile=profile)
-    if binding.renderer_type == "multi_select": return _render_multi_select(st, interaction_id, inputs, key=key, profile=profile)
+    if binding.renderer_type == "multi_select":
+        if interaction_id == "review_literature_candidates":
+            return _render_sequential_paper_review(st, interaction_id, inputs, key=key, profile=profile, item_action=item_action)
+        return _render_multi_select(st, interaction_id, inputs, key=key, profile=profile)
     if binding.renderer_type == "confirm": return _render_confirm(st, interaction_id, inputs, key=key, profile=profile)
     if binding.renderer_type == "approval": return _render_approval(st, interaction_id, inputs, key=key, profile=profile)
     if binding.renderer_type == "review_form": return _render_review_form(st, interaction_id, inputs, key=key, profile=profile)
+    if binding.renderer_type == "external_llm": return _render_external_llm(st, interaction_id, inputs, key=key, profile=profile)
     raise NotImplementedError(f"Renderer {binding.renderer_type!r} is declared but not implemented by the Streamlit adapter yet")
 
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import json
 from typing import Any, Callable
 
 from research_fellow.application.dsl import prepare_workflow_run
@@ -9,15 +11,119 @@ from research_fellow.application.llm_retry import LLMRetryExhausted
 from research_fellow.application.llm_execution import execute_llm_stage
 from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.run_tracking import ExecutionRunTracker
-from research_fellow.application.search_profile_strategy import (
-    auto_search_strategy_prompt, keyword_prompt, parse_auto_search_strategy, parse_keyword_plan,
-)
-from research_fellow.application.search_profile_execution import run_profile
+from research_fellow.application.search_profile_strategy import auto_search_strategy_prompt
+from research_fellow.application.literature_discovery_parsers import parse_external_literature_results
 from research_fellow.services import complete_intent
+from research_fellow.domain.knowledge import KnowledgeCard
+import uuid
 from research_fellow.storage import Ledger
+from research_fellow.infrastructure.prompt_renderer import apply_review_language_policy
 
 Draft = Callable[[str], str | None]
 WORKFLOW_PATH = "m1/auto_literature_review.yaml"
+
+
+def _run_tracker(context: dict[str, Any]) -> ExecutionRunTracker:
+    tracker = context.get("run_tracker")
+    if isinstance(tracker, ExecutionRunTracker):
+        return tracker
+    run_id = str(context.get("auto_run_id") or "").strip()
+    if not run_id:
+        raise ValueError("M1 workflow is missing auto_run_id for execution tracking")
+    tracker = ExecutionRunTracker(context["ledger"], run_id)
+    context["run_tracker"] = tracker
+    return tracker
+
+
+def selected_paper_review_prompt(profile: dict[str, Any], papers: list[dict[str, Any]]) -> str:
+    payload = []
+    for paper in papers:
+        payload.append({
+            "source_id": paper.get("source_id", ""),
+            "title": paper.get("title", ""),
+            "authors": paper.get("authors", []),
+            "year": paper.get("published") or paper.get("publication_year") or "",
+            "abstract_url": paper.get("abstract_url") or paper.get("url") or paper.get("source_url") or "",
+            "full_text_url": paper.get("full_text_url") or "",
+            "pdf_url": paper.get("pdf_url") or "",
+            "discovery_summary": paper.get("summary") or "",
+            "why_relevant": paper.get("why_relevant") or "",
+        })
+    return apply_review_language_policy(
+        "You are assisting a researcher with the first review of papers selected for one research question.\n\n"
+        f"RESEARCH QUESTION\n{profile.get('question', '')}\n\n"
+        f"RESEARCH CONTEXT\n{profile.get('context', '')}\n\n"
+        f"SELECTED PAPERS\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "TASK\n"
+        "For each selected paper, open the supplied full_text_url when accessible and prepare a source-grounded first review. Use abstract_url only for metadata/abstract context; do not treat an abstract page as full text.\n"
+        "Do not invent claims that are not supported by the paper. If full text is not accessible, state that limitation and base the review only on verifiable abstract/metadata.\n"
+        "Write paper_summary, knowledge-card title, claim, evidence interpretation, limits, and review_note in Korean. Keep source_id and any short taxonomy/type tokens in English/original form.\n"
+        "For every candidate knowledge claim, propose a concise title in Korean. The title should be a short, review-friendly noun phrase or proposition label that captures the knowledge, not a truncated copy of the claim.\n\n"
+        "Return ONLY this JSON shape:\n"
+        "{\n"
+        "  \"papers\": [\n"
+        "    {\n"
+        "      \"source_id\": \"exact source_id from input\",\n"
+        "      \"paper_summary\": \"concise summary focused on the research question\",\n"
+        "      \"claims\": [\n"
+        "        {\"title\": \"concise knowledge-card title\", \"claim\": \"candidate knowledge claim\", \"evidence\": \"supporting evidence or clearly attributed result\", \"limits\": \"conditions/limitations\"}\n"
+        "      ],\n"
+        "      \"review_note\": \"access/quality caveats\"\n"
+        "    }\n"
+        "  ]\n"
+        "}"
+    )
+
+
+def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    raw = text.strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    payload = json.loads(raw)
+    rows = payload.get("papers") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("선택 논문 리뷰 응답에 papers 배열이 없습니다.")
+    by_id = {str(item.get("source_id") or ""): dict(item) for item in selected}
+    reviewed: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_id") or "")
+        base = by_id.get(source_id)
+        if base is None:
+            continue
+        claims = []
+        for claim in row.get("claims") or []:
+            if not isinstance(claim, dict):
+                continue
+            claim_text = str(claim.get("claim") or "").strip()
+            evidence = str(claim.get("evidence") or "").strip()
+            if claim_text and evidence:
+                claims.append({
+                    "title": str(claim.get("title") or "").strip(),
+                    "claim": claim_text,
+                    "evidence": evidence,
+                    "limits": str(claim.get("limits") or "").strip(),
+                })
+        summary = str(row.get("paper_summary") or "").strip()
+        if not summary:
+            continue
+        reviewed.append({
+            **base,
+            "paper_summary": summary,
+            "full_text_review": summary + ("\n" + str(row.get("review_note") or "").strip() if row.get("review_note") else ""),
+            "full_text_status": "completed",
+            "full_text_similarity": int(base.get("relevance_score") or 0),
+            "knowledge_candidates": claims,
+        })
+    if not reviewed:
+        raise ValueError("선택 논문 리뷰에서 유효한 결과를 찾지 못했습니다.")
+    return reviewed
 
 
 def literature_synthesis_prompt(profile: dict[str, Any], run: dict[str, Any], papers: list[dict[str, Any]]) -> str:
@@ -38,13 +144,11 @@ def deterministic_literature_report(profile: dict[str, Any], run: dict[str, Any]
         f"- 초록 검토: {len(run.get('candidates', []))}편",
         f"- 본문 비교 완료: {len(completed)}편",
         "",
-        "## 자동 영문 검색전략",
+        "## 문헌 발견 방식",
+        "- 외부 LLM이 승인된 연구 맥락을 바탕으로 실제 논문 후보를 직접 탐색했습니다.",
+        "",
+        "## 상위 논문",
     ]
-    for group in profile.get("concept_groups", []):
-        lines.append(f"- {group.get('concept', '')}: " + " OR ".join(group.get("terms", [])))
-    for index, query in enumerate(profile.get("boolean_queries", []), 1):
-        lines.append(f"- Q{index}: `{query}`")
-    lines.extend(["", "## 상위 논문"])
     for index, paper in enumerate(sorted(completed, key=lambda item: item.get("full_text_similarity", 0), reverse=True), 1):
         citations = paper.get("citation_count")
         citation_text = "확인 불가" if citations is None else f"{citations:,}회"
@@ -73,6 +177,8 @@ def execute_auto_literature_review(
     fulltext_drafter: Draft,
     synthesis_drafter: Draft,
     parent_run_id: str = "",
+    resume_run_id: str = "",
+    checkpoint_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Execute one M1 Curation Intent using the YAML workflow definition.
 
@@ -88,10 +194,36 @@ def execute_auto_literature_review(
         "fulltext_drafter": fulltext_drafter,
         "synthesis_drafter": synthesis_drafter,
         "parent_run_id": parent_run_id,
+        "resume_run_id": resume_run_id,
     }, globals())
 
     try:
-        return workflow.execute()
+        result = workflow.execute()
+        if result.get("status") == "waiting_for_interaction" and checkpoint_dir is not None:
+            from research_fellow.infrastructure.workflow_checkpoint import JsonFileCheckpointStore
+            intent = dict(intent_event.get("payload") or {})
+            intent_id = str(intent.get("intent_id") or intent_event.get("subject_id") or "")
+            checkpoint_id = f"m1-{intent_id}"
+            payload = workflow.checkpoint_payload(checkpoint_id=checkpoint_id)
+            profile = dict(workflow.context.get("search_profile") or {})
+            payload["resume_metadata"] = {
+                "kind": "m1_literature_review",
+                "intent_id": intent_id,
+                "research_question": str(profile.get("question") or intent.get("question") or ""),
+                "profile_id": str(profile.get("profile_id") or ""),
+            }
+            JsonFileCheckpointStore(checkpoint_dir).save(checkpoint_id, payload)
+            # The candidate-review checkpoint is now durable, so the discovery
+            # response no longer needs to act as crash/retry protection.
+            tracker = workflow.context.get("run_tracker")
+            if tracker is not None:
+                tracker.clear_manual_override(stage="search_strategy")
+            return {**result, "status": "needs_attention", "checkpoint_id": checkpoint_id}
+        if result.get("status") == "completed":
+            tracker = workflow.context.get("run_tracker")
+            if tracker is not None:
+                tracker.clear_manual_override(stage="search_strategy")
+        return result
     except LLMRetryExhausted as error:
         return _handle_retry_exhausted(workflow.context, error, workflow.definition.workflow_id)
     except Exception as error:
@@ -105,52 +237,110 @@ def _plan_literature_search(context: dict[str, Any]) -> None:
     intent_id = str(intent.get("intent_id") or intent_event.get("subject_id") or "")
     profiles = [item for item in ledger.search_profiles(include_deleted=True) if item.get("intent_id") == intent_id]
     profile = profiles[0] if profiles else ledger.create_search_profile(intent)
-    tracker = ExecutionRunTracker.start(ledger, intent_id=intent_id, stage="search_strategy")
+    tracker = ExecutionRunTracker.start(ledger, run_id=str(context.get("resume_run_id") or ""), intent_id=intent_id, stage="search_strategy")
     context.update({
         "intent_id": intent_id, "search_profile": profile,
         "auto_run_id": tracker.run_id, "run_tracker": tracker,
     })
 
     profile = context["search_profile"]
-    strategy_result = execute_llm_stage(
+    search_prompt = auto_search_strategy_prompt(profile)
+    manual_search = tracker.manual_override(stage="search_strategy")
+    discovery_result = execute_llm_stage(
         context["keyword_drafter"],
-        auto_search_strategy_prompt(profile),
+        search_prompt,
         stage="search_strategy",
-        parser=parse_auto_search_strategy,
-        accept=lambda value: bool(value.get("phrases") or value.get("queries")),
+        parser=lambda text: parse_external_literature_results(text, max_results=20),
+        accept=lambda value: bool(value.get("papers")),
+        manual_response=manual_search,
+        invalid_manual_message="외부 LLM 문헌 탐색 응답에서 유효한 논문 후보를 찾지 못했습니다.",
     )
-    tracker.enter("search_strategy", retry_count=strategy_result.attempts - 1)
-    strategy = strategy_result.value
-    phrases = strategy["phrases"]
-    core_terms = strategy["core_terms"]
-    if not phrases and not strategy["queries"]:
-        legacy_result = execute_llm_stage(
-            context["keyword_drafter"],
-            keyword_prompt(profile),
-            stage="search_strategy_legacy",
-            parser=parse_keyword_plan,
-            accept=lambda value: bool(value[0]),
-        )
-        phrases, core_terms = legacy_result.value
-        strategy = {**strategy, "phrases": phrases, "core_terms": core_terms, "queries": []}
-    if not phrases and not strategy["queries"]:
-        raise ValueError("자동 탐색용 영문 검색전략을 생성하지 못했습니다.")
-    if phrases:
-        ledger.update_search_profile(
-            profile["profile_id"], context=profile.get("context", ""), keywords=phrases,
-            core_terms=core_terms, cadence=profile.get("cadence", "manual"), is_active=True,
-        )
-        profile = next(item for item in ledger.search_profiles(include_deleted=True) if item["profile_id"] == profile["profile_id"])
-    profile = {**profile, "concept_groups": strategy["concept_groups"], "boolean_queries": strategy["queries"]}
+    # Keep a validated manual response until the workflow reaches a durable
+    # next boundary.  Clearing it here can lose the pasted response if a later
+    # step or checkpoint write fails, causing the same External-LLM Input to
+    # reappear with an empty text area on the next rerun.
+    tracker.enter("search_strategy", retry_count=discovery_result.attempts - 1)
+    discovery = discovery_result.value
+    candidates = list(discovery.get("papers") or [])
+    if not candidates:
+        raise ValueError("외부 LLM 문헌 탐색에서 유효한 논문 후보를 찾지 못했습니다.")
+
+    # SearchProfile remains the durable Intent-scoped work item, but its keywords
+    # are no longer the execution mechanism for automatic M1 discovery.
+    ledger.update_search_profile_policy(
+        profile["profile_id"],
+        context=profile.get("context", ""),
+        cadence=profile.get("cadence", "manual"),
+        is_active=True,
+    )
     context["search_profile"] = profile
+    context["discovered_candidates"] = candidates
     context["search_strategy"] = {
-        "concept_groups": profile.get("concept_groups", []),
-        "boolean_queries": profile.get("boolean_queries", []),
-        "keywords": profile.get("keywords", []),
+        "mode": "external_llm_paper_discovery",
+        "search_summary": str(discovery.get("search_summary") or "").strip(),
+        "candidate_count": len(candidates),
+        "sources": sorted({str(item.get("source") or "external_llm") for item in candidates}),
     }
 
+def _preserve_selected_literature_candidates(context: dict[str, Any]) -> None:
+    """Confirm the papers already preserved during inline researcher Review.
+
+    The Review UI writes immediately so the paper never disappears between UI
+    phases.  This workflow action is intentionally idempotent and only reconciles
+    the selected PaperRefs with the durable shelf before report finalization.
+    """
+    ledger: Ledger = context["ledger"]
+    selected = [dict(item) for item in (context.get("selected_papers") or [])]
+    profile = dict(context.get("search_profile") or {})
+    preserved: list[dict[str, Any]] = []
+    selected_source_ids: set[str] = set()
+    for item in selected:
+        source_id = str(item.get("source_id") or "").strip()
+        if source_id:
+            selected_source_ids.add(source_id)
+        paper_id = str(item.get("paper_id") or "").strip()
+        current = ledger.shelf_paper(paper_id) if paper_id else None
+        authors = item.get("authors") or []
+        if isinstance(authors, str):
+            authors = [x.strip() for x in authors.split(",") if x.strip()]
+        year = str(item.get("publication_year") or item.get("year") or item.get("published") or "")[:4]
+        abstract_url = str(item.get("abstract_url") or item.get("url") or item.get("source_url") or "").strip()
+        full_text_url = str(item.get("full_text_url") or "").strip()
+        pdf_url = str(item.get("pdf_url") or "").strip()
+        origin_links = list(item.get("origin_links") or profile.get("origin_links") or [])
+        paper = ledger.upsert_shelf_paper({
+            "paper_id": paper_id,
+            "title": str(item.get("title") or (current or {}).get("title") or "Untitled paper"),
+            "authors": list(authors) or list((current or {}).get("authors") or []),
+            "publication_year": year or str((current or {}).get("publication_year") or ""),
+            "source_url": abstract_url,
+            "abstract_url": abstract_url,
+            "full_text_url": full_text_url,
+            "pdf_url": pdf_url,
+            "source_id": source_id or str((current or {}).get("source_id") or ""),
+            "pdf_path": str((current or {}).get("pdf_path") or ""),
+            "labels": list((current or {}).get("labels") or []) or ["M1 discovery"],
+            "shelf_status": str((current or {}).get("shelf_status") or "reference"),
+            "reading_status": str((current or {}).get("reading_status") or "unread"),
+            "asset_type": "paper",
+            "intake_source": str((current or {}).get("intake_source") or "m1_external_discovery_researcher_selected"),
+            "origin_links": origin_links,
+            "abstract": str(item.get("summary") or item.get("abstract") or (current or {}).get("abstract") or ""),
+        })
+        preserved.append(paper)
+    context["preserved_papers"] = preserved
+    outcome = dict(context.get("search_outcome") or {})
+    candidates = list(outcome.get("candidates") or [])
+    outcome["candidates"] = [
+        {**item, "abstract_shortlist": True}
+        for item in candidates
+        if str(item.get("source_id") or "") in selected_source_ids
+    ]
+    context["search_outcome"] = outcome
+    context["paper_selection_completed"] = True
+
 def _record_failure(context: dict[str, Any], error: LLMRetryExhausted, stage: str, extra: dict[str, Any] | None = None) -> None:
-    tracker: ExecutionRunTracker = context["run_tracker"]
+    tracker = _run_tracker(context)
     tracker.needs_attention(
         stage=stage, error_type=error.error_type,
         error_message=error.message, retry_count=error.attempts,
@@ -159,28 +349,54 @@ def _record_failure(context: dict[str, Any], error: LLMRetryExhausted, stage: st
         error,
         context={"kind": "auto_literature", "parent_run_id": context.get("parent_run_id", ""), **(extra or {})},
         intent_id=context["intent_id"],
+        item_key=error.item_key,
     )
 
 
 
 
 def _discover_and_screen_literature(context: dict[str, Any]) -> None:
+    """Persist and shortlist papers already discovered by the external LLM.
+
+    The previous implementation generated arXiv Boolean queries and then ran an
+    arXiv search + a second abstract-screening LLM pass.  In the current
+    operating model the external LLM itself performs broad web-enabled paper
+    discovery, so this step only normalizes that candidate set, marks the top
+    papers for full-text work, and records the durable search run.
+    """
     ledger: Ledger = context["ledger"]
-    context["run_tracker"].enter("abstract_screening")
+    _run_tracker(context).enter("paper_candidate_intake")
+    candidates = list(context.get("discovered_candidates") or [])
+    if not candidates:
+        outcome = {"run_id": "", "query": "external_llm_paper_discovery", "candidates": [], "status": "failed", "error": "외부 LLM 논문 후보가 없습니다."}
+        context["search_outcome"] = outcome
+        context["search_succeeded"] = False
+        context["search_failed"] = True
+        return
 
-    def retrying_abstract_reviewer(prompt: str) -> str:
-        return execute_llm_stage(
-            context["abstract_reviewer"],
-            prompt,
-            stage="abstract_screening",
-            parser=lambda value: value.strip(),
-            accept=lambda value: len(value) >= 20,
-        ).value
-
-    outcome = run_profile(ledger, context["search_profile"], "auto", reviewer=retrying_abstract_reviewer)
+    ranked = sorted(candidates, key=lambda item: int(item.get("relevance_score") or 0), reverse=True)
+    shortlist_ids = {str(item.get("source_id") or "") for item in ranked[:5]}
+    enriched = []
+    for item in ranked:
+        score = max(0, min(int(item.get("relevance_score") or 0), 100))
+        level = "high" if score >= 75 else "medium" if score >= 50 else "low"
+        enriched.append({
+            **item,
+            "citation_count": item.get("citation_count"),
+            "influential_citation_count": item.get("influential_citation_count"),
+            "relevance": {
+                "level": level,
+                "rationale": str(item.get("why_relevant") or item.get("quick_take") or "외부 LLM 문헌탐색 후보"),
+            },
+            "abstract_shortlist": str(item.get("source_id") or "") in shortlist_ids,
+            "evidence_status": "abstract_only_pending",
+        })
+    query = str((context.get("search_strategy") or {}).get("search_summary") or "external_llm_paper_discovery")
+    run_id = ledger.record_search_run(context["search_profile"]["profile_id"], "auto_external_llm", query, enriched, "completed")
+    outcome = {"run_id": run_id, "query": query, "candidates": enriched, "status": "completed", "error": ""}
     context["search_outcome"] = outcome
-    context["search_succeeded"] = outcome.get("status") == "completed"
-    context["search_failed"] = not context["search_succeeded"]
+    context["search_succeeded"] = True
+    context["search_failed"] = False
 
 
 def _record_search_failure(context: dict[str, Any]) -> None:
@@ -202,19 +418,26 @@ def _record_search_failure(context: dict[str, Any]) -> None:
 def _review_full_texts(context: dict[str, Any]) -> None:
     ledger: Ledger = context["ledger"]
     outcome = context["search_outcome"]
-    context["run_tracker"].enter("fulltext_review")
+    _run_tracker(context).enter("fulltext_review")
 
     def retrying_fulltext_drafter(prompt: str) -> str:
         try:
-            return execute_llm_stage(
+            item_key = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+            tracker = _run_tracker(context)
+            manual = tracker.manual_override(stage="fulltext_review", item_key=item_key)
+            result = execute_llm_stage(
                 context["fulltext_drafter"],
                 prompt,
                 stage="fulltext_review",
                 parser=lambda value: value.strip(),
                 accept=lambda value: len(value) >= 20,
-            ).value
-        except LLMRetryExhausted as error:
-            _record_failure(context, error, "fulltext_review", {"retry_hint": "실패한 논문만 다시 본문 검토"})
+                manual_response=manual,
+                item_key=item_key,
+            )
+            if result.source == "manual":
+                tracker.clear_manual_override(stage="fulltext_review", item_key=item_key)
+            return result.value
+        except LLMRetryExhausted:
             raise
 
     processed = process_top_papers(
@@ -229,25 +452,173 @@ def _review_full_texts(context: dict[str, Any]) -> None:
     context["report_run"] = {**outcome, "candidates": merged_candidates}
 
 
-def _synthesize_literature_report(context: dict[str, Any]) -> None:
+
+def _prepare_selected_paper_review(context: dict[str, Any]) -> None:
+    """Verify that researcher-selected papers completed inline first review."""
+    selected = [dict(item) for item in (context.get("selected_papers") or [])]
+    incomplete = [
+        item for item in selected
+        if not str(item.get("paper_id") or "").strip() or not str(item.get("paper_summary") or "").strip()
+    ]
+    if incomplete:
+        titles = ", ".join(str(item.get("title") or "Untitled")[:60] for item in incomplete[:5])
+        raise ValueError(f"Review 단계에서 논문별 요약이 완료되지 않았습니다: {titles}")
+    context["inline_review_ready"] = True
+
+def _apply_selected_paper_review(context: dict[str, Any]) -> None:
+    """Collect paper-by-paper Review results already created in the UI boundary."""
+    selected = [dict(item) for item in (context.get("selected_papers") or [])]
+    reviewed: list[dict[str, Any]] = []
+    analysis_ids: list[str] = []
+    request_ids: list[str] = []
+    for item in selected:
+        row = dict(item)
+        row.setdefault("paper_summary", str(item.get("paper_summary") or item.get("summary") or ""))
+        row.setdefault("knowledge_candidates", list(item.get("knowledge_candidates") or []))
+        row["full_text_status"] = "completed" if str(row.get("paper_summary") or "").strip() else "not_reviewed"
+        reviewed.append(row)
+        paper_id = str(row.get("paper_id") or "")
+        if paper_id and str(row.get("paper_summary") or "").strip():
+            analysis_ids.append(paper_id)
+        request_ids.extend(str(x) for x in (row.get("knowledge_request_ids") or []) if str(x))
+    context["reviewed_papers"] = reviewed
+    context["paper_analysis_ids"] = analysis_ids
+    context["knowledge_request_ids"] = request_ids
+    outcome = dict(context.get("search_outcome") or {})
+    merged = {str(item.get("source_id") or ""): dict(item) for item in (outcome.get("candidates") or [])}
+    for item in reviewed:
+        merged[str(item.get("source_id") or "")] = item
+    merged_candidates = list(merged.values())
+    context["ledger"].update_search_run_candidates(outcome["run_id"], merged_candidates)
+    context["report_run"] = {**outcome, "candidates": merged_candidates}
+
+def _synthesize_literature_report_deterministic(context: dict[str, Any]) -> None:
+    _run_tracker(context).enter("synthesis")
+    context["synthesis"] = deterministic_literature_report(
+        context["search_profile"], context["report_run"], context["reviewed_papers"]
+    )
+
+
+def _knowledge_candidate_title(claim: dict[str, Any], claim_text: str) -> str:
+    """Prefer the LLM-proposed review title; retain the old claim-prefix fallback."""
+    proposed = str(claim.get("title") or "").strip()
+    if proposed:
+        return proposed[:120]
+    return claim_text[:72]
+
+
+def _stage_literature_knowledge_candidates(context: dict[str, Any]) -> None:
+    """Aggregate inline Review assets, with a legacy-safe write fallback.
+
+    New reviews persist Summary/Knowledge candidates inside the Review boundary.
+    Older checkpoints may reach this capability with reviewed_papers but without
+    those writes, so we complete the missing durable state exactly once.
+    """
     ledger: Ledger = context["ledger"]
-    tracker: ExecutionRunTracker = context["run_tracker"]
+    profile = dict(context.get("search_profile") or {})
+    intent_id = str(context.get("intent_id") or "")
+    preserved_by_source = {str(x.get("source_id") or ""): dict(x) for x in (context.get("preserved_papers") or [])}
+    linked_rqs = ledger.research_questions_for_intent(intent_id)
+    rq = dict(linked_rqs[0]) if linked_rqs else {}
+    rq_id = str(rq.get("rq_id") or "")
+    rq_text = str(rq.get("question") or profile.get("question") or "")
+    analysis_ids: list[str] = []
+    request_ids: list[str] = []
+
+    for reviewed in context.get("reviewed_papers") or []:
+        source_id = str(reviewed.get("source_id") or "")
+        shelf = preserved_by_source.get(source_id)
+        if not shelf:
+            continue
+        paper_id = str(shelf.get("paper_id") or "")
+        summary = str(reviewed.get("paper_summary") or reviewed.get("summary") or "").strip()
+        if paper_id and not ledger.paper_analysis(paper_id) and summary:
+            ledger.save_paper_analysis(
+                paper_id,
+                research_question=rq_text,
+                summary=summary,
+                reading_raw_output=str(reviewed.get("full_text_review") or ""),
+                generated=True,
+            )
+            ledger.update_shelf_paper(
+                paper_id,
+                shelf_status=str(shelf.get("shelf_status") or "reference"),
+                reading_status="read",
+            )
+        if paper_id and rq_id and summary and not ledger.paper_question_analysis(paper_id, rq_id):
+            ledger.save_paper_question_analysis(
+                paper_id,
+                research_question_id=rq_id,
+                intent_id=intent_id,
+                research_question=rq_text,
+                summary=summary,
+                reading_raw_output=str(reviewed.get("full_text_review") or ""),
+                generated=True,
+            )
+        if paper_id and ledger.paper_analysis(paper_id):
+            analysis_ids.append(paper_id)
+
+        existing = []
+        for row in ledger.phenomena(type_="decision_request"):
+            if str(row.get("subject_type") or "") != "knowledge_card":
+                continue
+            payload = dict(row.get("payload") or {})
+            if str(payload.get("intent_id") or "") == intent_id and str(payload.get("paper_id") or "") == paper_id:
+                existing.append(row)
+        if not existing:
+            for claim in reviewed.get("knowledge_candidates") or []:
+                claim_text = str(claim.get("claim") or "").strip()
+                evidence = str(claim.get("evidence") or "").strip()
+                if len(claim_text) < 8 or len(evidence) < 8:
+                    continue
+                card = KnowledgeCard(
+                    card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}",
+                    title=_knowledge_candidate_title(claim, claim_text), source_kind="external_paper", claim=claim_text,
+                    context=summary[:1200], implication="", source_excerpt=evidence[:3200],
+                    labels=list(profile.get("labels") or []), evidence_level="provisional", status="verified",
+                    evidence_excerpt=evidence[:1600], conditions="", limits=str(claim.get("limits") or ""),
+                    provenance={"source_name": str(shelf.get("title") or "paper"), "paper_id": paper_id, "research_question_id": rq_id, "intent_id": intent_id, "grounding": "m1_first_literature_round"},
+                    origin_links=list(shelf.get("origin_links") or []),
+                ).model_dump(mode="json")
+                case_id = ledger.create_case("research", f"Literature knowledge candidate: {str(shelf.get('title') or '')[:72]}")
+                rid = ledger.record(
+                    case_id, "decision_request", "m1", ["researcher"], "knowledge_card",
+                    {
+                        "title": f"문헌조사 지식카드 후보 승인: {card['title']}",
+                        "card": card, "paper_id": paper_id, "intent_id": intent_id, "rq_id": rq_id,
+                        "research_question": rq_text,
+                        "literature_round": "first",
+                        "next_action": "승인 시 지식카드로 등록합니다.",
+                    },
+                    subject_id=card["card_id"],
+                )
+                request_ids.append(rid)
+        else:
+            request_ids.extend(str(row.get("phenomenon_id") or "") for row in existing)
+
+    context["paper_analysis_ids"] = list(dict.fromkeys(analysis_ids))
+    context["knowledge_request_ids"] = list(dict.fromkeys(x for x in request_ids if x))
+
+def _synthesize_literature_report(context: dict[str, Any]) -> None:
+    tracker = _run_tracker(context)
     tracker.enter("synthesis")
+    prompt = literature_synthesis_prompt(context["search_profile"], context["report_run"], context["reviewed_papers"])
+    manual = tracker.manual_override(stage="synthesis")
     try:
         synthesis_result = execute_llm_stage(
-            context["synthesis_drafter"],
-            literature_synthesis_prompt(context["search_profile"], context["report_run"], context["reviewed_papers"]),
-            stage="synthesis",
-            parser=lambda value: value.strip(),
-            accept=lambda value: len(value) >= 20,
+            context["synthesis_drafter"], prompt, stage="synthesis",
+            parser=lambda value: value.strip(), accept=lambda value: len(value) >= 20,
+            manual_response=manual,
         )
-        synthesis = synthesis_result.value
+        if synthesis_result.source == "manual":
+            tracker.clear_manual_override(stage="synthesis")
+        context["synthesis"] = synthesis_result.value
         tracker.note_attempts(synthesis_result.attempts)
     except LLMRetryExhausted as error:
+        if error.error_type == "external_llm_required":
+            raise
         _record_failure(context, error, "synthesis", {"search_run_id": context["search_outcome"].get("run_id", "")})
-        synthesis = deterministic_literature_report(context["search_profile"], context["report_run"], context["reviewed_papers"])
-    context["synthesis"] = synthesis
-
+        context["synthesis"] = deterministic_literature_report(context["search_profile"], context["report_run"], context["reviewed_papers"])
 
 def _finalize_literature_review(context: dict[str, Any]) -> None:
     ledger: Ledger = context["ledger"]
@@ -266,6 +637,8 @@ def _finalize_literature_review(context: dict[str, Any]) -> None:
             "search_strategy": context["search_strategy"],
             "abstract_review_count": len(context["search_outcome"]["candidates"]),
             "fulltext_review_count": len(completed),
+            "paper_analysis_count": len(context.get("paper_analysis_ids") or []),
+            "knowledge_request_ids": list(context.get("knowledge_request_ids") or []),
             "top_papers": [
                 {
                     "source_id": item.get("source_id"), "title": item.get("title"),
@@ -283,7 +656,7 @@ def _finalize_literature_review(context: dict[str, Any]) -> None:
     context["completed_papers"] = completed
 
     # Complete the business intent after publishing the report.
-    tracker: ExecutionRunTracker = context["run_tracker"]
+    tracker = _run_tracker(context)
     run_id = tracker.run_id
     unresolved = [f for f in ledger.auto_research_failures() if f.get("run_id") == run_id]
     if unresolved:
@@ -317,9 +690,18 @@ def _handle_retry_exhausted(context: dict[str, Any], error: LLMRetryExhausted, w
     if context.get("auto_run_id"):
         _record_failure(context, error, error.stage)
     intent_event = context["curation_intent"]
-    if intent_event.get("status") == "ready" or ledger.phenomenon(intent_event["phenomenon_id"]).get("status") == "ready":
+    external_manual = error.error_type == "external_llm_required"
+    if not external_manual and (intent_event.get("status") == "ready" or ledger.phenomenon(intent_event["phenomenon_id"]).get("status") == "ready"):
         ledger.transition(intent_event["phenomenon_id"], "ready", "failed")
     profile = context.get("search_profile") or {}
+    if external_manual:
+        return {
+            "status": "needs_attention",
+            "attention_kind": "external_llm_input",
+            "report": f"외부 LLM 실행이 필요한 정상 입력 단계에서 대기 중입니다: {error.stage}",
+            "run": {}, "papers": [], "retry_run_id": context.get("auto_run_id", ""),
+            "workflow_id": workflow_id, "workflow_trace": list(context.get("workflow_trace", [])),
+        }
     report = f"자동 문헌탐색 중 LLM Retry가 모두 실패했습니다: {error.message}"
     ledger.record(
         intent_event["case_id"], "advice_report", "m1", ["researcher", "m2"], "auto_literature_report",

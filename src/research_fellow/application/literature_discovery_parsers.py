@@ -72,7 +72,14 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
         if not title:
             continue
         source_id = str(item.get("source_id", "")).strip()
-        source_url = normalize_result_url(str(item.get("source_url", item.get("url", ""))))
+        abstract_url = normalize_result_url(str(item.get("abstract_url", item.get("source_url", item.get("url", "")))))
+        full_text_url = normalize_result_url(str(item.get("full_text_url", "")))
+        pdf_url = normalize_result_url(str(item.get("pdf_url", "")))
+        # Legacy external responses often used full_text_url for a PDF. Preserve
+        # that information, but do not collapse the three researcher-facing URLs.
+        if not pdf_url and full_text_url.lower().endswith(".pdf"):
+            pdf_url = full_text_url
+        source_url = abstract_url
         key = (source_id or title).lower()
         if key in seen:
             continue
@@ -86,7 +93,7 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
             score = int(float(item.get("relevance_score", 0)))
         except (TypeError, ValueError):
             score = 0
-        normalized_pdf = normalize_result_url(str(item.get("pdf_url", "")))
+        normalized_pdf = pdf_url
         provisional = {"source_id": source_id, "url": source_url, "pdf_url": normalized_pdf}
         arxiv_id = arxiv_id_from_paper(provisional)
         stable_external_id = arxiv_id or source_id or ("external-" + hashlib.sha1((source_url or title).encode("utf-8")).hexdigest()[:16])
@@ -96,8 +103,11 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
                 "source_id": stable_external_id,
                 "source": "arxiv" if arxiv_id else "external_llm",
                 "url": links.get("source_url") or source_url,
+                "source_url": links.get("source_url") or source_url,
+                "abstract_url": links.get("source_url") or abstract_url,
                 "html_url": links.get("html_url", ""),
                 "pdf_url": links.get("pdf_url") or normalized_pdf,
+                "full_text_url": full_text_url,
                 "title": title,
                 "summary": str(item.get("abstract_or_summary", item.get("summary", ""))).strip(),
                 "published": str(item.get("publication_year", item.get("published", ""))).strip(),

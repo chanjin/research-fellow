@@ -20,6 +20,7 @@ class LLMRetryExhausted(RuntimeError):
     attempts: int
     recommended_action: str
     prompt: str = ""
+    item_key: str = ""
 
     def __str__(self) -> str:
         return f"{self.stage}: {self.error_type} after {self.attempts} attempts - {self.message}"
@@ -117,6 +118,7 @@ def failure_payload(error: LLMRetryExhausted, *, context: dict[str, Any] | None 
     return {
         "failure_id": f"arf-{uuid.uuid4().hex[:12]}",
         "stage": error.stage,
+        "item_key": error.item_key,
         "attempt_count": error.attempts,
         "error_type": error.error_type,
         "error_message": error.message,

@@ -1,0 +1,24 @@
+interaction: ajd-interaction/v0.1
+id: provide_external_llm_result
+actor: researcher
+purpose: >
+  로컬 환경에서 자동 실행하지 않는 복합 LLM 작업의 프롬프트를 외부 LLM에서 수행하고,
+  그 응답을 다시 Agent에 제공하여 중단된 연구 workflow를 계속한다.
+mode: request_input
+uses:
+  required:
+    - external_llm_task
+  optional: []
+produces:
+  - external_llm_response
+data:
+  external_llm_task:
+    type: ExternalLLMTask
+  external_llm_response:
+    type: RawLLMOutput
+boundary:
+  phenomenon: external_llm_execution
+  recipient: researcher
+  status: waiting
+completion:
+  requires_response: true

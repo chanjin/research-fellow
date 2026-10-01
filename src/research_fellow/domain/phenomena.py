@@ -10,7 +10,7 @@ from research_fellow.domain.research import CurationIntent, ResearchState
 PhenomenonType = Literal[
     "research_update", "advice_report", "decision_request", "decision",
     "curation_intent", "knowledge_update", "advisory_exchange",
-    "activity_summary",
+    "activity_summary", "research_task",
 ]
 
 
@@ -28,11 +28,12 @@ class DecisionRequestPayload(Payload):
     relation: dict[str, Any] | None = None
     ontology_candidate: dict[str, Any] | None = None
     evidence_update: dict[str, Any] | None = None
+    draft_request: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def has_exactly_one_decision_subject(self) -> "DecisionRequestPayload":
-        if sum(item is not None for item in (self.card, self.intent, self.relation, self.ontology_candidate, self.evidence_update)) != 1:
-            raise ValueError("decision_request에는 card, intent, relation, ontology_candidate, evidence_update 중 하나가 필요합니다.")
+        if sum(item is not None for item in (self.card, self.intent, self.relation, self.ontology_candidate, self.evidence_update, self.draft_request)) != 1:
+            raise ValueError("decision_request에는 card, intent, relation, ontology_candidate, evidence_update, draft_request 중 하나가 필요합니다.")
         return self
 
 
@@ -77,6 +78,17 @@ class ActivitySummaryPayload(Payload):
     is_initial_baseline: bool = False
 
 
+class ResearchTaskPayload(Payload):
+    title: str = Field(min_length=1)
+    task_type: str = Field(min_length=1)
+    intent_id: str = ""
+    rq_id: str = ""
+    paper_id: str = ""
+    paper: dict[str, Any] = Field(default_factory=dict)
+    prompt: str = ""
+    expected_output: str = ""
+
+
 class PhenomenonDraft(BaseModel):
     """The validated ledger representation of one observable shared phenomenon."""
 
@@ -104,6 +116,7 @@ def validate_payload(phenomenon_type: str, payload: dict[str, Any]) -> dict[str,
         "advice_report": AdviceReportPayload,
         "knowledge_update": KnowledgeUpdatePayload,
         "activity_summary": ActivitySummaryPayload,
+        "research_task": ResearchTaskPayload,
     }
     model = models.get(phenomenon_type, Payload)
     return model.model_validate(payload).model_dump(mode="json")

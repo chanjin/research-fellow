@@ -25,8 +25,12 @@ def render_operating_desk(
     research_submit_question: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     research_prepare_external_advisory: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     research_submit_external_advisory: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    research_request_additional_literature: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    research_request_answer_update: Callable[[str], Mapping[str, Any]] | None = None,
     attention_interaction_inputs: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     attention_submit_response: Callable[[Mapping[str, Any], Mapping[str, Any]], Any] | None = None,
+    attention_candidate_action: Callable[[Mapping[str, Any], Mapping[str, Any], str], Any] | None = None,
+    knowledge_update_paper_metadata: Callable[[str, list[str] | str, str, str | None], Mapping[str, Any]] | None = None,
     english: bool = True,
 ) -> None:
     st.header("Research Fellow" if english else "연구위원")
@@ -38,13 +42,19 @@ def render_operating_desk(
         if english else
         "에이전트가 지속적으로 일하고, 사람은 필요한 순간에만 개입합니다."
     )
+    runtime_flash = st.session_state.pop("persistent-runtime-flash", "")
+    if runtime_flash:
+        st.info(("Agent continued: " if english else "Agent가 다음 작업을 이어서 수행했습니다: ") + str(runtime_flash))
+    runtime_error = st.session_state.pop("persistent-runtime-error", "")
+    if runtime_error:
+        st.warning(("Automatic continuation needs attention: " if english else "자동 실행 연계에 확인이 필요합니다: ") + str(runtime_error))
 
     attention_count = int(attention.get("total") or 0)
     running_counts = dict(running.get("counts") or {})
     recent_count = int(activity.get("total") or 0)
     cols = st.columns(3)
     cols[0].metric("Attention" if english else "확인 필요", attention_count)
-    cols[1].metric("Active work" if english else "진행 중", int(running_counts.get("running", 0)) + int(running_counts.get("waiting", 0)))
+    cols[1].metric("Active work" if english else "진행 중", int(running_counts.get("running", 0)) + int(running_counts.get("queued", 0)) + int(running_counts.get("waiting", 0)))
     cols[2].metric("Recent activity" if english else "최근 활동", recent_count)
 
     labels = [
@@ -65,6 +75,7 @@ def render_operating_desk(
             st, attention, english=english,
             interaction_inputs=attention_interaction_inputs,
             submit_response=attention_submit_response,
+            candidate_action=attention_candidate_action,
         )
     with running_tab:
         render_running_work(st, running, english=english)
@@ -78,11 +89,16 @@ def render_operating_desk(
                 submit_research_question=research_submit_question,
                 prepare_external_advisory=research_prepare_external_advisory,
                 submit_external_advisory=research_submit_external_advisory,
+                request_additional_literature=research_request_additional_literature,
+                request_answer_update=research_request_answer_update,
             )
         next_tab += 1
     if knowledge is not None:
         with tabs[next_tab]:
-            render_knowledge_workspace(st, knowledge, english=english)
+            render_knowledge_workspace(
+                st, knowledge, english=english,
+                update_paper_metadata=knowledge_update_paper_metadata,
+            )
         next_tab += 1
     if developer_mode and system is not None:
         with tabs[next_tab]:

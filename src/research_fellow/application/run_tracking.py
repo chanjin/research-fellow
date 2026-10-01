@@ -133,5 +133,5 @@ class ExecutionRunTracker:
             run_id=self.run_id,
             review_id=review_id,
             intent_id=intent_id,
-            item_key=item_key,
+            item_key=item_key or error.item_key,
         )

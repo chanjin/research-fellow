@@ -1,15 +1,16 @@
 """Common execution helper for one logical LLM-backed application stage.
 
-This module deliberately owns execution mechanics only: automatic retry, optional
-manual override validation, parsing and attempt metadata. Domain-specific prompt
-construction and parsers remain in their application modules.
+Execution mode is stage policy.  Complex research stages may deliberately stop
+before any local-model call and request an external manual LLM result.  The same
+parser/acceptance rule validates both local and pasted results.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Generic, TypeVar
 
-from research_fellow.application.llm_retry import call_with_retry
+from research_fellow.application.llm_execution_policy import EXTERNAL_MANUAL, llm_execution_mode
+from research_fellow.application.llm_retry import LLMRetryExhausted, call_with_retry
 
 T = TypeVar("T")
 Draft = Callable[[str], str | None]
@@ -33,16 +34,11 @@ def execute_llm_stage(
     parser: Parser[T],
     accept: Predicate[T] | None = None,
     manual_response: str | None = None,
-    invalid_manual_message: str = "수동 복구 응답을 파싱하지 못했습니다.",
+    item_key: str = "",
+    invalid_manual_message: str = "수동 외부 LLM 응답을 파싱하지 못했습니다.",
     max_attempts: int = 3,
 ) -> LLMStageResult[T]:
-    """Execute one LLM stage while keeping domain parsing outside the runtime.
-
-    The same parser/acceptance rule is applied to both automatic and manually
-    supplied responses. This removes repeated retry/parse/manual-override glue
-    from individual workflows without turning domain-specific judgments into a
-    generic function.
-    """
+    """Execute one LLM stage according to the stage-level execution policy."""
 
     def parse_and_accept(text: str) -> bool:
         value = parser(text)
@@ -59,6 +55,17 @@ def execute_llm_stage(
         if not valid:
             raise ValueError(invalid_manual_message)
         return LLMStageResult(raw=raw, value=value, attempts=1, source="manual")
+
+    if llm_execution_mode(stage) == EXTERNAL_MANUAL:
+        raise LLMRetryExhausted(
+            stage=stage,
+            error_type="external_llm_required",
+            message="이 단계는 현재 운영 정책상 로컬 LLM을 자동 호출하지 않습니다.",
+            attempts=0,
+            recommended_action="아래 프롬프트를 외부 LLM에서 실행하고 전체 응답을 붙여 넣으세요.",
+            prompt=prompt,
+            item_key=item_key,
+        )
 
     raw, attempts = call_with_retry(
         draft,

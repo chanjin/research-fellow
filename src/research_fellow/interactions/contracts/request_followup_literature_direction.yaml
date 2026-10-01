@@ -1,0 +1,18 @@
+interaction: ajd-interaction/v0.1
+id: request_followup_literature_direction
+actor: researcher
+purpose: >
+  기존 연구질문에 대해 추가 문헌 조사를 수행할 방향과 이번 라운드에서 특히 확인할 내용을 연구자가 지정한다.
+mode: request_input
+uses:
+  required: []
+  optional: []
+produces:
+  - followup_literature_direction
+data:
+  followup_literature_direction:
+    type: FollowupLiteratureDirection
+completion:
+  requires_response: true
+boundary:
+  phenomenon: researcher_followup_literature_direction

@@ -81,6 +81,24 @@ def _auto_research_items(ledger: Ledger, *, limit: int = 50) -> list[RunningWork
 
 
 
+def _queued_evidence_items(ledger: Ledger, *, limit: int = 50) -> list[RunningWorkItem]:
+    """Project active M1 search profiles as queued persistent work."""
+    result: list[RunningWorkItem] = []
+    for profile in ledger.search_profiles():
+        if not profile.get("is_active"):
+            continue
+        result.append(RunningWorkItem(
+            run_id=str(profile.get("profile_id") or profile.get("intent_id") or ""),
+            workflow_id="m1_evidence_acquisition",
+            status="queued",
+            current_step="literature_search",
+            source="search_profile",
+            updated_at=str(profile.get("updated_at") or profile.get("created_at") or ""),
+            summary=str(profile.get("title") or profile.get("question") or "Evidence acquisition queued"),
+        ))
+    return result[:limit]
+
+
 
 def waiting_workflow_results(checkpoint_dir: Path | None) -> list[dict[str, Any]]:
     """Return suspended workflow results in the shape consumed by Attention Queue."""
@@ -118,9 +136,9 @@ def running_work_snapshot(
     checkpoint_dir: Path | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
-    items = _checkpoint_items(checkpoint_dir) + _auto_research_items(ledger, limit=limit)
+    items = _checkpoint_items(checkpoint_dir) + _auto_research_items(ledger, limit=limit) + _queued_evidence_items(ledger, limit=limit)
     items.sort(key=lambda item: item.updated_at, reverse=True)
-    counts = {"running": 0, "waiting": 0, "attention": 0}
+    counts = {"running": 0, "queued": 0, "waiting": 0, "attention": 0}
     for item in items:
         counts[item.status] = counts.get(item.status, 0) + 1
     return {

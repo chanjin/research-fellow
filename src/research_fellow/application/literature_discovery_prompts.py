@@ -1,9 +1,10 @@
 """Prompt builders for interactive literature discovery."""
 from __future__ import annotations
 import json
+from research_fellow.infrastructure.prompt_renderer import apply_review_language_policy
 from typing import Any
 def discovery_search_plan_prompt(topic: str, context: str, max_results: int) -> str:
-    return f"""You are the literature-discovery planner for a domain research fellow.
+    return apply_review_language_policy(f"""You are the literature-discovery planner for a domain research fellow.
 The researcher wants a QUICK exploratory search, not a full systematic review.
 
 RESEARCH TOPIC / QUESTION
@@ -28,7 +29,7 @@ Return ONLY valid JSON:
   ],
   "search_notes": ["...", "..."]
 }}
-"""
+""")
 
 
 def discovery_triage_prompt(topic: str, context: str, candidates: list[dict[str, Any]], max_results: int) -> str:
@@ -45,7 +46,7 @@ def discovery_triage_prompt(topic: str, context: str, candidates: list[dict[str,
                 "url": paper.get("url", ""),
             }
         )
-    return f"""You are helping a researcher QUICKLY understand a literature area.
+    return apply_review_language_policy(f"""You are helping a researcher QUICKLY understand a literature area.
 Do not perform a systematic review. Rank only the retrieved papers below.
 
 RESEARCH TOPIC / QUESTION
@@ -78,13 +79,13 @@ Return ONLY valid JSON:
     }}
   ]
 }}
-"""
+""")
 
 
 def external_literature_discovery_prompt(topic: str, context: str, max_results: int, sources: list[str] | None = None) -> str:
     target = max(5, min(int(max_results), 20))
     source_names = ", ".join(sources or ["arXiv", "Semantic Scholar", "Crossref", "Google Scholar"])
-    return f"""Act as a literature-discovery assistant with web access.
+    return apply_review_language_policy(f"""Act as a literature-discovery assistant with web access.
 I am doing a QUICK exploratory literature search, not a systematic review.
 
 RESEARCH TOPIC / QUESTION
@@ -106,9 +107,10 @@ For each paper give:
 - title
 - authors
 - publication_year
-- source_url
+- abstract_url: bibliographic/abstract/landing page (arXiv /abs, DOI landing, publisher abstract page, etc.)
+- full_text_url: readable full-text HTML or official/open-access article page when available; empty if not verified
+- pdf_url: direct PDF URL only when independently verified; empty if not verified
 - source_id (arXiv ID or DOI when available; otherwise a stable unique identifier or empty string)
-- pdf_url (optional; only when you can verify a direct/open PDF URL, otherwise empty)
 - abstract_or_summary (brief and factual; if you do not have the abstract, label it as a summary)
 - relevance_score 0-100
 - quick_take: 1-2 sentences on what the paper contributes
@@ -124,9 +126,10 @@ If any field contains LaTeX, escape every backslash for JSON (for example, write
       "title": "...",
       "authors": ["..."],
       "publication_year": "2025",
-      "source_url": "https://...",
-      "source_id": "...",
+      "abstract_url": "https://...",
+      "full_text_url": "",
       "pdf_url": "",
+      "source_id": "...",
       "abstract_or_summary": "...",
       "relevance_score": 90,
       "quick_take": "...",
@@ -135,4 +138,4 @@ If any field contains LaTeX, escape every backslash for JSON (for example, write
     }}
   ]
 }}
-"""
+""")

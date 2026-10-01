@@ -1,0 +1,18 @@
+capability: ajd-capability-contract/v0.2
+id: prepare_research_answer_context
+kind: action
+purpose: 답변 문서 작성에 필요한 연구질문·직접 근거·기존 보강 근거를 분리해서 모은다.
+uses:
+  required: [draft_request_event, memory_cards]
+  optional: []
+produces: [rq_id, research_question, answer_cards, answer_papers, supporting_cards, supporting_papers, answer_run_id]
+data:
+  draft_request_event: {type: Any}
+  memory_cards: {type: KnowledgeCard, cardinality: many}
+  rq_id: {type: Identifier}
+  research_question: {type: ResearchQuestion}
+  answer_cards: {type: KnowledgeCard, cardinality: many}
+  answer_papers: {type: PaperRef, cardinality: many}
+  supporting_cards: {type: KnowledgeCard, cardinality: many}
+  supporting_papers: {type: PaperRef, cardinality: many}
+  answer_run_id: {type: Identifier}

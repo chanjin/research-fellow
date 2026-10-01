@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from research_fellow.infrastructure.prompt_renderer import render_prompt
+from research_fellow.infrastructure.prompt_renderer import render_prompt, apply_review_language_policy
 from research_fellow.application.structured_output import extract_json_object
 from research_fellow.origin_lineage import origin_labels
 
@@ -124,7 +124,7 @@ def knowledge_grouping_prompt(
             "concepts": list(card.get("concepts", [])),
             "applies_to": list(card.get("applies_to", [])),
         })
-    return f"""You are helping a researcher organize newly approved knowledge before formulating research questions.
+    return apply_review_language_policy(f"""You are helping a researcher organize newly approved knowledge before formulating research questions.
 Group the knowledge cards by research-theme relevance, not merely lexical or embedding similarity.
 A useful group should represent a coherent research issue, tension, comparison, mechanism, or design question that could reasonably lead to one research question.
 Cards may appear in more than one group when they genuinely support different research angles. Do not force every card into a group.
@@ -162,7 +162,7 @@ Rules:
 
 New knowledge cards:
 {items}
-"""
+""")
 
 
 def parse_knowledge_grouping(text: str, *, valid_card_ids: set[str], limit: int = 8) -> list[dict[str, Any]]:

@@ -7,17 +7,12 @@ Research Intent
 - research question: {{ profile.question }}
 - context: {{ profile.context }}
 
-Search strategy
-{% if profile.concept_groups %}
-{% for g in profile.concept_groups %}- {{ g.concept }}: {{ g.terms | join(' OR ') }}
-{% endfor %}{% endif %}
-{% if profile.boolean_queries %}
-Boolean query variants:
-{% for q in profile.boolean_queries %}- Q{{ loop.index }}: {{ q }}
-{% endfor %}{% endif %}
+Discovery method
+- Candidate papers were discovered directly by an external web-enabled LLM from the approved research Intent.
+- Discovery summary: {{ run.query if run.query else 'not provided' }}
 
 Search outcome
-- abstracts reviewed: {{ run.candidates|length }}
+- candidate papers reviewed: {{ run.candidates|length }}
 
 Top full-text candidates
 {% for p in papers %}
@@ -32,7 +27,7 @@ Top full-text candidates
 
 Required sections:
 ## 탐색 요약
-State how many abstracts were screened and how many full texts were compared.
+State how many candidate papers were discovered and how many full texts were compared.
 
 ## 핵심 발견
 Synthesize 3-5 findings across the papers. Separate common findings from disagreements or different assumptions.

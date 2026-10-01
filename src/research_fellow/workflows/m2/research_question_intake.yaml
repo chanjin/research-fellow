@@ -1,0 +1,69 @@
+dsl: ajd-workflow/v0.2
+id: m2_research_question_intake
+revision: 1
+agent: m2
+realizes: [research_state_management]
+purpose: >
+  연구자가 새 연구질문을 제시하면 기존 승인 지식을 먼저 확인하고,
+  기존 Research Question 상태와 M2→M1 Curation Intent 경로를 재사용하여
+  필요한 근거 탐색을 시작한다.
+
+trigger:
+  phenomenon: research_question_submitted
+  from: researcher
+
+inputs:
+  - research_question
+
+memory:
+  reads:
+    - knowledge_cards
+    - research_questions
+  writes:
+    - research_questions
+
+steps:
+  - id: inspect_research_question_context
+    kind: decision
+    authority: m2
+    uses:
+      required: [research_question]
+    produces: [review_id, matched_knowledge, matched_knowledge_count, exploration_need, inspection_summary]
+    purpose: >
+      새 질문과 관련된 승인 지식을 찾아 현재 근거 출발점을 확인하고 후속 탐색 필요를 명시한다.
+
+  - id: start_research_question_exploration
+    kind: action
+    uses:
+      required: [research_question, review_id, matched_knowledge_count, exploration_need, inspection_summary]
+    produces: [status, dispatched_intents, next_action, human_attention_required]
+    emits:
+      - phenomenon: curation_intent
+        to: [m1]
+      - phenomenon: advice_report
+        to: [researcher]
+    purpose: >
+      기존 M2→M1 Curation Intent와 Search Profile을 재사용하여 근거 탐색을 큐에 연결하고,
+      연구자에게 현재 진행상태와 다음 행동을 알린다.
+
+outputs:
+  required:
+    - status
+    - review_id
+    - matched_knowledge_count
+    - exploration_need
+    - dispatched_intents
+    - next_action
+    - human_attention_required
+  optional:
+    - inspection_summary
+
+completion:
+  criteria:
+    - submitted_research_question_has_an_initial_knowledge_inspection
+    - followup_evidence_work_is_linked_to_the_same_research_question
+
+invariants:
+  - no_duplicate_research_question_state_is_created
+  - approved_knowledge_is_read_only_during_initial_inspection
+  - every_followup_intent_is_traceable_to_the_submitted_research_question

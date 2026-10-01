@@ -57,13 +57,13 @@ def submit_claim_cards(
     existing_cards: list[dict[str, object]] | None = None,
 ) -> list[str]:
     """Send non-authoritative candidate cards to the researcher approval inbox."""
-    non_english = [card for card in cards if not _is_machine_english_card(card)]
-    if non_english:
+    invalid_labels = [card for card in cards if not _has_english_taxonomy_labels(card)]
+    if invalid_labels:
         warnings = [
             *warnings,
-            f"기계용 지식카드 필드가 영어가 아닌 후보 {len(non_english)}건은 승인함에 보내지 않았습니다. 영문 주장·설명·레이블로 보정하세요.",
+            f"지식카드 Label이 영어 taxonomy 용어가 아닌 후보 {len(invalid_labels)}건은 승인함에 보내지 않았습니다. Claim/Explanation은 한글이어도 되며 Label만 영어로 보정하세요.",
         ]
-        cards = [card for card in cards if _is_machine_english_card(card)]
+        cards = [card for card in cards if _has_english_taxonomy_labels(card)]
     if existing_cards:
         from research_fellow.application.duplicate_review import similar_approved_cards
 
@@ -91,9 +91,13 @@ def submit_claim_cards(
     return request_ids
 
 
-def _is_machine_english_card(card: dict[str, object]) -> bool:
-    """Cards form M1's machine-readable context; source excerpts may stay original."""
-    fields = ("title", "claim", "explanation", "conditions", "limits")
-    values = [str(card.get(field, "")) for field in fields]
-    values.extend(str(label) for label in card.get("labels", []) if isinstance(card.get("labels", []), list))
-    return not any(any("가" <= character <= "힣" for character in value) for value in values)
+def _has_english_taxonomy_labels(card: dict[str, object]) -> bool:
+    """Narrative card content may be Korean; taxonomy labels stay concise English."""
+    labels = card.get("labels", [])
+    if not isinstance(labels, list):
+        return False
+    for label in labels:
+        value = str(label or "").strip()
+        if not value or any("가" <= character <= "힣" for character in value):
+            return False
+    return True

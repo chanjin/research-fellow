@@ -1,0 +1,22 @@
+policy: research-fellow-llm-execution/v0.1
+profile: constrained-local
+# Until a capable local inference server is available, research-quality reasoning
+# is a normal external-manual boundary.  Only explicitly listed short/simple
+# stages may call the local model automatically.
+default: external_manual
+stages:
+  search_strategy: external_manual
+  search_strategy_legacy: external_manual
+  abstract_screening: external_manual
+  fulltext_review: external_manual
+  synthesis: external_manual
+  rq_generation: external_manual
+  rq_prioritization: external_manual
+  research_state_update: external_manual
+  research_answer_draft: external_manual  # legacy checkpoints
+  research_answer_first_draft: external_manual
+  research_answer_enrichment: external_manual
+
+  # Reserved examples for future short/simple capabilities.
+  short_classification: local
+  label_generation: local

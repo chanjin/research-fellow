@@ -1,0 +1,15 @@
+capability: ajd-capability-contract/v0.2
+id: apply_selected_paper_review
+kind: action
+purpose: Review 단계에서 논문별로 완료된 요약과 지식카드 후보를 문헌조사 보고용 결과로 정규화한다.
+uses:
+  required: [selected_papers, search_outcome]
+  optional: []
+produces: [reviewed_papers, report_run, paper_analysis_ids, knowledge_request_ids]
+data:
+  selected_papers: {type: PaperRef, cardinality: many}
+  search_outcome: {type: SearchOutcome}
+  reviewed_papers: {type: PaperRef, cardinality: many}
+  report_run: {type: LiteratureReviewRun}
+  paper_analysis_ids: {type: Identifier, cardinality: many}
+  knowledge_request_ids: {type: Identifier, cardinality: many}

@@ -1,0 +1,13 @@
+capability: ajd-capability-contract/v0.2
+id: draft_research_answer
+kind: action
+purpose: 기존 답변이 있으면 이를 출발점으로 삼고 현재 연구질문에서 직접 확보한 근거를 반영하여 1차 문서를 만든다.
+uses:
+  required: [research_question, answer_cards, answer_papers]
+  optional: []
+produces: [first_answer_document]
+data:
+  research_question: {type: ResearchQuestion}
+  answer_cards: {type: KnowledgeCard, cardinality: many}
+  answer_papers: {type: PaperRef, cardinality: many}
+  first_answer_document: {type: ResearchAnswerDraft}

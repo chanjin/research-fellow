@@ -72,6 +72,12 @@ def decide_request(
              "operation": "supporting_evidence_added", "origin_links": card.get("origin_links", [])},
             card["card_id"], status="completed",
         )
+    elif request["subject_type"] == "research_answer_draft":
+        draft_request = dict(payload.get("draft_request") or {})
+        ledger.record(
+            request["case_id"], "advisory_exchange", "researcher", ["m2"],
+            "research_answer_draft_request", draft_request, str(draft_request.get("rq_id") or request["subject_id"]), status="ready",
+        )
     elif request["subject_type"] == "curation_intent":
         ledger.record(
             request["case_id"], "curation_intent", "m2", ["m1"], "curation_intent",

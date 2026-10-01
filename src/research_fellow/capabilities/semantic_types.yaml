@@ -65,6 +65,8 @@ types:
     extends: Artifact
   - id: AdvisoryAnswer
     extends: Artifact
+  - id: ResearchAnswerDraft
+    extends: Artifact
   - id: PaperProject
     extends: Artifact
   - id: Manuscript
@@ -126,4 +128,8 @@ types:
   - id: ResearchQuestionInput
     extends: Artifact
   - id: ExternalAdvisoryRequest
+    extends: Artifact
+  - id: ExternalLLMTask
+    extends: Artifact
+  - id: FollowupLiteratureDirection
     extends: Artifact

@@ -20,6 +20,7 @@ def execute_research_state_update(
     research_question_backlog: list[dict[str, Any]],
     *,
     drafter: Draft,
+    manual_response: str | None = None,
 ) -> dict[str, Any]:
     """Refresh existing Research Questions before M2 generates or dispatches new work."""
     if not research_question_backlog:
@@ -35,6 +36,7 @@ def execute_research_state_update(
         "knowledge_updates": knowledge_updates,
         "research_question_backlog": research_question_backlog,
         "drafter": drafter,
+        "manual_response": manual_response or "",
     }, globals())
     return workflow.execute()
 
@@ -60,6 +62,7 @@ def _assess_research_question_state(context: dict[str, Any]) -> None:
             text, valid_rq_ids=valid_rq_ids, valid_update_ids=valid_update_ids,
         ),
         accept=lambda items: isinstance(items, list),
+        manual_response=str(context.get("manual_response") or "") or None,
     )
     context["assessments"] = result.value
 

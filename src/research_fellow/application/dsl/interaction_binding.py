@@ -8,9 +8,9 @@ import yaml
 from research_fellow.application.dsl.interaction import InteractionContract, load_interaction_contracts
 INTERACTION_BINDING_VERSION = "ajd-interaction-binding/v0.1"
 DEFAULT_INTERACTION_BINDING_PROFILE = "default"
-_RENDERERS = {"message", "text_input", "multi_select", "review_form", "approval", "confirm"}
+_RENDERERS = {"message", "text_input", "multi_select", "review_form", "approval", "confirm", "external_llm"}
 _MODE_RENDERERS = {
-    "inform": {"message"}, "request_input": {"text_input"}, "select": {"multi_select"},
+    "inform": {"message"}, "request_input": {"text_input", "external_llm"}, "select": {"multi_select"},
     "review": {"review_form"}, "decide": {"approval"}, "confirm": {"confirm"},
 }
 @dataclass(frozen=True)
@@ -36,6 +36,7 @@ def _validate_renderer(contract: InteractionContract, renderer: Mapping[str, Any
         "review_form": {"fields", "submit_label", "variant", "regenerate_label"},
         "approval": {"item_id", "item_label", "output_id_field", "approve_label", "defer_label", "reject_label", "comment_label", "select_all_label", "empty_label", "default_all"},
         "confirm": {"confirm_label", "cancel_label"},
+        "external_llm": {"prompt_label", "response_label", "submit_label"},
     }
     unknown = set(renderer) - common - specific[renderer_type]
     if unknown:
@@ -96,6 +97,12 @@ def _validate_renderer(contract: InteractionContract, renderer: Mapping[str, Any
         for key in ("item_id", "item_label", "approve_label", "defer_label", "reject_label", "comment_label"):
             if not str(renderer.get(key) or "").strip():
                 raise ValueError(f"approval {key} is required: {contract.interaction_id}")
+    if renderer_type == "external_llm":
+        if len(contract.required_inputs) != 1 or len(contract.outputs) != 1:
+            raise ValueError(f"external_llm v0.1 expects one required input and one output: {contract.interaction_id}")
+        for key in ("prompt_label", "response_label", "submit_label"):
+            if not str(renderer.get(key) or "").strip():
+                raise ValueError(f"external_llm {key} is required: {contract.interaction_id}")
     return dict(renderer)
 @lru_cache(maxsize=8)
 def load_interaction_bindings(profile: str = DEFAULT_INTERACTION_BINDING_PROFILE) -> dict[str, InteractionBinding]:

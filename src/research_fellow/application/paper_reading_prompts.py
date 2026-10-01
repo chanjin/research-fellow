@@ -2,11 +2,12 @@
 from __future__ import annotations
 from typing import Any
 from research_fellow.infrastructure.document_reader import ExtractedDocument
+from research_fellow.infrastructure.prompt_renderer import apply_review_language_policy
 
 def reading_prompt(document: ExtractedDocument, paper: dict[str, Any], context: str) -> str:
     source = "\n\n".join(f"[p.{page.page_number}] {page.text[:2200]}" for page in document.pages[:10])[:20000]
-    return f"""You are an academic reading assistant. Read only the source text below.
-Write Korean in this exact block format, separated by ---. Return one to five high-value question blocks by default; return more only when each item has distinct, sufficient evidence. Never return more than ten blocks.
+    return apply_review_language_policy(f"""You are an academic reading assistant. Read only the source text below.
+Write researcher-facing sentences in Korean in this exact block format, separated by ---. Return one to five high-value question blocks by default; return more only when each item has distinct, sufficient evidence. Never return more than ten blocks.
 First, write a substantial, evidence-grounded Korean research summary, then an M1 interpretation for the supplied research context, suggested shelf labels, and the question blocks.
 Research summary:
 Start with this separate three-part overview so a researcher can understand the paper at a glance:
@@ -45,7 +46,7 @@ Source text:
 {source}
 
 Output check before responding:
-- Use Korean only.
+- Use Korean for narrative sentences. Keep 레이블, 핵심 개념, 적용 대상 values as concise English terms/phrases.
 - First write Research summary beginning with 대상 문제, 해결 접근, 핵심 결과; then M1 research-context interpretation, Suggested shelf labels, then the question blocks. Do not write content outside these sections.
 - Return one to five complete question blocks by default, and never more than ten, separated by ---.
 - Every block must contain exactly these Korean field labels: 질문, 잠정 답변, 근거, 한계·유보, 연구 관련성, 레이블, 카드 제목, 핵심 개념, 적용 대상, 적용 조건, 카드 맥락, 설계 함의, 주변 원문.
@@ -53,14 +54,14 @@ Output check before responding:
 - Card context must remain an independent, source-intrinsic description of this paper. Keep project-specific usefulness only in Research relevance; never copy the supplied Research context into Card context.
 - Return 2 to 5 independent evidence locations when the source supports them. Never return more than 5 evidence locations for one question.
 - Prefer fewer complete blocks to an incomplete response. Keep every non-evidence field concise (one or two sentences).
-"""
+""")
 
 
 def second_pass_prompt(document: ExtractedDocument, paper: dict[str, Any], questions: list[dict[str, Any]]) -> str:
     """Re-read broader paper context to test and enrich the first-pass interpretations."""
     question_text = "\n".join(f"ID: {item['question_id']}\nQuestion: {item['question']}\nFirst answer: {item['tentative_answer']}\nFirst evidence: {'; '.join(item['evidence'])}" for item in questions)
     source = "\n\n".join(f"[p.{page.page_number}] {page.text[:2000]}" for page in document.pages[:16])[:32000]
-    return f"""You are conducting a second, question-driven reading of one academic paper.
+    return apply_review_language_policy(f"""You are conducting a second, question-driven reading of one academic paper.
 Re-read the source text to verify, correct, and enrich each first-pass answer below. Do not write a paper summary and do not add facts outside the source.
 
 Paper: {paper['title']}
@@ -76,5 +77,5 @@ Remaining uncertainty: what this paper still cannot establish
 Source text for second pass:
 {source}
 
-Output check: Korean only; one block for every supplied ID; no essay; every additional evidence item contains p.N.
-"""
+Output check: Korean narrative sentences; keep short taxonomy/tag terms in English; one block for every supplied ID; no essay; every additional evidence item contains p.N.
+""")

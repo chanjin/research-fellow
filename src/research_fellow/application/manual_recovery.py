@@ -1,11 +1,12 @@
-"""External-LLM manual recovery helpers for failed long-running stages."""
+"""External-LLM copy/paste execution helpers for long-running stages."""
 from __future__ import annotations
 
 import json
 from typing import Any
 
 from research_fellow.application.advising_rq_parsers import parse_research_question_suggestions, parse_rq_priority_assessment
-from research_fellow.application.search_profile_strategy import parse_auto_search_strategy, parse_keyword_plan
+from research_fellow.application.search_profile_strategy import parse_keyword_plan
+from research_fellow.application.literature_discovery_parsers import parse_external_literature_results
 from research_fellow.application.llm_retry import classify_output
 
 
@@ -15,9 +16,9 @@ def external_recovery_prompt(failure: dict[str, Any]) -> str:
     if prompt:
         return prompt
     return (
-        "아래 실패 작업을 외부 LLM에서 대신 수행하세요.\n"
+        "아래 Research Fellow 작업을 외부 LLM에서 수행하세요.\n"
         f"Stage: {failure.get('stage', '')}\n"
-        f"Error: {failure.get('error_type', '')} - {failure.get('error_message', '')}\n\n"
+        f"Reason: {failure.get('error_type', '')} - {failure.get('error_message', '')}\n\n"
         "필수 출력 형식을 끝까지 완성하고 설명문보다 요구된 결과를 우선하세요."
     )
 
@@ -44,9 +45,9 @@ def validate_external_response(stage: str, response: str, context: dict[str, Any
     text = response.strip()
     try:
         if stage == "search_strategy":
-            plan = parse_auto_search_strategy(text)
-            if not (plan.get("phrases") or plan.get("queries")):
-                return False, "검색 phrase 또는 Boolean query를 찾지 못했습니다."
+            discovery = parse_external_literature_results(text, max_results=20)
+            if not discovery.get("papers"):
+                return False, "외부 LLM 응답에서 유효한 논문 후보를 찾지 못했습니다."
         elif stage == "search_strategy_legacy":
             phrases, _ = parse_keyword_plan(text)
             if not phrases:
@@ -70,6 +71,9 @@ def validate_external_response(stage: str, response: str, context: dict[str, Any
         elif stage in {"fulltext_review", "synthesis"}:
             if len(text) < 20:
                 return False, "응답이 너무 짧습니다."
+        elif stage in {"research_answer_draft", "research_answer_first_draft", "research_answer_enrichment"}:
+            if len(text) < 80:
+                return False, "연구질문 답변 문서가 너무 짧습니다."
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         return False, str(error)
     return True, "외부 응답 형식이 유효합니다."

@@ -159,6 +159,199 @@ def _knowledge_gaps(
     return gaps[:limit]
 
 
+
+def _resolved_paper_origins(ledger: Ledger, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for raw in values:
+        item = dict(raw)
+        if str(item.get("origin_type") or "") == "researcher_question":
+            rq = ledger.research_question_thread(str(item.get("origin_id") or "")) or {}
+            if rq:
+                item["research_question"] = str(rq.get("question") or item.get("research_question") or "")
+                item["researcher_comment"] = str((rq.get("source_payload") or {}).get("researcher_comment") or rq.get("research_context") or "")
+        result.append(item)
+    return result
+
+
+def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) -> list[dict[str, Any]]:
+    cards = memory.all(limit=500)
+    approved_by_paper: dict[str, list[dict[str, Any]]] = {}
+    approved_by_source: dict[str, list[dict[str, Any]]] = {}
+    for card in cards:
+        provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+        paper_id = str(provenance.get("paper_id") or "").strip()
+        source_name = str(provenance.get("source_name") or "").strip().casefold()
+        if paper_id:
+            approved_by_paper.setdefault(paper_id, []).append(card)
+        if source_name:
+            approved_by_source.setdefault(source_name, []).append(card)
+        for evidence in list(card.get("supporting_evidence") or []):
+            if not isinstance(evidence, dict):
+                continue
+            ev_paper_id = str(evidence.get("paper_id") or "").strip()
+            ev_source = str(evidence.get("source_name") or "").strip().casefold()
+            if ev_paper_id:
+                approved_by_paper.setdefault(ev_paper_id, []).append(card)
+            if ev_source:
+                approved_by_source.setdefault(ev_source, []).append(card)
+
+    pending_by_paper: dict[str, list[dict[str, Any]]] = {}
+    for req in ledger.phenomena(type_="decision_request", status="proposed"):
+        if str(req.get("subject_type") or "") != "knowledge_card":
+            continue
+        payload = dict(req.get("payload") or {})
+        paper_id = str(payload.get("paper_id") or "").strip()
+        card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+        if paper_id and card:
+            pending_by_paper.setdefault(paper_id, []).append({
+                "request_id": str(req.get("phenomenon_id") or ""),
+                "rq_id": str(payload.get("rq_id") or (card.get("provenance") or {}).get("research_question_id") or ""),
+                "intent_id": str(payload.get("intent_id") or ""),
+                "research_question": str(payload.get("research_question") or ""),
+                "card_id": str(card.get("card_id") or req.get("subject_id") or ""),
+                "title": str(card.get("title") or ""),
+                "claim": str(card.get("claim") or ""),
+            })
+
+    result: list[dict[str, Any]] = []
+    for paper in ledger.shelf_papers(limit=limit):
+        paper_id = str(paper.get("paper_id") or "")
+        title = str(paper.get("title") or "Untitled paper")
+        origins = _resolved_paper_origins(ledger, list(paper.get("origin_links") or []))
+        rq_origins = {
+            str(item.get("origin_id") or ""): item
+            for item in origins
+            if str(item.get("origin_type") or "") == "researcher_question" and str(item.get("origin_id") or "")
+        }
+
+        approved = approved_by_paper.get(paper_id, []) or approved_by_source.get(title.casefold(), [])
+        dedup_approved: list[dict[str, Any]] = []
+        seen_cards: set[str] = set()
+        for card in approved:
+            card_id = str(card.get("card_id") or "")
+            if not card_id or card_id in seen_cards:
+                continue
+            seen_cards.add(card_id)
+            provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+            dedup_approved.append({
+                "card_id": card_id,
+                "rq_id": str(provenance.get("research_question_id") or ""),
+                "title": str(card.get("title") or ""),
+                "claim": str(card.get("claim") or ""),
+            })
+
+        question_analyses = ledger.paper_question_analyses(paper_id)
+        legacy_analysis = ledger.paper_analysis(paper_id) or {}
+        bundles: dict[str, dict[str, Any]] = {}
+        for row in question_analyses:
+            rq_id = str(row.get("research_question_id") or "")
+            origin = rq_origins.get(rq_id, {})
+            rq = ledger.research_question_thread(rq_id) if rq_id else None
+            bundles[rq_id] = {
+                "rq_id": rq_id,
+                "question": str((rq or {}).get("question") or row.get("research_question") or origin.get("research_question") or ""),
+                "researcher_comment": str(((rq or {}).get("source_payload") or {}).get("researcher_comment") or origin.get("researcher_comment") or ""),
+                "intent_id": str(row.get("intent_id") or ""),
+                "summary": str(row.get("summary") or ""),
+                "review": str(row.get("reading_raw_output") or ""),
+                "updated_at": str(row.get("updated_at") or ""),
+                "pending_knowledge_cards": [],
+                "approved_knowledge_cards": [],
+            }
+
+        # Preserve visibility for linked questions even before a full-text review exists.
+        for rq_id, origin in rq_origins.items():
+            bundles.setdefault(rq_id, {
+                "rq_id": rq_id,
+                "question": str(origin.get("research_question") or ""),
+                "researcher_comment": str(origin.get("researcher_comment") or ""),
+                "intent_id": "", "summary": "", "review": "", "updated_at": "",
+                "pending_knowledge_cards": [], "approved_knowledge_cards": [],
+            })
+
+        # Legacy workspaces only had one paper-level analysis. Attach it to a matching
+        # question when possible, otherwise expose it as a legacy interpretation.
+        if legacy_analysis and not question_analyses and str(legacy_analysis.get("summary") or "").strip():
+            legacy_question = str(legacy_analysis.get("research_question") or "").strip()
+            match_id = next((rq_id for rq_id, b in bundles.items() if legacy_question and b.get("question") == legacy_question), "")
+            key = match_id or "legacy"
+            bundle = bundles.setdefault(key, {
+                "rq_id": match_id, "question": legacy_question or "Legacy review", "researcher_comment": "",
+                "intent_id": "", "summary": "", "review": "", "updated_at": "",
+                "pending_knowledge_cards": [], "approved_knowledge_cards": [],
+            })
+            bundle["summary"] = str(legacy_analysis.get("summary") or "")
+            bundle["review"] = str(legacy_analysis.get("reading_raw_output") or "")
+            bundle["updated_at"] = str(legacy_analysis.get("updated_at") or "")
+
+        for item in pending_by_paper.get(paper_id, []):
+            rq_id = str(item.get("rq_id") or "")
+            if not rq_id and item.get("intent_id"):
+                linked = ledger.research_questions_for_intent(str(item.get("intent_id") or ""))
+                rq_id = str((linked[0] if linked else {}).get("rq_id") or "")
+            key = rq_id or "unscoped"
+            bundle = bundles.setdefault(key, {
+                "rq_id": rq_id, "question": str(item.get("research_question") or ""), "researcher_comment": "",
+                "intent_id": str(item.get("intent_id") or ""), "summary": "", "review": "", "updated_at": "",
+                "pending_knowledge_cards": [], "approved_knowledge_cards": [],
+            })
+            bundle["pending_knowledge_cards"].append(item)
+
+        for card in dedup_approved:
+            rq_id = str(card.get("rq_id") or "")
+            if not rq_id and len(rq_origins) == 1:
+                rq_id = next(iter(rq_origins))
+            key = rq_id or "unscoped"
+            bundle = bundles.setdefault(key, {
+                "rq_id": rq_id, "question": str(rq_origins.get(rq_id, {}).get("research_question") or ""),
+                "researcher_comment": str(rq_origins.get(rq_id, {}).get("researcher_comment") or ""),
+                "intent_id": "", "summary": "", "review": "", "updated_at": "",
+                "pending_knowledge_cards": [], "approved_knowledge_cards": [],
+            })
+            bundle["approved_knowledge_cards"].append(card)
+
+        abstract = str(paper.get("abstract") or "").strip()
+        common_summary = abstract
+        common_summary_source = "abstract" if abstract else ""
+        if not common_summary and legacy_analysis:
+            common_summary = str(legacy_analysis.get("summary") or "").strip()
+            common_summary_source = "legacy_analysis" if common_summary else ""
+
+        questions = ledger.paper_reading_questions(paper_id)
+        question_views = sorted(
+            bundles.values(),
+            key=lambda row: (str(row.get("updated_at") or ""), str(row.get("question") or "")),
+            reverse=True,
+        )
+        result.append({
+            "paper_id": paper_id, "title": title,
+            "authors": list(paper.get("authors") or []),
+            "publication_year": str(paper.get("publication_year") or ""),
+            "source_url": str(paper.get("source_url") or ""),
+            "abstract_url": str(paper.get("abstract_url") or paper.get("source_url") or ""),
+            "full_text_url": str(paper.get("full_text_url") or ""),
+            "pdf_url": str(paper.get("pdf_url") or ""),
+            "pdf_path": str(paper.get("pdf_path") or ""),
+            "source_id": str(paper.get("source_id") or ""),
+            "shelf_status": str(paper.get("shelf_status") or "reference"),
+            "reading_status": str(paper.get("reading_status") or "unread"),
+            "intake_source": str(paper.get("intake_source") or ""),
+            "origin_links": origins,
+            "labels": list(paper.get("labels") or []),
+            "summary": common_summary,
+            "summary_source": common_summary_source,
+            "researcher_note": str(legacy_analysis.get("researcher_note") or ""),
+            "has_analysis": bool(question_analyses or legacy_analysis),
+            "has_generated_analysis": bool(question_analyses or str(legacy_analysis.get("generated_at") or "").strip()),
+            "reading_question_count": len(questions),
+            "knowledge_card_count": len(dedup_approved),
+            "pending_knowledge_card_count": sum(len(x.get("pending_knowledge_cards") or []) for x in question_views),
+            "knowledge_cards": dedup_approved[:8],
+            "question_interpretations": question_views,
+            "asset_available": bool(str(paper.get("pdf_path") or "").strip()),
+        })
+    return result
+
 def knowledge_workspace_snapshot(
     memory: KnowledgeMemory,
     relation_memory: RelationMemory,
@@ -174,6 +367,7 @@ def knowledge_workspace_snapshot(
     pending_reviews = ledger.ontology_change_reviews(status="proposed", limit=100)
     versions = ledger.ontology_versions(limit=5)
     gaps = _knowledge_gaps(cards, pending_ontology_reviews=len(pending_reviews), limit=limit)
+    evidence_library = _evidence_library(memory, ledger, limit=max(limit, 500))
 
     evidence_levels: dict[str, int] = {}
     statuses: dict[str, int] = {}
@@ -198,6 +392,9 @@ def knowledge_workspace_snapshot(
             "contested_cards": statuses.get("contested", 0),
             "new_changes": sum(1 for item in changes if item.status == "new"),
             "gaps": len(gaps),
+            "papers": len(evidence_library),
+            "papers_with_knowledge": sum(1 for item in evidence_library if int(item.get("knowledge_card_count") or 0) > 0),
+            "analyzed_papers": sum(1 for item in evidence_library if item.get("has_analysis")),
         },
         "evidence_levels": evidence_levels,
         "statuses": statuses,
@@ -226,6 +423,7 @@ def knowledge_workspace_snapshot(
                 for item in sorted(ontology.get("types", []), key=lambda row: int(row.get("card_count") or 0), reverse=True)[:12]
             ],
         },
+        "evidence_library": evidence_library,
         "gaps": [item.as_dict() for item in gaps],
     }
 

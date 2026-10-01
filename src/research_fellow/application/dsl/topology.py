@@ -44,7 +44,7 @@ def _validate_topology_syntax(raw: dict[str, Any], relative_path: str) -> None:
             f"Unsupported topology DSL version {raw.get('topology')!r}: {relative_path}"
         )
     required = ("id", "purpose", "roots", "loops", "boundary_interactions")
-    missing = [key for key in required if not raw.get(key)]
+    missing = [key for key in required if key not in raw]
     if missing:
         raise ValueError(f"AJD topology missing {missing}: {relative_path}")
     roots = raw.get("roots")

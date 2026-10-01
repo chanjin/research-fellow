@@ -5,18 +5,18 @@ Strict evidence rules:
 - Ignore page furniture and publication metadata such as issue dates, journal/page headers, copyright, Creative Commons notices, URL-only lines, and navigation. They are never evidence.
 - Prefer distinct findings, methods, conditions, limitations, or research gaps rather than restating one point.
 - A candidate is not approved knowledge. Do not create JSON, IDs, statuses, decisions, or storage instructions.
-- Write every field value in English.
+- Write Title, Claim, Conditions, and Limits in Korean. Keep Labels in concise English. Keep Evidence as exact source-language excerpts.
 - `Claim` is an M1-generated, source-grounded proposition. Rephrase the finding in your own words; never paste a source sentence or quotation as the claim.
 - `Evidence` is separate from the claim: provide one or two short, exact source-language excerpts which directly support the proposition. Do not translate or paraphrase evidence.
 - Separate cards with a line containing only `---`.
 
 For every card, return these exact English labels:
 Title: a concise claim-centred title; never use the document filename or “Candidate 1”
-Claim: one English source-grounded proposition, written in M1's own words
+Claim: one Korean source-grounded proposition, written in M1's own words
 Evidence: one or two short exact source excerpts, on one line and separated with ` / `
 Labels: 2–5 concrete concepts, methods, problems, evaluations, or application areas
 Conditions: population, data, environment, assumptions, or scope visible in the text
-Limits: author-stated limitation, counterexample, or untested scope; say “No explicit limitation found in the supplied text” when absent
+Limits: author-stated limitation, counterexample, or untested scope in Korean; say “원문에서 명시적 한계를 확인하지 못함” when absent
 
 Document title: {{ document_title }}
 Source kind: {{ source_kind }}

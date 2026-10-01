@@ -1,0 +1,15 @@
+capability: ajd-capability-contract/v0.2
+id: publish_research_answer_draft
+kind: action
+purpose: 1차 문서와 보강된 2차 최종 문서를 연구질문에 연결된 추적 가능한 답변 버전으로 게시한다.
+uses:
+  required: [rq_id, research_question, first_answer_document, answer_draft]
+  optional: []
+produces: [status, answer_draft_id]
+data:
+  rq_id: {type: Identifier}
+  research_question: {type: ResearchQuestion}
+  first_answer_document: {type: ResearchAnswerDraft}
+  answer_draft: {type: ResearchAnswerDraft}
+  status: {type: Status}
+  answer_draft_id: {type: Identifier}

@@ -126,7 +126,6 @@ interactions:
     item_detail:
     - created_at
     empty_label: 최근 Knowledge Update가 없습니다.
-
 - id: triage_research_question
   renderer:
     type: review_form
@@ -148,3 +147,50 @@ interactions:
     help: 원문 근거와 잠정 해석을 검토하여 지식자산에 반영할 방식을 결정합니다.
     variant: paper_reading_claim
     submit_label: 판단 저장
+- id: provide_external_llm_result
+  renderer:
+    type: external_llm
+    title: 외부 LLM 실행 필요
+    help: 아래 프롬프트를 외부 LLM에 복사해 실행한 뒤 전체 응답을 붙여 넣으세요. 응답은 현재 stage 형식으로 검증된 뒤에만 workflow에
+      반영됩니다.
+    prompt_label: 외부 LLM용 프롬프트
+    response_label: 외부 LLM 응답 붙여넣기
+    submit_label: 응답 검증 · 계속 진행
+- id: review_literature_candidates
+  renderer:
+    type: multi_select
+    title: 문헌 후보 검토 · 논문별 서재함 결정
+    help: 외부 LLM이 찾은 후보를 한 편씩 검토합니다. 초록 페이지와 원문 링크를 확인하고, 보존하는 논문은 즉시 서재함에 등록합니다. 모든 후보 검토가 끝나면 보존 논문에 대한 원문 기반 요약 작업으로 이어집니다.
+    item_label: title
+    item_detail:
+    - authors
+    - published
+    - relevance_score
+    - why_relevant
+    submit_label: 후보 검토 완료 · 원문 요약으로 계속
+    empty_label: 서재함에 보존할 논문을 하나 이상 선택하세요.
+- id: request_followup_literature_direction
+  renderer:
+    type: text_input
+    title: 추가 문헌 조사 방향
+    help: 현재 연구질문과 기존 확보 근거를 바탕으로, 이번 추가 탐색에서 무엇을 더 확인할지 지정합니다. 기존 논문을 단순 반복 검색하지 않고 이 방향을 우선합니다.
+    fields:
+    - name: direction
+      label: 추가로 조사할 방향
+      widget: text_area
+      required: true
+      height: 120
+      placeholder: '예: Agent Harness와 장기 실행 안정성 관련 최근 연구를 중심으로 조사'
+    - name: specific_questions
+      label: 이번 조사에서 특히 확인할 내용 (선택)
+      widget: text_area
+      required: false
+      height: 110
+      placeholder: '예: 기존 agent loop의 한계, 2025~2026년 최신 접근, 산업 적용 사례'
+    - name: expected_evidence
+      label: 기대하는 근거 형태 (선택)
+      widget: text_area
+      required: false
+      height: 90
+      placeholder: '예: 비교 실험, 장기 실행 실패 사례, 실제 시스템 평가 결과'
+    submit_label: 추가 문헌 조사 시작

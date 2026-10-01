@@ -97,16 +97,22 @@ def execute_auto_research_cycle(
 
 def _m2_research_state_update(context: dict[str, Any]) -> None:
     """Refresh existing RQs from new knowledge before generating or prioritizing follow-up work."""
+    tracker: ExecutionRunTracker = context["run_tracker"]
+    manual_state = tracker.manual_override(stage="research_state_update")
     try:
         result = execute_research_state_update(
             context["ledger"],
             context["knowledge_updates"],
             context.get("research_question_backlog") or [],
             drafter=context["state_update_drafter"],
+            manual_response=manual_state or None,
         )
-    except LLMRetryExhausted:
-        # State refresh is advisory to the broader cycle. Preserve the main RQ-generation path
-        # when an older/manual drafter cannot satisfy the new structured assessment contract.
+        if manual_state:
+            tracker.clear_manual_override(stage="research_state_update")
+    except LLMRetryExhausted as error:
+        if error.error_type == "external_llm_required":
+            raise
+        # Non-policy failures remain advisory to the broader cycle.
         result = {
             "status": "needs_attention", "state_transitions": [], "followup_questions": [],
             "resolved_count": 0, "reinforced_count": 0,
@@ -299,7 +305,8 @@ def _recover_retry_exhausted(
     review_id = str(context.get("review_id") or "")
     tracker: ExecutionRunTracker = context["run_tracker"]
     run_id = tracker.run_id
-    if review_id:
+    external_manual = error.error_type == "external_llm_required"
+    if review_id and not external_manual:
         ledger.fail_research_state_review(review_id, str(error))
     failure_context: dict[str, Any] = {"kind": "auto_cycle"}
     if review_id:
@@ -314,7 +321,7 @@ def _recover_retry_exhausted(
     )
     if not review_id:
         return workflow_result(
-            definition, context, status="rq_generation_failed",
+            definition, context, status="needs_attention" if external_manual else "rq_generation_failed",
             values={
                 "source_card_count": len(context["valid_card_ids"]),
                 "review_id": "", "research_questions": [], "ranked_questions": [],
@@ -339,7 +346,8 @@ def _recover_unexpected_error(
 ) -> dict[str, Any]:
     review_id = str(context.get("review_id") or "")
     ledger: Ledger = context["ledger"]
-    if review_id:
+    external_manual = error.error_type == "external_llm_required"
+    if review_id and not external_manual:
         ledger.fail_research_state_review(review_id, str(error))
     context["run_tracker"].needs_attention(
         stage="unexpected_error", error_type="unexpected_error", error_message=str(error),

@@ -264,7 +264,14 @@ from research_fellow.application.research_intake import (
     submit_external_advisory_interpretation,
     submit_research_question,
 )
+from research_fellow.application.research_question_progression import start_research_question_progression
+from research_fellow.application.research_actions import request_additional_literature, request_answer_update
+from research_fellow.application.persistent_research_runtime import (
+    PersistentResearchBindings, advance_persistent_research,
+)
 from research_fellow.application.knowledge_workspace import knowledge_workspace_snapshot
+from research_fellow.application.paper_library import update_paper_researcher_metadata
+from research_fellow.application.literature_candidate_review import preserve_literature_candidate, apply_candidate_review_response
 from research_fellow.application.system_workspace import system_workspace_snapshot
 from research_fellow.application.relations import (
     RELATION_TYPES, create_relation_candidate, lineage_dot, lineage_overview_prompt,
@@ -287,10 +294,11 @@ from research_fellow.storage import Ledger
 from research_fellow.prompt_profiles import apply_prompt_profile
 from research_fellow.workspace_profiles import (
     BUILTIN_WORKSPACE_KEYS, delete_custom_workspace, get_workspace_profile,
-    load_workspace_profiles, save_custom_workspace,
+    bootstrap_local_workspace_from_server, load_workspace_profiles, persist_workspace_profile_metadata, save_custom_workspace,
 )
 from research_fellow.workspace_archive import build_workspace_archive, restore_workspace_archive
-from research_fellow.workspace_sync import AllWorkspacesSync
+from research_fellow.workspace_sync import AllWorkspacesSync, WorkspaceSync
+from research_fellow.local_settings import get_workspace_sync_server_root, set_workspace_sync_server_root
 from research_fellow.ui.developer import render_developer_screen
 from research_fellow.ui.interaction import (
     render_interaction, render_interaction_with_autonomy, render_waiting_workflow_interaction,
@@ -317,7 +325,13 @@ DATA = Path(os.environ.get("RESEARCH_FELLOW_DATA_DIR", ROOT / "data")).expanduse
 DATA.mkdir(parents=True, exist_ok=True)
 WORKSPACE_CONFIG = DATA / "workspace_profiles.json"
 os.environ["RESEARCH_FELLOW_WORKSPACE_CONFIG"] = str(WORKSPACE_CONFIG)
-WORKSPACE_PROFILES = load_workspace_profiles(WORKSPACE_CONFIG)
+_workspace_discovery_server_root = (
+    os.environ.get("RESEARCH_FELLOW_SERVER_DIR", "").strip()
+    or get_workspace_sync_server_root(DATA)
+)
+WORKSPACE_PROFILES = load_workspace_profiles(
+    WORKSPACE_CONFIG, data_dir=DATA, server_root=_workspace_discovery_server_root or None
+)
 
 
 def _requested_workspace_key() -> str:
@@ -348,7 +362,12 @@ _db_override = os.environ.get(f"RESEARCH_FELLOW_DB_FILENAME_{_workspace_env_suff
 if not _db_override and WORKSPACE_KEY == "general":
     _db_override = os.environ.get("RESEARCH_FELLOW_DB_FILENAME", "").strip()
 LOCAL_DB = DATA / (_db_override or WORKSPACE_PROFILE.db_filename)
+if not LOCAL_DB.exists():
+    bootstrap_local_workspace_from_server(
+        WORKSPACE_PROFILE, data_dir=DATA, server_root=_workspace_discovery_server_root or None
+    )
 ledger = Ledger(LOCAL_DB)
+persist_workspace_profile_metadata(LOCAL_DB, WORKSPACE_PROFILE)
 set_llm_audit_logger(ledger.record_llm_call)
 set_llm_audit_log_path(CACHE / "logs" / "llm_calls.jsonl")
 # SQLite is the canonical durable store. Only the general workspace imports the
@@ -664,7 +683,7 @@ def show_auto_retry_tasks(model: str, use_ollama: bool) -> None:
     stage_labels = {
         "rq_generation": "새 지식 → 연구질문 생성",
         "rq_prioritization": "연구질문 중요도 평가",
-        "search_strategy": "영문 검색전략 생성",
+        "search_strategy": "외부 LLM 논문 탐색",
         "search_strategy_legacy": "영문 검색키워드 복구",
         "abstract_screening": "초록 스크리닝",
         "fulltext_review": "상위 논문 본문 검토",
@@ -1058,25 +1077,83 @@ def meaning_summary_screen(model: str, use_ollama: bool) -> None:
             st.write(f"- {report['created_at'][:10]} · {report['payload'].get('title', 'M2 보고서')} · {state.get('question', '연결된 연구질문 없음')}")
 
 
+def _hydrate_current_workspace_from_server_once() -> dict[str, int]:
+    """Safely hydrate missing server-side durable rows into the current local replica once per session."""
+    server_root_value = (
+        os.environ.get("RESEARCH_FELLOW_SERVER_DIR", "").strip()
+        or get_workspace_sync_server_root(DATA)
+    )
+    if not server_root_value:
+        return {"applied": 0, "conflicts": 0}
+    server_db = (
+        Path(server_root_value).expanduser() / "workspaces" / WORKSPACE_KEY / WORKSPACE_PROFILE.server_db_filename
+    )
+    if not server_db.exists():
+        return {"applied": 0, "conflicts": 0}
+    token = f"workspace-startup-pull::{WORKSPACE_KEY}::{server_db.resolve()}"
+    cached = st.session_state.get(token)
+    if isinstance(cached, dict):
+        return {"applied": int(cached.get("applied", 0)), "conflicts": int(cached.get("conflicts", 0))}
+    result = WorkspaceSync(LOCAL_DB, server_db).pull_from_server()
+    payload = {
+        "applied": len([item for item in result.changes if item.direction == "server→local" and item.action != "conflict"]),
+        "conflicts": len(result.conflicts),
+    }
+    st.session_state[token] = payload
+    return payload
+
+
 def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model: str, *, developer_mode: bool = False) -> None:
     """Job-centred landing workspace for continuous agent operation."""
     english = st.session_state.get("response-language", "English") == "English"
+
+    def _persistent_runtime_bindings() -> PersistentResearchBindings:
+        return PersistentResearchBindings(
+            cache_dir=CACHE,
+            rq_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+            priority_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+            keyword_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+            abstract_reviewer=lambda prompt: llm_draft(prompt, model, use_ollama, profile="abstract_triage"),
+            fulltext_drafter=lambda prompt: paper_draft_result(prompt, model, use_ollama, "full_text_similarity").text,
+            synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
+        )
+
+    # Cross-workflow dispatch is idempotent because it consumes only durable
+    # ready intents and unreviewed knowledge updates. This also recovers work
+    # left ready by a previous browser/session without inventing UI state.
+    try:
+        startup_continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(), max_m1_items=3,
+        )
+        if startup_continuation.get("advanced_count"):
+            st.session_state["persistent-runtime-flash"] = startup_continuation.get("summary", "")
+    except Exception as error:
+        st.session_state["persistent-runtime-error"] = str(error)
+
     waiting = waiting_workflow_results(WORKFLOW_CHECKPOINTS)
-    failures = [
-        {
+    failures = []
+    for item in ledger.auto_research_failures(status="needs_attention", limit=50):
+        external_manual = str(item.get("error_type") or "") == "external_llm_required"
+        failures.append({
+            **item,
             "id": item.get("failure_id"),
-            "title": "Execution exception",
+            "title": "External LLM execution required" if external_manual else "Execution exception",
+            "summary": (
+                f"{item.get('stage', '')} · copy prompt → external LLM → paste response"
+                if external_manual else str(item.get("error_message") or "")
+            ),
             "error": item.get("error_message"),
-            "priority": "high",
+            "priority": "medium" if external_manual else "high",
             "created_at": item.get("created_at"),
             "source_type": "auto_research_failure",
-        }
-        for item in ledger.auto_research_failures(status="needs_attention", limit=50)
-    ]
+            "interaction_id": "provide_external_llm_result" if external_manual else "",
+        })
     attention = attention_queue_snapshot(ledger, waiting_workflows=waiting, exceptions=failures)
     running = running_work_snapshot(ledger, checkpoint_dir=WORKFLOW_CHECKPOINTS)
     activity = activity_feed_snapshot(ledger, limit=40)
-    research = research_workspace_snapshot(ledger, limit=20)
+    research = research_workspace_snapshot(
+        ledger, memory.all(), limit=20, attention_items=list(attention.get("items") or []),
+    )
     knowledge = knowledge_workspace_snapshot(memory, relations, ledger, limit=30)
     system = (
         system_workspace_snapshot(
@@ -1087,8 +1164,26 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
     def _attention_inputs(item: Mapping[str, Any]) -> Mapping[str, Any] | None:
         return interaction_inputs_for_attention_item(item, ledger)
 
+    def _attention_candidate_action(item: Mapping[str, Any], candidate: Mapping[str, Any], decision: str):
+        if str(item.get("interaction_id") or "") != "review_literature_candidates":
+            return {}
+        intent_id = str(item.get("round_id") or "")
+        if decision == "preserve":
+            return preserve_literature_candidate(
+                ledger, candidate, intent_id=intent_id, create_review_task=False,
+            )
+        if decision == "review_response":
+            return apply_candidate_review_response(
+                ledger,
+                intent_id=intent_id,
+                paper_id=str(candidate.get("paper_id") or ""),
+                candidate=candidate,
+                response=str(candidate.get("review_response") or ""),
+            )
+        return {"decision": decision}
+
     def _attention_submit(item: Mapping[str, Any], values: Mapping[str, Any]):
-        return apply_attention_response(
+        result = apply_attention_response(
             item, values, ledger=ledger, memory=memory, relations=relations,
             checkpoint_dir=WORKFLOW_CHECKPOINTS,
             runtime_binding_for=lambda workflow_id: attention_workflow_runtime_binding(
@@ -1098,9 +1193,65 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             ),
             ontology_draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
         )
+        round_id = str(item.get("round_id") or "").strip()
+        is_external_llm = str(item.get("interaction_id") or "") == "provide_external_llm_result"
+        payload = dict(item.get("payload") or {})
+        external_stage = str(payload.get("stage") or payload.get("current_stage") or "").strip()
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(),
+            intent_ids=[round_id] if (is_external_llm and round_id) else None,
+            max_m1_items=1 if (is_external_llm and round_id) else 3,
+            consume_knowledge_updates=not bool(is_external_llm and round_id),
+        )
+        if continuation.get("advanced_count"):
+            st.session_state["attention-continuation-flash"] = continuation.get("summary", "")
+            result.outcome["continuation"] = continuation
+
+        # A valid M1 discovery response must advance to a durable candidate-review
+        # checkpoint.  Do not silently report success if the response was accepted
+        # but the round failed before that next boundary.  The UI catches this
+        # exception in-place and preserves the pasted response for correction/retry.
+        if is_external_llm and round_id and external_stage == "search_strategy":
+            waiting_for_round = [
+                row for row in waiting_workflow_results(WORKFLOW_CHECKPOINTS)
+                if str((row.get("resume_metadata") or {}).get("intent_id") or "") == round_id
+            ]
+            if not waiting_for_round:
+                unresolved = [
+                    failure for failure in ledger.auto_research_failures(status="needs_attention", limit=200)
+                    if str(failure.get("intent_id") or "") == round_id
+                ]
+                if unresolved:
+                    latest = unresolved[0]
+                    raise RuntimeError(
+                        "외부 LLM 응답은 검증되었지만 문헌조사 다음 단계로 진행하지 못했습니다. "
+                        f"stage={latest.get('stage') or 'unknown'} · "
+                        f"{latest.get('error_message') or latest.get('error_type') or '실행 오류'}"
+                    )
+                run = next((
+                    row for row in ledger.auto_research_runs(statuses=("running", "needs_attention"), limit=200)
+                    if str(row.get("intent_id") or "") == round_id
+                ), None)
+                raise RuntimeError(
+                    "외부 LLM 응답은 검증되었지만 발견 문헌 검토 단계가 생성되지 않았습니다. "
+                    + (f"현재 run stage={run.get('current_stage')}." if run else "활성 run을 찾지 못했습니다.")
+                )
+        return result
 
     def _submit_research_question(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        return submit_research_question(ledger, payload)
+        created = submit_research_question(ledger, payload)
+        progression = start_research_question_progression(ledger, memory, created)
+        intent_ids = [
+            str(item.get("intent_id") or "")
+            for item in progression.get("dispatched_intents") or []
+            if str(item.get("intent_id") or "")
+        ]
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(),
+            intent_ids=intent_ids, max_m1_items=max(1, len(intent_ids)),
+            consume_knowledge_updates=False,
+        )
+        return {**created, "progression": {**progression, "execution": continuation}}
 
     def _prepare_external_advisory(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return prepare_external_advisory_interpretation(
@@ -1110,7 +1261,41 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
     def _submit_external_advisory(
         request: Mapping[str, Any], review: Mapping[str, Any]
     ) -> Mapping[str, Any]:
-        return submit_external_advisory_interpretation(ledger, request, review)
+        created = submit_external_advisory_interpretation(ledger, request, review)
+        progression = start_research_question_progression(ledger, memory, created)
+        intent_ids = [
+            str(item.get("intent_id") or "")
+            for item in progression.get("dispatched_intents") or []
+            if str(item.get("intent_id") or "")
+        ]
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(),
+            intent_ids=intent_ids, max_m1_items=max(1, len(intent_ids)),
+            consume_knowledge_updates=False,
+        )
+        return {**created, "progression": {**progression, "execution": continuation}}
+
+    def _request_additional_literature(rq_id: str, direction: Mapping[str, Any]) -> Mapping[str, Any]:
+        created = request_additional_literature(ledger, memory.all(), rq_id, direction)
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(),
+            intent_ids=[str(created.get("intent_id") or "")], max_m1_items=1,
+            consume_knowledge_updates=False,
+        )
+        return {**created, "execution": continuation}
+
+    def _request_answer_update(rq_id: str) -> Mapping[str, Any]:
+        created = request_answer_update(ledger, memory.all(), rq_id)
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(), max_m1_items=1,
+            consume_knowledge_updates=False,
+        )
+        return {**created, "execution": continuation}
+
+    def _update_paper_metadata(paper_id: str, labels: list[str] | str, note: str, full_text_url: str | None = None) -> Mapping[str, Any]:
+        return update_paper_researcher_metadata(
+            ledger, paper_id, labels=labels, researcher_note=note, full_text_url=full_text_url,
+        )
 
     render_operating_desk(
         st,
@@ -1130,8 +1315,12 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         research_submit_question=_submit_research_question,
         research_prepare_external_advisory=_prepare_external_advisory,
         research_submit_external_advisory=_submit_external_advisory,
+        research_request_additional_literature=_request_additional_literature,
+        research_request_answer_update=_request_answer_update,
         attention_interaction_inputs=_attention_inputs,
         attention_submit_response=_attention_submit,
+        attention_candidate_action=_attention_candidate_action,
+        knowledge_update_paper_metadata=_update_paper_metadata,
         english=english,
     )
 
@@ -8953,6 +9142,8 @@ def render_workspace_sync() -> None:
             if legacy:
                 legacy_path = Path(legacy).expanduser()
                 default_server = str(legacy_path.parent if legacy_path.suffix.lower() == ".db" else legacy_path)
+        if not default_server:
+            default_server = get_workspace_sync_server_root(DATA)
         server_value = st.text_input(
             "서버 루트 디렉터리",
             value=default_server,
@@ -8963,6 +9154,12 @@ def render_workspace_sync() -> None:
         if not server_value:
             st.info("서버 루트 디렉터리를 지정하면 전체 워크스페이스 동기화가 활성화됩니다.")
             return
+        saved_server = get_workspace_sync_server_root(DATA)
+        if server_value != saved_server:
+            try:
+                set_workspace_sync_server_root(DATA, server_value)
+            except Exception as exc:
+                st.warning(f"서버 루트 디렉터리 저장 실패: {exc}")
         try:
             server_root = Path(server_value).expanduser()
             sync = AllWorkspacesSync(WORKSPACE_PROFILES, DATA, server_root)
@@ -9034,6 +9231,20 @@ def main() -> None:
     if selected_workspace != WORKSPACE_KEY:
         st.query_params["workspace"] = selected_workspace
         st.rerun()
+    try:
+        startup_pull = _hydrate_current_workspace_from_server_once()
+        if startup_pull.get("applied"):
+            st.sidebar.success(ui_text(
+                f"서버에서 누락된 Workspace 데이터 {startup_pull['applied']}건을 복원했습니다.",
+                f"Restored {startup_pull['applied']} missing workspace records from the server.",
+            ))
+        if startup_pull.get("conflicts"):
+            st.sidebar.warning(ui_text(
+                f"서버/로컬 충돌 {startup_pull['conflicts']}건은 자동 복원하지 않았습니다. Workspace Sync에서 확인하세요.",
+                f"Left {startup_pull['conflicts']} server/local conflicts untouched. Review them in Workspace Sync.",
+            ))
+    except Exception as exc:
+        st.sidebar.warning(ui_text(f"시작 시 서버 데이터 복원 확인 실패: {exc}", f"Startup server hydration check failed: {exc}"))
     with st.sidebar.expander(ui_text("워크스페이스 추가·아카이브", "Add or archive workspaces"), expanded=False):
         st.caption(ui_text(
             "사용 중인 워크스페이스를 확인하고 새 공간을 만들거나 ZIP으로 아카이브할 수 있습니다.",

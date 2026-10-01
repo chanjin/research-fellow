@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from research_fellow.application import advisory_session
+from research_fellow.application import advisory_session, auto_literature
 from research_fellow.application.attention_resolution import WorkflowRuntimeBinding
 from research_fellow.application.episodic_memory import store_advisory_episode
 from research_fellow.storage import Ledger
@@ -24,6 +24,14 @@ def attention_workflow_runtime_binding(
     embedding_model: str,
 ) -> WorkflowRuntimeBinding:
     """Return runtime-only dependencies for a persisted workflow checkpoint."""
+    if workflow_id == "m1_auto_literature_review":
+        return WorkflowRuntimeBinding(
+            runtime_values={
+                "ledger": ledger,
+                "autonomy_audit_recorder": ledger.record_autonomy_decision,
+            },
+            namespace=vars(auto_literature),
+        )
     if workflow_id != "m2_advisory_session":
         return WorkflowRuntimeBinding({}, {})
 

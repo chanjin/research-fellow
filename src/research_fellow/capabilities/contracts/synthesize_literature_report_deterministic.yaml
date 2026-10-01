@@ -1,0 +1,13 @@
+capability: ajd-capability-contract/v0.2
+id: synthesize_literature_report_deterministic
+kind: action
+purpose: 선택 논문의 외부 LLM 1차 리뷰 결과를 추가 LLM 호출 없이 연구자용 1차 문헌조사 보고서로 구성한다.
+uses:
+  required: [search_profile, report_run, reviewed_papers]
+  optional: []
+produces: [synthesis]
+data:
+  search_profile: {type: SearchProfile}
+  report_run: {type: LiteratureReviewRun}
+  reviewed_papers: {type: PaperRef, cardinality: many}
+  synthesis: {type: LiteratureReport}

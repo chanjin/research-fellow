@@ -1,7 +1,7 @@
 capability: ajd-capability-contract/v0.2
 id: plan_literature_search
 kind: action
-purpose: Curation Intent의 목적에 맞는 문헌탐색 범위와 검색전략을 정한다.
+purpose: Curation Intent의 전체 맥락을 외부 LLM에 전달해 실제 관련 논문 후보를 직접 발견한다.
 uses:
   required:
   - curation_intent
@@ -9,6 +9,9 @@ uses:
 produces:
 - search_profile
 - search_strategy
+- discovered_candidates
+- auto_run_id
+- intent_id
 data:
   curation_intent:
     type: CurationIntent
@@ -16,3 +19,10 @@ data:
     type: SearchProfile
   search_strategy:
     type: SearchStrategy
+  discovered_candidates:
+    type: PaperRef
+    cardinality: many
+  auto_run_id:
+    type: Identifier
+  intent_id:
+    type: Identifier

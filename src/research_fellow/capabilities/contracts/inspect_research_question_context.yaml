@@ -1,0 +1,28 @@
+capability: ajd-capability-contract/v0.2
+id: inspect_research_question_context
+kind: decision
+purpose: 신규 Research Question과 관련된 승인 지식을 확인하고 후속 탐색 필요를 명시한다.
+uses:
+  required:
+    - research_question
+  optional: []
+produces:
+  - review_id
+  - matched_knowledge
+  - matched_knowledge_count
+  - exploration_need
+  - inspection_summary
+data:
+  research_question:
+    type: ResearchQuestion
+  review_id:
+    type: Identifier
+  matched_knowledge:
+    type: KnowledgeCard
+    cardinality: many
+  matched_knowledge_count:
+    type: Count
+  exploration_need:
+    type: Text
+  inspection_summary:
+    type: Text

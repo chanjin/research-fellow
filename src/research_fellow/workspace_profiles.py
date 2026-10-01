@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import json
 import os
 import re
+import sqlite3
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +97,91 @@ WORKSPACE_PROFILES: dict[str, ResearchWorkspaceProfile] = {
 BUILTIN_WORKSPACE_KEYS = frozenset(WORKSPACE_PROFILES)
 
 
+WORKSPACE_PROFILE_META_KEY = "workspace_profile_json"
+
+
+def _profile_payload(profile: ResearchWorkspaceProfile) -> dict[str, str]:
+    return {
+        "key": profile.key, "label": profile.label, "short_label": profile.short_label,
+        "purpose": profile.purpose, "topic_ko": profile.topic_ko, "topic_en": profile.topic_en,
+        "browser_title": profile.browser_title, "expertise_instruction": profile.expertise_instruction,
+    }
+
+
+def persist_workspace_profile_metadata(db_path: str | Path, profile: ResearchWorkspaceProfile) -> None:
+    """Persist minimal workspace identity with the durable DB for version-safe recovery."""
+    path = Path(db_path)
+    if not path.exists():
+        return
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES (?,?)",
+                (WORKSPACE_PROFILE_META_KEY, json.dumps(_profile_payload(profile), ensure_ascii=False)),
+            )
+    except sqlite3.DatabaseError:
+        return
+
+
+def _discovered_profile(db_path: Path, *, key_hint: str = "") -> ResearchWorkspaceProfile | None:
+    name = db_path.name
+    if name == "research_fellow.db":
+        return None
+    match = re.fullmatch(r"research_fellow_(.+)\.db", name)
+    if not match:
+        return None
+    fallback_key = _workspace_key(key_hint or match.group(1))
+    payload: dict[str, Any] = {}
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("SELECT value FROM schema_meta WHERE key=?", (WORKSPACE_PROFILE_META_KEY,)).fetchone()
+        if row:
+            parsed = json.loads(str(row[0] or "{}"))
+            if isinstance(parsed, dict):
+                payload = parsed
+    except (sqlite3.DatabaseError, json.JSONDecodeError, OSError):
+        payload = {}
+    payload = {**payload, "key": str(payload.get("key") or fallback_key)}
+    if not str(payload.get("label") or "").strip():
+        payload["label"] = fallback_key.replace("_", " ").title()
+    try:
+        profile = _custom_profile(payload)
+    except ValueError:
+        return None
+    if profile.db_filename != db_path.name:
+        profile = ResearchWorkspaceProfile(
+            key=profile.key, label=profile.label, short_label=profile.short_label,
+            db_filename=db_path.name, cache_name=profile.cache_name, purpose=profile.purpose,
+            topic_ko=profile.topic_ko, topic_en=profile.topic_en, browser_title=profile.browser_title,
+            expertise_instruction=profile.expertise_instruction, server_db_filename=db_path.name,
+        )
+    return profile
+
+
+
+def bootstrap_local_workspace_from_server(
+    profile: ResearchWorkspaceProfile, *, data_dir: str | Path, server_root: str | Path | None
+) -> Path | None:
+    """Seed a missing local workspace DB from the configured server workspace.
+
+    This is a one-time bootstrap only. Existing local databases are never overwritten;
+    subsequent reconciliation remains the responsibility of Workspace Sync.
+    """
+    if not server_root:
+        return None
+    local_db = Path(data_dir).expanduser() / profile.db_filename
+    if local_db.exists():
+        return local_db
+    server_db = (
+        Path(server_root).expanduser() / "workspaces" / profile.key / profile.server_db_filename
+    )
+    if not server_db.exists():
+        return None
+    local_db.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(server_db, local_db)
+    return local_db
+
 def _workspace_key(value: str) -> str:
     key = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
     if not key:
@@ -122,26 +209,49 @@ def _custom_profile(payload: dict[str, Any]) -> ResearchWorkspaceProfile:
     )
 
 
-def load_workspace_profiles(config_path: str | Path) -> dict[str, ResearchWorkspaceProfile]:
-    """Load built-ins plus user-created profiles; malformed entries are ignored."""
+def load_workspace_profiles(
+    config_path: str | Path, *, data_dir: str | Path | None = None, server_root: str | Path | None = None
+) -> dict[str, ResearchWorkspaceProfile]:
+    """Load built-ins/configured profiles and recover orphan workspace DBs when possible."""
     profiles = dict(WORKSPACE_PROFILES)
     path = Path(config_path)
-    if not path.exists():
-        return profiles
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return profiles
-    entries = payload.get("workspaces", []) if isinstance(payload, dict) else []
-    for item in entries:
-        if not isinstance(item, dict):
-            continue
+    if path.exists():
         try:
-            profile = _custom_profile(item)
-        except ValueError:
-            continue
-        if profile.key not in BUILTIN_WORKSPACE_KEYS:
-            profiles[profile.key] = profile
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        entries = payload.get("workspaces", []) if isinstance(payload, dict) else []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                profile = _custom_profile(item)
+            except ValueError:
+                continue
+            if profile.key not in BUILTIN_WORKSPACE_KEYS:
+                profiles[profile.key] = profile
+    known_files = {profile.db_filename for profile in profiles.values()}
+    if data_dir is not None:
+        root = Path(data_dir)
+        if root.exists():
+            for db_path in sorted(root.glob("research_fellow_*.db")):
+                if db_path.name in known_files:
+                    continue
+                profile = _discovered_profile(db_path)
+                if profile and profile.key not in profiles:
+                    profiles[profile.key] = profile
+                    known_files.add(profile.db_filename)
+    if server_root:
+        workspaces_root = Path(server_root).expanduser() / "workspaces"
+        if workspaces_root.exists():
+            for workspace_dir in sorted(path for path in workspaces_root.iterdir() if path.is_dir()):
+                candidates = sorted(workspace_dir.glob("research_fellow*.db"))
+                for db_path in candidates:
+                    profile = _discovered_profile(db_path, key_hint=workspace_dir.name)
+                    if profile and profile.key not in profiles:
+                        profiles[profile.key] = profile
+                        known_files.add(profile.db_filename)
+                        break
     return profiles
 
 

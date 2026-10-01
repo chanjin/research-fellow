@@ -120,8 +120,13 @@ def create_auto_exploration_intent_for_rq(
             "origin_type": "m2_knowledge", "origin_id": rq_id,
             "label": f"{question[:80]} 관련 지식 보완", "source_card_ids": source_card_ids,
         })
+    followup_direction = str(rq.get("_followup_direction") or "").strip()
+    intent_title = (
+        f"추가 탐색 · {followup_direction[:45]}"
+        if followup_direction else f"자동 RQ 탐색 · {question[:45]}"
+    )
     intent = CurationIntent(
-        intent_id=intent_id, title=f"자동 RQ 탐색 · {question[:45]}",
+        intent_id=intent_id, title=intent_title,
         purpose=need or f"이 연구질문의 핵심 지식 공백을 선행연구에서 확인한다: {rationale}",
         question=question,
         research_context="\n".join(item for item in [

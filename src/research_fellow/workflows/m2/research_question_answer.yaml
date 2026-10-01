@@ -1,0 +1,40 @@
+dsl: ajd-workflow/v0.2
+id: m2_research_question_answer
+revision: 2
+agent: m2
+realizes: [advisory_response]
+purpose: 연구자가 작성을 승인한 연구질문에 대해 직접 근거로 1차 문서를 만들고 기존 워크스페이스 자산으로 2차 문서를 보강한다.
+trigger:
+  phenomenon: research_answer_draft_request
+  from: researcher
+  condition: ready
+inputs: [draft_request_event, memory_cards]
+steps:
+- id: prepare_research_answer_context
+  kind: action
+  uses:
+    required: [draft_request_event, memory_cards]
+  produces: [rq_id, research_question, answer_cards, answer_papers, supporting_cards, supporting_papers, answer_run_id]
+- id: draft_research_answer
+  kind: action
+  uses:
+    required: [research_question, answer_cards, answer_papers]
+  produces: [first_answer_document]
+- id: enrich_research_answer
+  kind: action
+  uses:
+    required: [research_question, first_answer_document, supporting_cards, supporting_papers]
+  produces: [answer_draft]
+- id: publish_research_answer_draft
+  kind: action
+  uses:
+    required: [rq_id, research_question, first_answer_document, answer_draft]
+  produces: [status, answer_draft_id]
+outputs:
+  required: [status, answer_draft_id]
+completion:
+  criteria: [researcher_approved_before_drafting, first_document_uses_rq_direct_evidence, second_document_enriches_with_prior_workspace_assets]
+invariants:
+- draft_generation_never_precedes_researcher_confirmation
+- unapproved_knowledge_is_not_used_as_answer_authority
+- prior_workspace_material_never_displaces_direct_rq_evidence

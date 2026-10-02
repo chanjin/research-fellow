@@ -26,11 +26,16 @@ def render_operating_desk(
     research_prepare_external_advisory: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     research_submit_external_advisory: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     research_request_additional_literature: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    research_request_initial_answer: Callable[[str], Mapping[str, Any]] | None = None,
     research_request_answer_update: Callable[[str], Mapping[str, Any]] | None = None,
     attention_interaction_inputs: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     attention_submit_response: Callable[[Mapping[str, Any], Mapping[str, Any]], Any] | None = None,
     attention_candidate_action: Callable[[Mapping[str, Any], Mapping[str, Any], str], Any] | None = None,
+    attention_dismiss_round: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    attention_dismiss_item: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     knowledge_update_paper_metadata: Callable[[str, list[str] | str, str, str | None], Mapping[str, Any]] | None = None,
+    knowledge_attach_paper_pdf: Callable[[str, str, bytes], Mapping[str, Any]] | None = None,
+    knowledge_enqueue_ontology_work: Callable[[], Mapping[str, Any]] | None = None,
     english: bool = True,
 ) -> None:
     st.header("Research Fellow" if english else "연구위원")
@@ -76,6 +81,8 @@ def render_operating_desk(
             interaction_inputs=attention_interaction_inputs,
             submit_response=attention_submit_response,
             candidate_action=attention_candidate_action,
+            dismiss_round=attention_dismiss_round,
+            dismiss_item=attention_dismiss_item,
         )
     with running_tab:
         render_running_work(st, running, english=english)
@@ -90,6 +97,7 @@ def render_operating_desk(
                 prepare_external_advisory=research_prepare_external_advisory,
                 submit_external_advisory=research_submit_external_advisory,
                 request_additional_literature=research_request_additional_literature,
+                request_initial_answer=research_request_initial_answer,
                 request_answer_update=research_request_answer_update,
             )
         next_tab += 1
@@ -98,6 +106,8 @@ def render_operating_desk(
             render_knowledge_workspace(
                 st, knowledge, english=english,
                 update_paper_metadata=knowledge_update_paper_metadata,
+                attach_paper_pdf=knowledge_attach_paper_pdf,
+                enqueue_ontology_work=knowledge_enqueue_ontology_work,
             )
         next_tab += 1
     if developer_mode and system is not None:

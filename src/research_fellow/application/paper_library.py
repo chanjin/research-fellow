@@ -62,3 +62,29 @@ def update_paper_researcher_metadata(
         "researcher_note": str(researcher_note or "").strip(),
         "full_text_url": str(full_text_url or paper.get("full_text_url") or "").strip(),
     }
+
+
+def attach_paper_local_pdf(
+    ledger: Ledger,
+    paper_id: str,
+    *,
+    filename: str,
+    content: bytes,
+    storage_root,
+) -> dict[str, Any]:
+    """Attach a researcher-provided local PDF to an existing shelf paper."""
+    from pathlib import Path
+    from research_fellow.application.paper_shelf import StoredPaperUpload, store_paper_upload
+
+    paper = ledger.shelf_paper(str(paper_id))
+    if not paper:
+        raise ValueError("서재함에서 논문을 찾을 수 없습니다.")
+    name = Path(str(filename or "paper.pdf")).name
+    if not name.lower().endswith(".pdf"):
+        raise ValueError("PDF 파일만 원문으로 연결할 수 있습니다.")
+    payload = bytes(content or b"")
+    if not payload.startswith(b"%PDF"):
+        raise ValueError("선택한 파일이 유효한 PDF로 보이지 않습니다.")
+    stored = store_paper_upload(StoredPaperUpload(name=name, content=payload), Path(storage_root))
+    ledger.update_shelf_pdf_path(str(paper_id), stored)
+    return {"paper_id": str(paper_id), "pdf_path": stored, "filename": name}

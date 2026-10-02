@@ -9,6 +9,8 @@ def apply_ontology_review_feedback(ledger: Ledger, feedback: Mapping[str, Any]) 
     if not review_id:
         raise ValueError("Ontology review feedback review_id is required")
     combined = str(feedback.get("combined_comment") or "").strip()
+    if not combined and not bool(feedback.get("regenerate_requested")):
+        combined = "검토 완료"
     ledger.update_ontology_change_review_comment(review_id, combined)
     return {
         "review_id": review_id,

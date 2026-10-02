@@ -97,7 +97,14 @@ def create_auto_exploration_intent_for_rq(
     context = str(rq.get("research_context", "")).strip()
     need = str(rq.get("exploration_need", "")).strip()
     priority = "높음" if score >= 4 else "보통"
-    duplicate = None if rq.get("_force_followup") else find_duplicate_curation_intent(ledger, question, need or rationale)
+    # A newly submitted RQ must begin with its own clean first-round intent.
+    # Follow-up rounds also intentionally create a new intent. Duplicate reuse is
+    # reserved for older auto-dispatch paths where neither boundary applies.
+    duplicate = (
+        None
+        if rq.get("_force_followup") or rq.get("_fresh_intake")
+        else find_duplicate_curation_intent(ledger, question, need or rationale)
+    )
     if duplicate:
         existing_payload = duplicate.get("payload") or {}
         existing_intent_id = str(existing_payload.get("intent_id") or duplicate.get("subject_id") or "")

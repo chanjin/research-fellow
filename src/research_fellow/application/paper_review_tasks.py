@@ -41,7 +41,7 @@ def ensure_paper_review_task(ledger: Ledger, *, intent_id: str, paper: Mapping[s
             "title": f"논문 원문 리뷰: {paper.get('title') or 'Untitled paper'}",
             "task_type": "paper_first_review", "intent_id": intent_id, "rq_id": rq_id,
             "paper_id": paper_id, "paper": dict(candidate), "prompt": prompt,
-            "expected_output": "JSON papers[] with paper_summary and source-grounded claims",
+            "expected_output": "JSON papers[] with executive_summary and source-grounded claims",
         },
         subject_id=paper_id, status="ready",
     )
@@ -73,29 +73,32 @@ def apply_inline_paper_review_response(
     legacy durable paper_first_review task.  Re-submission is idempotent with
     respect to already-created knowledge decision requests for this paper/round.
     """
-    reviewed = _parse_selected_paper_review(response, [dict(candidate)])[0]
+    profile = _profile_for_intent(ledger, intent_id)
+    rq = _research_question_for_intent(ledger, intent_id)
+    rq_text = str(rq.get("question") or profile.get("question") or "")
+    reviewed = _parse_selected_paper_review(response, [dict(candidate)], research_question=rq_text)[0]
     shelf = ledger.shelf_paper(paper_id)
     if not shelf:
         raise ValueError("서재함 논문을 찾을 수 없습니다.")
-    profile = _profile_for_intent(ledger, intent_id)
-    rq = _research_question_for_intent(ledger, intent_id)
     rq_id = str(rq.get("rq_id") or "")
-    rq_text = str(rq.get("question") or profile.get("question") or "")
     summary = str(reviewed.get("paper_summary") or "").strip()
-    # Keep the legacy paper-level analysis for compatibility, while the canonical
-    # research interpretation is stored per Research Question.
-    ledger.save_paper_analysis(
-        paper_id,
-        research_question=rq_text,
-        summary=summary,
-        reading_raw_output=str(reviewed.get("full_text_review") or response),
-        generated=True,
-    )
+    review_note = str(reviewed.get("review_note") or "").strip()
+    # Research-question interpretation is canonical when the review belongs to an RQ.
+    # Do not overwrite the legacy paper-level analysis: that slot is retained only
+    # for old workspaces/unscoped reading flows and researcher-owned paper notes.
     if rq_id:
         ledger.save_paper_question_analysis(
             paper_id,
             research_question_id=rq_id,
             intent_id=intent_id,
+            research_question=rq_text,
+            summary=summary,
+            reading_raw_output=str(reviewed.get("full_text_review") or response),
+            generated=True,
+        )
+    else:
+        ledger.save_paper_analysis(
+            paper_id,
             research_question=rq_text,
             summary=summary,
             reading_raw_output=str(reviewed.get("full_text_review") or response),
@@ -114,6 +117,10 @@ def apply_inline_paper_review_response(
         for claim in reviewed.get("knowledge_candidates") or []:
             claim_text = str(claim.get("claim") or "").strip()
             evidence = str(claim.get("evidence") or "").strip()
+            quotes = [str(x).strip() for x in (claim.get("source_quotes") or []) if str(x).strip()][:3]
+            evidence_detail = evidence
+            if quotes:
+                evidence_detail = "원문 근거 문장\n" + "\n".join(f"- {quote}" for quote in quotes) + "\n\n근거 요약\n" + evidence
             if len(claim_text) < 8 or len(evidence) < 8:
                 continue
             card = KnowledgeCard(
@@ -121,13 +128,15 @@ def apply_inline_paper_review_response(
                 title=_knowledge_candidate_title(claim, claim_text),
                 source_kind="external_paper",
                 claim=claim_text,
-                context=summary[:1200],
+                # The paper x RQ 1-page summary lives in paper_question_analyses.
+                # Do not duplicate it into every knowledge-card candidate.
+                context="",
                 implication="",
-                source_excerpt=evidence[:3200],
+                source_excerpt=evidence_detail[:3200],
                 labels=list(profile.get("labels") or []),
                 evidence_level="provisional",
                 status="verified",
-                evidence_excerpt=evidence[:1600],
+                evidence_excerpt=evidence_detail[:1600],
                 conditions="",
                 limits=str(claim.get("limits") or ""),
                 provenance={
@@ -153,6 +162,7 @@ def apply_inline_paper_review_response(
                     "intent_id": intent_id,
                     "rq_id": rq_id,
                     "research_question": rq_text,
+                    "review_note": review_note,
                     "next_action": "승인 시 연구질문에 연결된 지식카드로 등록합니다.",
                 },
                 subject_id=card["card_id"],
@@ -162,6 +172,7 @@ def apply_inline_paper_review_response(
     return {
         "paper_id": paper_id,
         "summary": summary,
+        "review_note": review_note,
         "knowledge_request_ids": request_ids,
         "knowledge_cards": cards,
         "reviewed": reviewed,

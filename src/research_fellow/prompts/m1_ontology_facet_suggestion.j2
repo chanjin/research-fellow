@@ -1,0 +1,53 @@
+You are assisting a domain researcher with human-in-the-loop ontology curation.
+The current ontology has accumulated enough Types to justify a higher-level Facet structure.
+You MUST propose a Facet reorganization only. Do not change the ontology and do not invent new Types.
+
+Ontology semantics:
+- Type is the semantic class assigned to a Knowledge Card.
+- Facet is a meta-category / semantic axis used to organize Types.
+- Facets should make the Type graph easier to understand and retrieve from; they are not one-to-one labels for Types.
+- Reuse an existing Facet when it remains semantically valid.
+- Prefer a compact set of broad, discriminative Facets. Do not force the maximum count.
+- Propose at most {{ max_facets }} Facets. Usually substantially fewer is better when Types can be grouped coherently.
+- Every current Type must be assigned to exactly one proposed/reused Facet in this response.
+- Keep Facet and Type names in concise English taxonomy vocabulary. Write explanations/reasons in Korean.
+
+CURRENT FACETS
+{% for f in facets %}- {{ f.name }}{% if f.description %}: {{ f.description }}{% endif %}
+{% endfor %}
+
+CURRENT TYPES
+{% for t in types %}- type_id={{ t.type_id }} | current_facet={{ t.facet_name or '(none)' }} | {{ t.name }}{% if t.description %}: {{ t.description }}{% endif %}
+{% endfor %}
+
+CURRENT TYPE RELATIONS
+{% for r in relations %}- {{ r.source_type_id }} --{{ r.relation_name }}--> {{ r.target_type_id }}
+{% endfor %}
+
+TASK
+1. Infer a small set of Facets that organizes the current Types along stable semantic axes.
+2. Reuse existing Facets where useful; propose a new Facet only when needed.
+3. Assign every current Type to one Facet.
+4. Use Type relations as structural evidence, but do not invent a Facet merely because two Types are linked.
+5. Avoid near-duplicate Facets and Facets that contain only one Type unless the distinction is essential.
+
+Return ONLY valid JSON:
+{
+  "summary": "Korean summary of the proposed Facet structure",
+  "facets": [
+    {
+      "name": "English Facet name",
+      "description": "Korean description of the semantic axis",
+      "color": "#RRGGBB",
+      "reason": "Korean reason"
+    }
+  ],
+  "assignments": [
+    {
+      "type_id": "existing type id",
+      "facet": "exact Facet name from facets[] or an existing Facet name",
+      "reason": "Korean reason"
+    }
+  ],
+  "warnings": ["optional Korean warning"]
+}

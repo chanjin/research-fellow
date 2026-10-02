@@ -135,3 +135,94 @@ def apply_candidate_review_response(
         candidate=candidate,
         response=response,
     )
+
+
+
+def _extract_local_pdf_text(path: Path, *, max_chars: int = 80000) -> tuple[str, str]:
+    """Extract source text from a researcher-provided PDF for manual LLM review.
+
+    The PDF path remains the durable asset reference. Extracted text is transient
+    prompt context so we do not introduce a second source-of-truth field/table.
+    """
+    if not path.is_file():
+        raise ValueError("연결된 로컬 PDF 파일을 찾을 수 없습니다.")
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(path))
+    except Exception as error:
+        raise ValueError(f"PDF를 열 수 없습니다: {error}") from error
+
+    chunks: list[str] = []
+    total = 0
+    truncated = False
+    for index, page in enumerate(reader.pages, start=1):
+        try:
+            text = str(page.extract_text() or "").strip()
+        except Exception:
+            text = ""
+        if not text:
+            continue
+        chunk = f"[PAGE {index}]\n{text}"
+        remaining = max_chars - total
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(chunk) > remaining:
+            chunks.append(chunk[:remaining])
+            truncated = True
+            total = max_chars
+            break
+        chunks.append(chunk)
+        total += len(chunk) + 2
+
+    extracted = "\n\n".join(chunks).strip()
+    if not extracted:
+        raise ValueError("PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF인지 확인해 주세요.")
+    note = f"로컬 PDF {len(reader.pages)}페이지에서 텍스트 {len(extracted):,}자를 추출했습니다."
+    if truncated:
+        note += f" Prompt 크기를 위해 앞쪽 {max_chars:,}자까지만 포함했습니다."
+    return extracted, note
+
+def attach_candidate_local_pdf(
+    ledger: Ledger,
+    *,
+    intent_id: str,
+    paper_id: str,
+    candidate: Mapping[str, Any],
+    filename: str,
+    content: bytes,
+    storage_root,
+) -> dict[str, Any]:
+    """Attach a local PDF during candidate review and rebuild the review prompt."""
+    from pathlib import Path
+    from research_fellow.application.paper_library import attach_paper_local_pdf
+    from research_fellow.application.auto_literature import selected_paper_review_prompt
+
+    attached = attach_paper_local_pdf(
+        ledger, paper_id, filename=filename, content=content, storage_root=storage_root,
+    )
+    paper = ledger.shelf_paper(str(paper_id)) or {}
+    profile = _profile_for_intent(ledger, intent_id)
+    local_path = Path(str(attached.get("pdf_path") or "")).expanduser()
+    local_name = local_path.name if local_path.name else Path(filename).name
+
+    full_text, extraction_note = _extract_local_pdf_text(local_path)
+    prompt_item = {
+        **dict(candidate),
+        "paper_id": str(paper_id),
+        # Keep a real web URL as URL metadata when one exists. The local PDF is
+        # supplied to the LLM as extracted text, not as a pseudo URL.
+        "full_text_url": str(candidate.get("full_text_url") or paper.get("full_text_url") or ""),
+        "pdf_path": str(attached.get("pdf_path") or ""),
+        "local_pdf_filename": local_name,
+        "full_text_content": full_text,
+        "full_text_extraction_note": extraction_note,
+    }
+    review_prompt = selected_paper_review_prompt(profile, [prompt_item])
+    return {
+        **attached,
+        "full_text_url": str(prompt_item.get("full_text_url") or ""),
+        "full_text_extraction_note": extraction_note,
+        "review_prompt": review_prompt,
+    }

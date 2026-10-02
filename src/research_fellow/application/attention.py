@@ -242,8 +242,28 @@ def build_attention_queue(
     items: list[AttentionItem] = []
 
     for request in pending_researcher_decision_requests(ledger):
-        payload = dict(request.get("payload") or {})
-        source_id = str(request.get("phenomenon_id") or request.get("request_id") or "")
+        # Attention is a read model: enrich knowledge-card decisions with the
+        # paper x research-question interpretation without copying it into the
+        # durable decision request or card itself.
+        request_view = dict(request)
+        payload = dict(request_view.get("payload") or {})
+        if str(request_view.get("subject_type") or "") == "knowledge_card":
+            paper_id = str(payload.get("paper_id") or "").strip()
+            rq_id = str(payload.get("rq_id") or "").strip()
+            analysis = ledger.paper_question_analysis(paper_id, rq_id) if paper_id and rq_id else None
+            if analysis is None and paper_id:
+                analysis = ledger.paper_analysis(paper_id)
+            paper = ledger.shelf_paper(paper_id) if paper_id else None
+            payload["review_summary"] = str((analysis or {}).get("summary") or "")
+            payload["review_paper_title"] = str((paper or {}).get("title") or "")
+            # Keep source links in the Attention read model rather than copying
+            # them into the durable Knowledge Card / decision request.
+            payload["paper_abstract_url"] = str((paper or {}).get("abstract_url") or (paper or {}).get("source_url") or "")
+            payload["paper_full_text_url"] = str((paper or {}).get("full_text_url") or "")
+            payload["paper_pdf_url"] = str((paper or {}).get("pdf_url") or "")
+            payload["paper_pdf_path"] = str((paper or {}).get("pdf_path") or "")
+            request_view["payload"] = payload
+        source_id = str(request_view.get("phenomenon_id") or request_view.get("request_id") or "")
         intent_id = str(payload.get("intent_id") or "").strip()
         _, rq_title, round_no = _rq_for_intent(ledger, intent_id)
         items.append(_attention_item(
@@ -255,7 +275,7 @@ def build_attention_queue(
             summary=str(payload.get("next_action") or payload.get("reason") or ""),
             priority="high" if str(request.get("subject_type") or "") in {"ontology", "research_question"} else "medium",
             created_at=str(request.get("created_at") or ""),
-            payload=request,
+            payload=request_view,
             subject_title=rq_title,
             round_id=intent_id,
             round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
@@ -279,23 +299,40 @@ def build_attention_queue(
             payload=review,
         ))
 
+    ontology_task_labels = {
+        "ontology_type_suggestion": "Ontology Type 제안",
+        "knowledge_relation_suggestion": "지식카드 관계 제안",
+        "ontology_relation_suggestion": "Ontology Type 관계 제안",
+        "ontology_facet_suggestion": "Ontology Facet 제안",
+    }
     for task in ledger.phenomena(type_="research_task", status="ready"):
-        if str(task.get("subject_type") or "") != "paper_first_review":
-            continue
+        subject_type = str(task.get("subject_type") or "")
         payload = dict(task.get("payload") or {})
-        intent_id = str(payload.get("intent_id") or "").strip()
-        _, rq_title, round_no = _rq_for_intent(ledger, intent_id)
-        paper = dict(payload.get("paper") or {})
-        paper_title = str(paper.get("title") or payload.get("title") or "Paper").strip()
-        items.append(_attention_item(
-            category="inputs", interaction_id="provide_external_llm_result",
-            source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
-            title=rq_title or paper_title, summary=f"논문별 원문 리뷰 · {paper_title}",
-            priority="medium", created_at=str(task.get("created_at") or ""), payload=task,
-            subject_title=rq_title, round_id=intent_id,
-            round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
-            phase_label=f"논문 원문 리뷰 · {paper_title[:60]}",
-        ))
+        if subject_type == "paper_first_review":
+            intent_id = str(payload.get("intent_id") or "").strip()
+            _, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+            paper = dict(payload.get("paper") or {})
+            paper_title = str(paper.get("title") or payload.get("title") or "Paper").strip()
+            items.append(_attention_item(
+                category="inputs", interaction_id="provide_external_llm_result",
+                source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
+                title=rq_title or paper_title, summary=f"논문별 원문 리뷰 · {paper_title}",
+                priority="medium", created_at=str(task.get("created_at") or ""), payload=task,
+                subject_title=rq_title, round_id=intent_id,
+                round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
+                phase_label=f"논문 원문 리뷰 · {paper_title[:60]}",
+            ))
+            continue
+        if subject_type in ontology_task_labels:
+            label = ontology_task_labels[subject_type]
+            task_title = str(payload.get("title") or label).strip()
+            items.append(_attention_item(
+                category="inputs", interaction_id="provide_external_llm_result",
+                source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
+                title=task_title, summary=label, priority="medium",
+                created_at=str(task.get("created_at") or ""), payload=task,
+                subject_title=task_title, phase_label=label,
+            ))
 
     for result in waiting_workflows:
         item = attention_from_waiting_workflow(result, ledger)

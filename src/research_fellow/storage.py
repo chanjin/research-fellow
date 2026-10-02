@@ -2388,7 +2388,26 @@ class Ledger:
         for item in proposal.get("type_updates", []):
             type_id = str(item.get("type_id") or "")
             current_type = types.get(type_id)
-            if current_type and self.update_ontology_type(type_id, name=str(item.get("name") or current_type["name"]), description=str(item.get("description") or ""), facet_id=current_type.get("facet_id")):
+            if not current_type:
+                continue
+            facet_id = current_type.get("facet_id")
+            facet_name = str(item.get("facet") or "").strip()
+            if facet_name:
+                facet = facets.get(facet_name.casefold())
+                if facet is None:
+                    facet = self.create_ontology_facet(
+                        facet_name,
+                        str(item.get("facet_description") or ""),
+                        str(item.get("facet_color") or "#DCEBFF"),
+                    )
+                    facets[facet_name.casefold()] = facet
+                facet_id = facet.get("facet_id")
+            if self.update_ontology_type(
+                type_id,
+                name=str(item.get("name") or current_type["name"]),
+                description=str(item.get("description") or current_type.get("description") or ""),
+                facet_id=facet_id,
+            ):
                 updated_type_ids.append(type_id)
         types = {str(item["type_id"]): item for item in self.ontology_types()}
         names = {str(item["name"]).casefold(): item for item in types.values()}
@@ -2409,6 +2428,28 @@ class Ledger:
                     self.create_ontology_type_relation(source, target, str(item["relation_name"]), str(item.get("description") or ""))
                 except ValueError:
                     pass
+        approved_card_relation_ids: list[str] = []
+        for item in proposal.get("card_relations", []):
+            source_card_id = str(item.get("source_card_id") or "").strip()
+            target_card_id = str(item.get("target_card_id") or "").strip()
+            relation_type = str(item.get("relation_type") or "").strip()
+            evidence = str(item.get("evidence") or "").strip()
+            conditions = str(item.get("conditions") or "").strip() or "두 지식카드의 적용 범위와 근거를 함께 검토해야 합니다."
+            confidence = str(item.get("confidence") or "medium").strip().lower() or "medium"
+            if not source_card_id or not target_card_id or source_card_id == target_card_id or not relation_type or not evidence:
+                continue
+            relation_id = str(item.get("relation_id") or f"kr-{uuid.uuid4().hex[:12]}")
+            self.upsert_knowledge_relation({
+                "relation_id": relation_id,
+                "source_card_id": source_card_id,
+                "target_card_id": target_card_id,
+                "relation_type": relation_type,
+                "evidence": evidence,
+                "conditions": conditions,
+                "confidence": confidence if confidence in {"low", "medium", "high"} else "medium",
+                "approved_at": now(),
+            })
+            approved_card_relation_ids.append(relation_id)
         updated_relation_ids: list[str] = []
         deleted_relation_ids: list[str] = []
         for item in proposal.get("relation_changes", []):
@@ -2449,6 +2490,7 @@ class Ledger:
             "updated_type_ids": sorted(set(updated_type_ids)),
             "updated_relation_ids": sorted(set(updated_relation_ids)),
             "deleted_relation_ids": sorted(set(deleted_relation_ids)),
+            "approved_card_relation_ids": sorted(set(approved_card_relation_ids)),
         }
         change["changed_type_ids"] = sorted({
             type_id for item in assignment_changes

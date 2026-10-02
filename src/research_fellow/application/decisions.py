@@ -61,6 +61,11 @@ def decide_request(
              "origin_links": card.get("origin_links", [])},
             card["card_id"], status="completed",
         )
+        # Ontology curation is the next M1 step for newly approved knowledge.
+        # It creates external-manual Input tasks only; ontology state itself is
+        # still changed exclusively through researcher-approved reviews.
+        from research_fellow.application.ontology_workflow import enqueue_card_ontology_work
+        enqueue_card_ontology_work(ledger, memory, str(card["card_id"]))
     elif request["subject_type"] == "knowledge_evidence":
         update = payload["evidence_update"]
         target_card_id = str(update["target_card_id"])

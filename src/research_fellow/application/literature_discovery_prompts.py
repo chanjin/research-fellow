@@ -108,7 +108,7 @@ For each paper give:
 - authors
 - publication_year
 - abstract_url: bibliographic/abstract/landing page (arXiv /abs, DOI landing, publisher abstract page, etc.)
-- full_text_url: readable full-text HTML or official/open-access article page when available; empty if not verified
+- full_text_url: readable full-text HTML or official/open-access article page when available; empty if not verified. For arXiv papers, prefer the readable HTML URL (https://arxiv.org/html/<arXiv-id>) when it exists; keep the /abs page in abstract_url and the direct PDF in pdf_url.
 - pdf_url: direct PDF URL only when independently verified; empty if not verified
 - source_id (arXiv ID or DOI when available; otherwise a stable unique identifier or empty string)
 - abstract_or_summary (brief and factual; if you do not have the abstract, label it as a summary)

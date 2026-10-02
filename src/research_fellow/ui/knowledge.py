@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from research_fellow.application.ontology import ontology_dot
+
 
 def _short(text: str, n: int = 220) -> str:
     text = " ".join(str(text or "").split())
@@ -97,6 +99,7 @@ def _render_evidence_library(
     *,
     english: bool,
     update_paper_metadata: Callable[[str, list[str] | str, str, str | None], Mapping[str, Any]] | None,
+    attach_paper_pdf: Callable[[str, str, bytes], Mapping[str, Any]] | None,
 ) -> None:
     st.markdown("### " + ("Evidence Library" if english else "서재함 · 근거 논문"))
     papers = list(snapshot.get("evidence_library") or [])
@@ -192,7 +195,7 @@ def _render_evidence_library(
 
         interpretations = [dict(x) for x in (paper.get("question_interpretations") or []) if isinstance(x, Mapping)]
         if interpretations:
-            st.markdown("**Research-question interpretations**" if english else "**연구질문별 해석**")
+            st.markdown("**Used in Research Questions**" if english else "**사용된 연구질문**")
             for interpretation in interpretations:
                 rq_id = str(interpretation.get("rq_id") or "legacy")
                 question = str(interpretation.get("question") or ("Unscoped review" if english else "연구질문 미지정 리뷰"))
@@ -213,8 +216,12 @@ def _render_evidence_library(
                         st.write(comment)
                     rq_summary = str(interpretation.get("summary") or "").strip()
                     if rq_summary:
-                        st.caption("Question-specific summary" if english else "연구질문 관점 요약")
-                        st.write(rq_summary)
+                        st.caption("Executive 1-Page Summary" if english else "연구질문 관점 1-Page Summary")
+                        st.markdown(rq_summary)
+                    review_note = str(interpretation.get("review_note") or "").strip()
+                    if review_note:
+                        st.caption("Review note" if english else "리뷰 메모")
+                        st.write(review_note)
                     review = str(interpretation.get("review") or "").strip()
                     if review and review != rq_summary:
                         st.caption("Detailed review" if english else "상세 논문 해석")
@@ -241,7 +248,7 @@ def _render_evidence_library(
             if origin_labels:
                 st.caption(("Research origin: " if english else "연구 출처: ") + " · ".join(origin_labels[:3]))
 
-        if update_paper_metadata is not None and paper_id:
+        if (update_paper_metadata is not None or attach_paper_pdf is not None) and paper_id:
             with st.expander("Annotate paper" if english else "논문 코멘트 · 레이블", expanded=False):
                 labels_text = st.text_input(
                     "Labels" if english else "레이블",
@@ -255,13 +262,31 @@ def _render_evidence_library(
                     key=f"paper-library-fulltext-{paper_id}",
                     help="Correct or add the readable full-text URL." if english else "원문 HTML/공식 본문 URL을 직접 추가하거나 수정할 수 있습니다.",
                 )
+                local_pdf = st.file_uploader(
+                    "Attach local PDF" if english else "로컬 PDF 원문 연결",
+                    type=["pdf"],
+                    key=f"paper-library-local-pdf-{paper_id}",
+                    help=("Keep the web full-text URL and attach a researcher-provided local PDF as the readable original." if english else "원문 URL은 유지하고, 연구자가 보유한 PDF를 이 논문의 로컬 원문으로 연결합니다."),
+                )
+                if local_pdf is not None and attach_paper_pdf is not None:
+                    if st.button(
+                        "Attach PDF" if english else "PDF 연결",
+                        key=f"paper-library-attach-pdf-{paper_id}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            attach_paper_pdf(paper_id, str(local_pdf.name), bytes(local_pdf.getvalue()))
+                            st.success("Local PDF attached." if english else "로컬 PDF 원문을 연결했습니다.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
                 note_text = st.text_area(
                     "Researcher comment" if english else "연구자 코멘트",
                     value=researcher_note,
                     height=110,
                     key=f"paper-library-note-{paper_id}",
                 )
-                if st.button(
+                if update_paper_metadata is not None and st.button(
                     "Save annotation" if english else "코멘트·레이블 저장",
                     key=f"paper-library-save-{paper_id}",
                     use_container_width=True,
@@ -277,7 +302,10 @@ def _render_evidence_library(
             st.divider()
 
 
-def _render_structure_and_gaps(st: Any, snapshot: Mapping[str, Any], *, english: bool) -> None:
+def _render_structure_and_gaps(
+    st: Any, snapshot: Mapping[str, Any], *, english: bool,
+    enqueue_ontology_work: Callable[[], Mapping[str, Any]] | None = None,
+) -> None:
     st.markdown("### " + ("Knowledge Structure" if english else "지식 구조"))
     ontology = dict(snapshot.get("ontology") or {})
     relations = dict(snapshot.get("relations") or {})
@@ -296,6 +324,27 @@ def _render_structure_and_gaps(st: Any, snapshot: Mapping[str, Any], *, english:
             for item in top_types[:8]
         ))
 
+    type_rows = list(ontology.get("type_rows") or [])
+    relation_rows = list(ontology.get("relation_rows") or [])
+    facet_rows = list(ontology.get("facet_rows") or [])
+    if type_rows:
+        st.markdown("**Ontology Map**")
+        st.graphviz_chart(ontology_dot(type_rows, relation_rows, facet_rows), use_container_width=True)
+    if enqueue_ontology_work is not None:
+        if st.button(
+            "Prepare pending ontology proposals" if english else "Ontology 제안 작업 준비",
+            use_container_width=True,
+        ):
+            try:
+                result = dict(enqueue_ontology_work() or {})
+                created = len(result.get("created_task_ids") or [])
+                st.success(
+                    (f"Created {created} external-LLM curation task(s)." if english else f"외부 LLM Ontology 큐레이션 작업 {created}건을 Attention > Inputs에 준비했습니다.")
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
     st.divider()
     st.markdown("### " + ("Knowledge Gaps & Structuring Needs" if english else "지식 과제와 구조화 필요"))
     gaps = list(snapshot.get("gaps") or [])
@@ -312,6 +361,8 @@ def _render_structure_and_gaps(st: Any, snapshot: Mapping[str, Any], *, english:
 def render_knowledge_workspace(
     st: Any, snapshot: Mapping[str, Any], *, english: bool = True,
     update_paper_metadata: Callable[[str, list[str] | str, str, str | None], Mapping[str, Any]] | None = None,
+    attach_paper_pdf: Callable[[str, str, bytes], Mapping[str, Any]] | None = None,
+    enqueue_ontology_work: Callable[[], Mapping[str, Any]] | None = None,
 ) -> None:
     st.subheader("Knowledge" if english else "지식")
     st.caption(
@@ -336,6 +387,6 @@ def render_knowledge_workspace(
     with knowledge_tab:
         _render_knowledge_state(st, snapshot, english=english)
     with papers_tab:
-        _render_evidence_library(st, snapshot, english=english, update_paper_metadata=update_paper_metadata)
+        _render_evidence_library(st, snapshot, english=english, update_paper_metadata=update_paper_metadata, attach_paper_pdf=attach_paper_pdf)
     with structure_tab:
-        _render_structure_and_gaps(st, snapshot, english=english)
+        _render_structure_and_gaps(st, snapshot, english=english, enqueue_ontology_work=enqueue_ontology_work)

@@ -28,3 +28,37 @@ def relation_suggestion_prompt(
         types=all_types,
         relations=relations,
     )
+
+
+def facet_suggestion_prompt(
+    *,
+    types: list[dict[str, Any]],
+    facets: list[dict[str, Any]],
+    relations: list[dict[str, Any]],
+    max_facets: int = 20,
+) -> str:
+    return render_prompt(
+        "m1_ontology_facet_suggestion.j2",
+        types=types,
+        facets=facets,
+        relations=relations,
+        max_facets=max(1, min(int(max_facets), 20)),
+    )
+
+
+def type_graph_suggestion_prompt(
+    *,
+    cards: list[dict[str, Any]],
+    reference_cards: list[dict[str, Any]],
+    types: list[dict[str, Any]],
+    relations: list[dict[str, Any]],
+    knowledge_relations: list[dict[str, Any]],
+) -> str:
+    return render_prompt(
+        "m1_ontology_type_graph_suggestion.j2",
+        cards=cards,
+        reference_cards=reference_cards,
+        types=types,
+        relations=relations,
+        knowledge_relations=knowledge_relations,
+    )

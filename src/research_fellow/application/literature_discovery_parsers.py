@@ -111,6 +111,7 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
                 "title": title,
                 "summary": str(item.get("abstract_or_summary", item.get("summary", ""))).strip(),
                 "published": str(item.get("publication_year", item.get("published", ""))).strip(),
+                "venue": str(item.get("venue", "")).strip(),
                 "authors": [str(author).strip() for author in authors if str(author).strip()],
                 "relevance_score": max(0, min(score, 100)),
                 "quick_take": str(item.get("quick_take", "")).strip(),

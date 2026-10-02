@@ -38,6 +38,7 @@ PROMPT_CATALOG = (
     PromptTemplate("m1_auto_search_strategy.j2", "M1 · 외부 LLM 문헌 탐색", "승인 Intent의 전체 맥락을 보존해 외부 LLM이 실제 관련 논문 후보를 직접 탐색"),
     PromptTemplate("m1_ontology_type_suggestion.j2", "M1 · 온톨로지 타입 후보", "미분류 지식카드에 기존 타입 재사용 또는 신규 Facet-Type 후보 제안"),
     PromptTemplate("m1_ontology_relation_suggestion.j2", "M1 · 온톨로지 관계 후보", "승인된 카드 타입을 기준으로 Type 간 관계 후보 제안"),
+    PromptTemplate("m1_ontology_facet_suggestion.j2", "M1 · 온톨로지 Facet 후보", "누적된 Type을 최대 20개 Facet 구조로 재조직하는 후보 제안"),
     PromptTemplate("m1_revalidation_review.j2", "M1 · 재검증", "상충·출처 재확인 후보 검토"),
     PromptTemplate("m2_research_review.j2", "M2 · 연구 검토", "연구 질문의 근거 기반 검토"),
     PromptTemplate("m2_research_direction.j2", "M2 · 연구 상태·방향", "ResearchState 기반 검토와 M1 Intent 후보"),

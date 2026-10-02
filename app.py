@@ -199,6 +199,7 @@ from research_fellow.application.ontology_curation_context import build_curation
 from research_fellow.application.ontology_curation_parsers import parse_relation_suggestions, parse_type_suggestions
 from research_fellow.application.ontology_curation_prompts import relation_suggestion_prompt, type_suggestion_prompt
 from research_fellow.application.ontology_evolution import ontology_delta_prompt, parse_ontology_delta
+from research_fellow.application.ontology_workflow import enqueue_untyped_cards
 from research_fellow.application.paper_coauthor_manuscript import (
     annotation_legend, apply_appendix_refresh, apply_review, apply_revisions, manuscript_markdown,
     review_change_set, revision_todo_timeline, revision_todos, selected_group_revisions,
@@ -253,7 +254,7 @@ from research_fellow.application.autonomy_signals import (
 )
 from research_fellow.application.attention import attention_queue_snapshot
 from research_fellow.application.attention_resolution import (
-    apply_attention_response, interaction_inputs_for_attention_item,
+    apply_attention_response, interaction_inputs_for_attention_item, dismiss_attention_round, dismiss_attention_item,
 )
 from research_fellow.application.attention_workflow_runtime import attention_workflow_runtime_binding
 from research_fellow.application.running import running_work_snapshot, waiting_workflow_results
@@ -265,13 +266,13 @@ from research_fellow.application.research_intake import (
     submit_research_question,
 )
 from research_fellow.application.research_question_progression import start_research_question_progression
-from research_fellow.application.research_actions import request_additional_literature, request_answer_update
+from research_fellow.application.research_actions import request_additional_literature, request_initial_answer, request_answer_update
 from research_fellow.application.persistent_research_runtime import (
     PersistentResearchBindings, advance_persistent_research,
 )
 from research_fellow.application.knowledge_workspace import knowledge_workspace_snapshot
-from research_fellow.application.paper_library import update_paper_researcher_metadata
-from research_fellow.application.literature_candidate_review import preserve_literature_candidate, apply_candidate_review_response
+from research_fellow.application.paper_library import update_paper_researcher_metadata, attach_paper_local_pdf
+from research_fellow.application.literature_candidate_review import preserve_literature_candidate, apply_candidate_review_response, attach_candidate_local_pdf
 from research_fellow.application.system_workspace import system_workspace_snapshot
 from research_fellow.application.relations import (
     RELATION_TYPES, create_relation_candidate, lineage_dot, lineage_overview_prompt,
@@ -1118,8 +1119,9 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             synthesis_drafter=lambda prompt: llm_draft(prompt, model, use_ollama),
         )
 
-    # Cross-workflow dispatch is idempotent because it consumes only durable
-    # ready intents and unreviewed knowledge updates. This also recovers work
+    # Cross-workflow dispatch is idempotent because it consumes durable ready
+    # intents. Knowledge updates remain an M2 inbox signal until a researcher
+    # explicitly starts a follow-up literature round. This also recovers work
     # left ready by a previous browser/session without inventing UI state.
     try:
         startup_continuation = advance_persistent_research(
@@ -1180,6 +1182,12 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
                 candidate=candidate,
                 response=str(candidate.get("review_response") or ""),
             )
+        if decision == "attach_local_pdf":
+            return attach_candidate_local_pdf(
+                ledger, intent_id=intent_id, paper_id=str(candidate.get("paper_id") or ""),
+                candidate=candidate, filename=str(candidate.get("filename") or "paper.pdf"),
+                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_shelf",
+            )
         return {"decision": decision}
 
     def _attention_submit(item: Mapping[str, Any], values: Mapping[str, Any]):
@@ -1201,7 +1209,7 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             ledger, memory, _persistent_runtime_bindings(),
             intent_ids=[round_id] if (is_external_llm and round_id) else None,
             max_m1_items=1 if (is_external_llm and round_id) else 3,
-            consume_knowledge_updates=not bool(is_external_llm and round_id),
+            consume_knowledge_updates=False,
         )
         if continuation.get("advanced_count"):
             st.session_state["attention-continuation-flash"] = continuation.get("summary", "")
@@ -1284,6 +1292,14 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         )
         return {**created, "execution": continuation}
 
+    def _request_initial_answer(rq_id: str) -> Mapping[str, Any]:
+        created = request_initial_answer(ledger, memory.all(), rq_id)
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(), max_m1_items=1,
+            consume_knowledge_updates=False,
+        )
+        return {**created, "execution": continuation}
+
     def _request_answer_update(rq_id: str) -> Mapping[str, Any]:
         created = request_answer_update(ledger, memory.all(), rq_id)
         continuation = advance_persistent_research(
@@ -1296,6 +1312,20 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         return update_paper_researcher_metadata(
             ledger, paper_id, labels=labels, researcher_note=note, full_text_url=full_text_url,
         )
+
+    def _dismiss_attention_round(item: Mapping[str, Any]) -> Mapping[str, Any]:
+        return dismiss_attention_round(item, ledger=ledger, checkpoint_dir=WORKFLOW_CHECKPOINTS)
+
+    def _dismiss_attention_item(item: Mapping[str, Any]) -> Mapping[str, Any]:
+        return dismiss_attention_item(item, ledger=ledger, checkpoint_dir=WORKFLOW_CHECKPOINTS)
+
+    def _attach_paper_pdf(paper_id: str, filename: str, content: bytes) -> Mapping[str, Any]:
+        return attach_paper_local_pdf(
+            ledger, paper_id, filename=filename, content=content, storage_root=DATA / "paper_shelf",
+        )
+
+    def _enqueue_ontology_work() -> Mapping[str, Any]:
+        return enqueue_untyped_cards(ledger, memory, limit=20)
 
     render_operating_desk(
         st,
@@ -1316,11 +1346,16 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         research_prepare_external_advisory=_prepare_external_advisory,
         research_submit_external_advisory=_submit_external_advisory,
         research_request_additional_literature=_request_additional_literature,
+        research_request_initial_answer=_request_initial_answer,
         research_request_answer_update=_request_answer_update,
         attention_interaction_inputs=_attention_inputs,
         attention_submit_response=_attention_submit,
         attention_candidate_action=_attention_candidate_action,
+        attention_dismiss_round=_dismiss_attention_round,
+        attention_dismiss_item=_dismiss_attention_item,
         knowledge_update_paper_metadata=_update_paper_metadata,
+        knowledge_attach_paper_pdf=_attach_paper_pdf,
+        knowledge_enqueue_ontology_work=_enqueue_ontology_work,
         english=english,
     )
 

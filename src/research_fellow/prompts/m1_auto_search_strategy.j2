@@ -9,13 +9,16 @@ Exploration context:
 
 TASK
 - Find approximately 12 real academic papers that help answer or frame this research question.
-- Search broadly across arXiv, Semantic Scholar, Crossref, Google Scholar, publisher pages, and official paper pages as useful discovery aids.
+- Search broadly; do not assume relevant papers are on arXiv. Use Semantic Scholar, OpenAlex, Crossref/DOI metadata, Google Scholar as a discovery aid, and publisher/conference pages such as ACM Digital Library, IEEE Xplore, Springer, ScienceDirect, Wiley, PMLR, ACL Anthology, USENIX, OpenReview, AAAI/IJCAI proceedings, and official project/paper pages when appropriate.
+- If a paper is not on arXiv, actively locate a bibliographic/abstract page on another reliable academic source instead of dropping the paper.
+- Prefer an `abstract_url` page where the researcher can actually see bibliographic information and an abstract or paper introduction/overview. If one source has only sparse DOI metadata, look for a richer Semantic Scholar/OpenAlex/publisher/conference page for the same paper.
 - Preserve the full research context; do not reduce the task to isolated keywords.
 - Prioritize directly relevant recent work, then include a small number of foundational or adjacent papers when they materially help interpret the topic.
 - Verify that every paper exists. Never invent titles, authors, publication years, DOI/arXiv IDs, URLs, or findings.
 - Return the bibliographic/abstract page and the full-text location separately.
-- `abstract_url` is the stable metadata/abstract page (for example an arXiv /abs/ page, DOI landing page, publisher abstract page, or official paper page).
-- `full_text_url` is the verified full-text or direct/open PDF/HTML URL when available. Do not guess it; leave it empty when you cannot verify access.
+- `abstract_url` is the best stable bibliographic/abstract page you verified (for example arXiv /abs/, Semantic Scholar, OpenAlex, ACM/IEEE/Springer/PMLR/ACL/OpenReview/publisher abstract page, DOI landing page, or official paper page). Prefer pages that visibly contain title/authors/year/venue plus abstract or an informative paper overview.
+- `full_text_url` is the verified readable full-text HTML/page URL when available. Prefer HTML over PDF when both are available; for arXiv, prefer `https://arxiv.org/html/<id>` when the HTML version exists. Do not guess it; leave it empty when you cannot verify access.
+- `pdf_url` is the verified direct PDF URL when available and is separate from `full_text_url`.
 - Keep the two URLs distinct even when the abstract page links onward to the full text.
 - `abstract_or_summary` must be factual and written in Korean. If the abstract itself is not available, explicitly write a short Korean summary and do not present it as a quotation.
 - `quick_take` should state in Korean what the paper appears to contribute.
@@ -33,8 +36,10 @@ If any field contains LaTeX, escape every backslash for JSON.
       "title": "...",
       "authors": ["..."],
       "publication_year": "2025",
+      "venue": "journal/conference/workshop when verifiable; otherwise empty string",
       "abstract_url": "https://...",
-      "full_text_url": "https://... or empty string",
+      "full_text_url": "https://... readable HTML/page or empty string",
+      "pdf_url": "https://... direct PDF or empty string",
       "source_id": "arXiv ID or DOI when available; otherwise empty string",
       "abstract_or_summary": "...",
       "relevance_score": 90,

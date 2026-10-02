@@ -85,6 +85,7 @@ class ResearchTaskPayload(Payload):
     rq_id: str = ""
     paper_id: str = ""
     paper: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
     prompt: str = ""
     expected_output: str = ""
 

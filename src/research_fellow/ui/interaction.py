@@ -91,10 +91,33 @@ def _render_sequential_paper_review(
     selected_key = f"interaction-{key}-paper-selected"
     reviewed_key = f"interaction-{key}-paper-reviewed"
     active_key = f"interaction-{key}-paper-active"
-    index = int(st.session_state.get(index_key, 0) or 0)
+    stored_index = st.session_state.get(index_key)
     selected = list(st.session_state.get(selected_key, []) or [])
     reviewed = list(st.session_state.get(reviewed_key, []) or [])
     active = dict(st.session_state.get(active_key, {}) or {})
+
+    # Rehydrate completed per-paper reviews from durable paper×RQ analyses.
+    # Previously the progress lived only in Streamlit session_state, so a page
+    # refresh reset the index and showed already-reviewed papers again.
+    durable_selected = [dict(item) for item in items if bool(item.get("review_completed"))]
+    if durable_selected:
+        by_identity = {
+            (str(x.get("paper_id") or ""), str(x.get("source_id") or ""), str(x.get("title") or "")): dict(x)
+            for x in selected
+        }
+        for completed in durable_selected:
+            identity = (str(completed.get("paper_id") or ""), str(completed.get("source_id") or ""), str(completed.get("title") or ""))
+            by_identity.setdefault(identity, completed)
+        selected = list(by_identity.values())
+
+    if stored_index is None:
+        index = next((i for i, item in enumerate(items) if not bool(item.get("review_completed"))), len(items))
+    else:
+        index = int(stored_index or 0)
+        while index < len(items) and bool(items[index].get("review_completed")):
+            index += 1
+    st.session_state[index_key] = index
+    st.session_state[selected_key] = selected
 
     st.markdown(f"**{renderer['title']}**")
     if renderer.get('help'):
@@ -119,7 +142,7 @@ def _render_sequential_paper_review(
     st.markdown(f"### {title}")
     authors = item.get('authors') or []
     authors_text = ', '.join(str(x) for x in authors if str(x).strip()) if isinstance(authors, list) else str(authors)
-    meta = [x for x in [authors_text, str(item.get('published') or item.get('publication_year') or ''), f"relevance {item.get('relevance_score')}" if item.get('relevance_score') is not None else ''] if x]
+    meta = [x for x in [authors_text, str(item.get('venue') or ''), str(item.get('published') or item.get('publication_year') or ''), f"relevance {item.get('relevance_score')}" if item.get('relevance_score') is not None else ''] if x]
     if meta:
         st.caption(' · '.join(meta))
 
@@ -160,6 +183,42 @@ def _render_sequential_paper_review(
     if active and int(active.get('index', -1)) == index:
         paper_id = str(active.get('paper_id') or '')
         st.success('서재함에 연결되었습니다. 이제 이 연구질문 관점에서 논문을 해석합니다.')
+        local_pdf = st.file_uploader(
+            '로컬 PDF를 원문으로 연결',
+            type=['pdf'],
+            key=f"interaction-{key}-paper-local-pdf-{index}",
+            help='웹 원문 URL 대신 보유한 PDF를 이 리뷰의 full-text source로 사용할 수 있습니다.',
+        )
+        if local_pdf is not None and not active.get('local_pdf_name') == local_pdf.name:
+            candidate = dict(item)
+            candidate['paper_id'] = paper_id
+            candidate['filename'] = local_pdf.name
+            candidate['content'] = local_pdf.getvalue()
+            try:
+                attached = item_action(candidate, 'attach_local_pdf') if callable(item_action) else {}
+            except Exception as error:
+                st.error(f"로컬 PDF 연결에 실패했습니다: {error}")
+            else:
+                active['local_pdf_name'] = local_pdf.name
+                active['local_pdf_path'] = str((attached or {}).get('pdf_path') or '')
+                active['full_text_url'] = str((attached or {}).get('full_text_url') or active.get('full_text_url') or '')
+                active['prompt'] = str((attached or {}).get('review_prompt') or active.get('prompt') or '')
+                st.session_state[active_key] = active
+                st.rerun()
+        if active.get('local_pdf_name'):
+            st.caption(f"Full-text source · local PDF · {active.get('local_pdf_name')}")
+            local_path = str(active.get('local_pdf_path') or '')
+            if local_path:
+                from pathlib import Path
+                path = Path(local_path).expanduser()
+                if path.is_file():
+                    st.download_button(
+                        '연결된 PDF 열기 / 외부 LLM 첨부용',
+                        data=path.read_bytes(),
+                        file_name=path.name,
+                        mime='application/pdf',
+                        key=f"interaction-{key}-paper-local-pdf-download-{index}",
+                    )
         prompt = str(active.get('prompt') or '').strip()
         if prompt:
             st.caption('외부 LLM에 아래 Prompt를 전달하고 결과 JSON을 붙여넣으세요.')
@@ -177,7 +236,7 @@ def _render_sequential_paper_review(
                 else:
                     enriched = dict(item)
                     enriched['paper_id'] = paper_id
-                    enriched['full_text_url'] = edited_full_text
+                    enriched['full_text_url'] = str(active.get('full_text_url') or edited_full_text)
                     enriched['review_response'] = response
                     try:
                         result = item_action(enriched, 'review_response') if callable(item_action) else {}
@@ -191,9 +250,13 @@ def _render_sequential_paper_review(
         else:
             result = dict(active.get('review_result') or {})
             paper_summary = str(result.get('summary') or '').strip()
+            review_note = str(result.get('review_note') or (result.get('reviewed') or {}).get('review_note') or '').strip()
             if paper_summary:
                 st.markdown('#### Summary')
                 st.write(paper_summary)
+            if review_note:
+                st.markdown('**Review note**')
+                st.write(review_note)
             cards = list(result.get('knowledge_cards') or [])
             st.markdown(f"#### Knowledge Card 후보 · {len(cards)}건")
             if not cards:
@@ -214,8 +277,9 @@ def _render_sequential_paper_review(
             if st.button('이 논문 검토 완료 · 다음', type='primary', key=f"interaction-{key}-paper-reviewed-next-{index}"):
                 chosen = dict(item)
                 chosen['paper_id'] = paper_id
-                chosen['full_text_url'] = edited_full_text
+                chosen['full_text_url'] = str(active.get('full_text_url') or edited_full_text)
                 chosen['paper_summary'] = paper_summary
+                chosen['review_note'] = review_note
                 chosen['knowledge_candidates'] = list((result.get('reviewed') or {}).get('knowledge_candidates') or [])
                 chosen['knowledge_request_ids'] = list(result.get('knowledge_request_ids') or [])
                 selected.append(chosen)
@@ -297,6 +361,19 @@ def _render_knowledge_card_decision(
     if rq:
         st.caption(f"Research Question · {rq}")
 
+    review_note = str(payload.get("review_note") or "").strip()
+    paper_id = str(payload.get("paper_id") or card.get("paper_id") or "").strip()
+    rq_id = str(payload.get("research_question_id") or payload.get("rq_id") or "").strip()
+    review_group = f"{paper_id}::{rq_id}" if (paper_id or rq_id) else ""
+    review_note_seen_key = "knowledge-decision-review-note-seen-group"
+    show_review_note = bool(
+        review_note
+        and (not review_group or st.session_state.get(review_note_seen_key) != review_group)
+    )
+    if show_review_note:
+        st.markdown("**Review note**")
+        st.write(review_note)
+
     title = str(card.get("title") or payload.get("title") or "지식카드 후보").strip()
     st.markdown(f"### {title}")
 
@@ -354,6 +431,11 @@ def _render_knowledge_card_decision(
     else:
         decision = ""
     submitted = bool(decision and request_id)
+    if submitted and review_group and show_review_note:
+        # The note belongs to the paper x research-question review, not to each
+        # knowledge card. Once the first card in the group is resolved, keep it
+        # hidden while the researcher continues through sibling cards.
+        st.session_state[review_note_seen_key] = review_group
     resolutions = [{"request_id": request_id, "decision": decision, "note": note.strip()}] if submitted else []
     return InteractionRenderResult(interaction_id, submitted, {output_name: resolutions})
 
@@ -425,9 +507,41 @@ def _render_review_form(st: Any, interaction_id: str, inputs: Mapping[str, Any],
         type_by_id = {str(x.get("type_id")): x for x in types}
         relation_ids = [str(x.get("relation_id") or "") for x in relations if x.get("relation_id")]
         relation_by_id = {str(x.get("relation_id")): x for x in relations}
+        proposal = dict(review.get("proposal") or {})
+        st.markdown(f"**{renderer['title']}**")
+        if renderer.get("help"):
+            st.caption(str(renderer["help"]))
+        if proposal.get("summary"):
+            st.info(str(proposal.get("summary")))
+        for item in proposal.get("assignments") or []:
+            st.write(f"- Type assignment · `{item.get('card_id','')}` → **{item.get('type') or item.get('type_id') or '?'}**")
+            if item.get("reason"):
+                st.caption(str(item.get("reason")))
+        for item in proposal.get("new_types") or []:
+            st.write(f"- New Type · **{item.get('name','?')}**")
+            if item.get("description"):
+                st.caption(str(item.get("description")))
+        for item in proposal.get("relations") or []:
+            st.write(f"- Type relation · `{item.get('source_type') or item.get('source_type_id')}` → **{item.get('relation_name','?')}** → `{item.get('target_type') or item.get('target_type_id')}`")
+        card_relations = [dict(item) for item in (proposal.get("card_relations") or []) if isinstance(item, dict)]
+        if card_relations:
+            st.write(f"- Knowledge Card relations · {len(card_relations)} relation(s)")
+            with st.expander("지식카드 관계 보기", expanded=False):
+                for item in card_relations:
+                    st.write(
+                        f"`{item.get('source_card_id','')}` → **{item.get('relation_type','?')}** → `{item.get('target_card_id','')}`"
+                    )
+                    if item.get("evidence"):
+                        st.caption(str(item.get("evidence")))
+        facet_updates = [item for item in (proposal.get("type_updates") or []) if str(item.get("facet") or "").strip()]
+        if facet_updates:
+            st.write(f"- Facet assignments · {len(facet_updates)} Type(s)")
+            with st.expander("Facet 배정 보기", expanded=False):
+                for item in facet_updates:
+                    st.caption(f"{item.get('name') or item.get('type_id')} → {item.get('facet')}")
+        for warning in proposal.get("warnings") or []:
+            st.warning(str(warning))
         with st.form(f"interaction-{key}"):
-            st.markdown(f"**{renderer['title']}**")
-            if renderer.get("help"): st.caption(str(renderer["help"]))
             kinds = ["선택 안 함", "타입 이름·설명 수정", "관계 이름·설명 수정", "관계 추가", "관계 삭제"]
             opinion_kind = st.selectbox("구조화 의견", kinds, key=f"interaction-{key}-kind")
             structured = ""

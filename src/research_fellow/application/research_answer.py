@@ -82,6 +82,42 @@ def ensure_answer_confirmation(ledger: Ledger, cards: list[dict[str, Any]], rq_i
     return request_id
 
 
+
+def request_initial_research_answer(ledger: Ledger, cards: list[dict[str, Any]], rq_id: str) -> dict[str, Any]:
+    """Explicit researcher approval to draft the first answer for an RQ.
+
+    Knowledge updates by themselves no longer create a Decision Attention item.
+    The researcher starts drafting from Research; only the subsequent external
+    LLM boundary may create Attention.
+    """
+    rq = ledger.research_question(rq_id)
+    if not rq:
+        raise ValueError("Unknown research question")
+    if latest_research_answer(ledger, rq_id) is not None:
+        raise ValueError("이미 연구질문 답변이 있습니다. 답변 업데이트를 사용하세요.")
+    relevant = relevant_cards_for_rq(cards, rq_id)
+    if not relevant:
+        raise ValueError("답변 초안을 작성할 승인 지식이 아직 없습니다.")
+    for event in ledger.phenomena(recipient="m2", type_="advisory_exchange", status="ready"):
+        if event.get("subject_type") == "research_answer_draft_request" and str((event.get("payload") or {}).get("rq_id") or "") == rq_id:
+            return {"status": "already_requested", "rq_id": rq_id, "request_id": event.get("phenomenon_id")}
+    case_id = ledger.create_case("research", f"Research answer draft: {str(rq.get('question') or '')[:72]}")
+    payload = {
+        "rq_id": rq_id,
+        "question": str(rq.get("question") or ""),
+        "mode": "initial",
+        "knowledge_card_ids": [c.get("card_id") for c in relevant if c.get("card_id")],
+    }
+    request_id = ledger.record(
+        case_id, "advisory_exchange", "researcher", ["m2"],
+        "research_answer_draft_request", payload, subject_id=rq_id, status="ready",
+    )
+    ledger.add_research_question_change(
+        rq_id, "answer_draft_requested",
+        f"연구자가 승인 지식 {len(relevant)}건을 바탕으로 최초 답변 초안 작성을 요청했습니다.",
+    )
+    return {"status": "ready", "rq_id": rq_id, "request_id": request_id}
+
 def request_research_answer_update(ledger: Ledger, cards: list[dict[str, Any]], rq_id: str) -> dict[str, Any]:
     """Explicit researcher action to regenerate an answer after evidence changed."""
     rq = ledger.research_question(rq_id)

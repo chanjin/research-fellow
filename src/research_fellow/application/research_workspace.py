@@ -240,8 +240,8 @@ def _active_questions(
             progress_detail = f"1차 문헌조사 후 지식카드 후보 {round_state['pending_knowledge']}건이 승인 대기 중입니다."
         elif round_state["literature_done"] and round_state["approved"]:
             current_stage = "knowledge_updated"
-            next_agent_action = "현재 지식 정리를 바탕으로 답변 초안 작성 여부를 확인합니다."
-            progress_detail = f"1차 문헌조사가 완료되고 승인 지식 {round_state['approved']}건이 연결되었습니다."
+            next_agent_action = "Research에서 누적 지식을 바탕으로 답변 초안을 작성하거나 추가 문헌 조사를 승인합니다."
+            progress_detail = f"1차 문헌조사가 완료되고 승인 지식 {round_state['approved']}건이 M2 연구맥락에 축적되었습니다. 아직 새 Attention은 만들지 않습니다."
         elif round_state["literature_done"]:
             current_stage = "literature_review_complete"
             next_agent_action = "문헌 요약과 지식카드 후보를 검토해 지식자산 반영 여부를 결정합니다."

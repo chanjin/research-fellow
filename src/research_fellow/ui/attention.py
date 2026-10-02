@@ -6,6 +6,7 @@ returned to the application layer for durable handling.
 """
 from __future__ import annotations
 import hashlib
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from research_fellow.ui.interaction import render_interaction
@@ -38,6 +39,60 @@ def _stable_interaction_key(item: Mapping[str, Any]) -> str:
     identity = "|".join(parts).strip("|") or str(item.get("attention_id") or "attention-item")
     return hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
 
+
+
+
+def _knowledge_review_header(item: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    if str(item.get("category") or "") != "decisions" or str(item.get("source_type") or "") != "decision_request":
+        return "", "", "", ""
+    request = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    if str(request.get("subject_type") or "") != "knowledge_card":
+        return "", "", "", ""
+    payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+    return (
+        str(payload.get("paper_id") or "").strip(),
+        str(payload.get("review_paper_title") or "").strip(),
+        str(payload.get("research_question") or "").strip(),
+        str(payload.get("review_summary") or "").strip(),
+    )
+
+
+
+def _compact_summary_markdown(text: str) -> str:
+    """Render legacy/new 1-page summaries without large Markdown headings."""
+    lines = []
+    for raw in str(text or "").splitlines():
+        stripped = raw.lstrip()
+        if stripped.startswith("### "):
+            prefix = raw[: len(raw) - len(stripped)]
+            lines.append(prefix + "**" + stripped[4:].strip() + "**")
+        elif stripped.startswith("## "):
+            prefix = raw[: len(raw) - len(stripped)]
+            lines.append(prefix + "**" + stripped[3:].strip() + "**")
+        elif stripped.startswith("# "):
+            prefix = raw[: len(raw) - len(stripped)]
+            lines.append(prefix + "**" + stripped[2:].strip() + "**")
+        else:
+            lines.append(raw)
+    return "\n".join(lines).strip()
+
+
+def _knowledge_review_links(item: Mapping[str, Any]) -> list[tuple[str, str]]:
+    request = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+    links = [
+        ("초록 / 서지", str(payload.get("paper_abstract_url") or "").strip()),
+        ("원문", str(payload.get("paper_full_text_url") or "").strip()),
+        ("PDF", str(payload.get("paper_pdf_url") or "").strip()),
+    ]
+    return [(label, url) for label, url in links if url.startswith(("http://", "https://"))]
+
+
+
+def _knowledge_review_local_pdf(item: Mapping[str, Any]) -> str:
+    request = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+    return str(payload.get("paper_pdf_path") or "").strip()
 
 def _attention_error_key(item: Mapping[str, Any]) -> str:
     return f"attention-submit-error::{_stable_interaction_key(item)}"
@@ -111,6 +166,41 @@ def _render_attention_item_body(
             st.error(message)
             return
         st.session_state.pop(error_key, None)
+        outcome_payload = dict(getattr(outcome, "outcome", {}) or {})
+        source_type = str(item.get("source_type") or "")
+        source_payload = dict(item.get("payload") or {})
+        ontology_subject = str(source_payload.get("subject_type") or "")
+        if (
+            source_type == "research_task"
+            and ontology_subject in {
+                "ontology_type_suggestion",
+                "ontology_relation_suggestion",
+                "ontology_facet_suggestion",
+            }
+            and str(outcome_payload.get("review_id") or "").strip()
+        ):
+            st.session_state["attention-focus-category"] = "reviews"
+            st.session_state["attention-continuation-flash"] = (
+                "Ontology proposal created. Review it first; it is not published to Knowledge until researcher approval."
+                if english else
+                "Ontology 제안이 생성되었습니다. 먼저 Reviews에서 검토하세요. 연구자 승인 전에는 Knowledge에 반영되지 않습니다."
+            )
+        elif source_type == "ontology_change_review" and str(item.get("interaction_id") or "") == "review_ontology_change":
+            st.session_state["attention-focus-category"] = "decisions"
+            st.session_state["attention-continuation-flash"] = (
+                "Ontology review completed. Make the final publish decision in Decisions."
+                if english else
+                "Ontology 검토가 완료되었습니다. Decisions에서 최종 반영 여부를 결정하세요."
+            )
+        elif source_type == "ontology_change_review" and str(item.get("interaction_id") or "") == "resolve_ontology_change_reviews":
+            st.session_state["attention-focus-category"] = "inputs"
+            st.session_state["attention-continuation-flash"] = (
+                "Ontology decision processed. Approved changes are now reflected in Knowledge."
+                if english else
+                "Ontology 최종 결정이 처리되었습니다. 승인된 변경은 Knowledge에 반영되었습니다."
+            )
+        elif category == "decisions":
+            st.session_state["attention-focus-category"] = "decisions"
         status = str(getattr(outcome, "status", "completed"))
         st.success(
             f"Interaction processed: {status}."
@@ -127,6 +217,8 @@ def render_attention_queue(
     interaction_inputs: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     submit_response: Callable[[Mapping[str, Any], Mapping[str, Any]], Any] | None = None,
     candidate_action: Callable[[Mapping[str, Any], Mapping[str, Any], str], Any] | None = None,
+    dismiss_round: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    dismiss_item: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> None:
     title = "Attention Needed" if english else "확인이 필요한 작업"
     st.subheader(title)
@@ -148,6 +240,106 @@ def render_attention_queue(
         if not view_items:
             st.caption("No items in this category." if english else "이 범주에는 현재 작업이 없습니다.")
             return
+
+        # Bulk cleanup is intentionally expressed as "keep selected, delete the rest".
+        # Attention itself is only a projection; dismiss_item closes each durable
+        # source so removed cards do not simply reappear after refresh.
+        if dismiss_item is not None and len(view_items) > 1:
+            option_ids = [str(item.get("attention_id") or f"attention-{idx}") for idx, item in enumerate(view_items)]
+            by_id = {str(item.get("attention_id") or f"attention-{idx}"): item for idx, item in enumerate(view_items)}
+
+            def _bulk_label(attention_id: str) -> str:
+                row = by_id.get(attention_id, {})
+                phase = str(row.get("phase_label") or "").strip()
+                title = str(row.get("subject_title") or row.get("title") or row.get("interaction_id") or attention_id).strip()
+                return f"{title} · {phase}" if phase else title
+
+            keep_key = f"attention-bulk-keep::{view_key}"
+            kept_ids = st.multiselect(
+                "Keep these Attention cards" if english else "보존할 Attention 카드",
+                options=option_ids,
+                format_func=_bulk_label,
+                key=keep_key,
+                help=(
+                    "Select cards to keep. The bulk action deletes every other card in this category."
+                    if english else
+                    "남겨둘 카드만 선택하세요. 일괄 삭제를 실행하면 이 범주의 나머지 카드가 삭제됩니다."
+                ),
+            )
+            kept = set(str(x) for x in kept_ids)
+            delete_items = [item for attention_id, item in by_id.items() if attention_id not in kept]
+            delete_count = len(delete_items)
+            confirm_key = f"attention-bulk-confirm::{view_key}"
+            if not st.session_state.get(confirm_key):
+                if st.button(
+                    (f"Delete all except selected ({delete_count})" if english else f"선택 제외 {delete_count}개 일괄 삭제"),
+                    key=f"attention-bulk-delete::{view_key}",
+                    disabled=delete_count == 0,
+                    use_container_width=False,
+                ):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+            else:
+                st.warning(
+                    (f"{delete_count} Attention cards will be closed at their durable sources." if english else
+                     f"선택하지 않은 Attention {delete_count}개의 원본 작업 상태를 종료합니다.")
+                )
+                confirm_cols = st.columns(2)
+                if confirm_cols[0].button(
+                    "Confirm bulk delete" if english else "일괄 삭제 확인",
+                    key=f"attention-bulk-confirm-delete::{view_key}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    kept_rounds = {
+                        str(item.get("round_id") or "").strip()
+                        for attention_id, item in by_id.items()
+                        if attention_id in kept and str(item.get("round_id") or "").strip()
+                    }
+                    deleted = 0
+                    skipped: list[str] = []
+                    for item in delete_items:
+                        round_id = str(item.get("round_id") or "").strip()
+                        source_type = str(item.get("source_type") or "")
+                        # A workflow-interaction dismissal cancels its whole round.
+                        # Never let that delete a selected card from the same round.
+                        if round_id and round_id in kept_rounds and source_type == "workflow_interaction":
+                            skipped.append(_bulk_label(str(item.get("attention_id") or "")) + " (selected card in same round)")
+                            continue
+                        try:
+                            dismiss_item(item)
+                            deleted += 1
+                        except Exception as error:
+                            skipped.append(f"{_bulk_label(str(item.get('attention_id') or ''))}: {error}")
+                    st.session_state.pop(confirm_key, None)
+                    if skipped:
+                        st.session_state[f"attention-bulk-delete-result::{view_key}"] = {"deleted": deleted, "skipped": skipped}
+                    else:
+                        st.session_state[f"attention-bulk-delete-result::{view_key}"] = {"deleted": deleted, "skipped": []}
+                    st.rerun()
+                if confirm_cols[1].button(
+                    "Cancel" if english else "취소",
+                    key=f"attention-bulk-cancel::{view_key}",
+                    use_container_width=True,
+                ):
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
+
+            bulk_result = st.session_state.pop(f"attention-bulk-delete-result::{view_key}", None)
+            if isinstance(bulk_result, Mapping):
+                deleted = int(bulk_result.get("deleted") or 0)
+                skipped = list(bulk_result.get("skipped") or [])
+                if deleted:
+                    st.success((f"Deleted {deleted} Attention cards." if english else f"Attention {deleted}개를 삭제했습니다."))
+                if skipped:
+                    prefix = (
+                        "Some cards were kept because they could not be safely deleted:\n"
+                        if english else
+                        "안전하게 삭제할 수 없어 남긴 카드가 있습니다:\n"
+                    )
+                    st.warning(prefix + "\n".join(f"- {x}" for x in skipped))
+            st.divider()
+
         # Literature work is job-centric: one Curation Intent is one literature round.
         round_groups: dict[str, list[Mapping[str, Any]]] = {}
         standalone: list[Mapping[str, Any]] = []
@@ -177,9 +369,94 @@ def render_attention_queue(
                     if english else
                     "하나의 문헌조사 라운드 안에서 필요한 사람 작업이 Input → Review → Input → Decision 순으로 이어집니다."
                 )
+                if dismiss_round is not None:
+                    delete_key = f"attention-delete-confirm::{round_id}"
+                    if not st.session_state.get(delete_key):
+                        if st.button(
+                            "Delete unfinished Attention" if english else "진행 중 Attention 삭제",
+                            key=f"attention-delete-{round_id}-{view_key}",
+                            use_container_width=False,
+                        ):
+                            st.session_state[delete_key] = True
+                            st.rerun()
+                    else:
+                        st.warning(
+                            "This cancels the current literature round and places the research question on hold."
+                            if english else
+                            "현재 문헌조사 라운드를 취소하고 연구질문을 Hold 상태로 전환합니다."
+                        )
+                        confirm_cols = st.columns(2)
+                        if confirm_cols[0].button(
+                            "Confirm delete" if english else "삭제 확인",
+                            key=f"attention-delete-confirm-{round_id}-{view_key}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            try:
+                                dismiss_round(first)
+                                st.session_state.pop(delete_key, None)
+                                st.success("Cancelled." if english else "진행 중 Attention을 삭제했습니다.")
+                                st.rerun()
+                            except Exception as error:
+                                st.error(str(error))
+                        if confirm_cols[1].button(
+                            "Keep" if english else "취소",
+                            key=f"attention-delete-cancel-{round_id}-{view_key}",
+                            use_container_width=True,
+                        ):
+                            st.session_state.pop(delete_key, None)
+                            st.rerun()
+                shown_review_keys: set[str] = set()
                 for idx, item in enumerate(group):
-                    if idx:
+                    paper_id, paper_title, rq_text, review_summary = _knowledge_review_header(item)
+                    review_key = paper_id or f"item-{idx}"
+                    if review_summary and review_key not in shown_review_keys:
+                        if idx:
+                            st.divider()
+                        st.markdown("**연구질문 관점 논문 1-Page Summary**")
+                        if paper_title:
+                            st.caption(paper_title)
+                        if rq_text:
+                            st.caption(f"Research Question · {rq_text}")
+                        links = _knowledge_review_links(item)
+                        local_pdf_path = _knowledge_review_local_pdf(item)
+                        if links or local_pdf_path:
+                            st.caption("논문 원문 확인")
+                            if links:
+                                link_cols = st.columns(len(links))
+                                for col, (label, url) in zip(link_cols, links):
+                                    col.link_button(label, url, use_container_width=True)
+                            if local_pdf_path:
+                                path = Path(local_pdf_path).expanduser()
+                                if path.is_file():
+                                    try:
+                                        st.download_button(
+                                            "로컬 PDF 원문 열기",
+                                            data=path.read_bytes(),
+                                            file_name=path.name,
+                                            mime="application/pdf",
+                                            key=f"attention-local-pdf-{paper_id}-{idx}",
+                                            use_container_width=True,
+                                        )
+                                    except OSError:
+                                        pass
+                        st.markdown(_compact_summary_markdown(review_summary))
+                        shown_review_keys.add(review_key)
                         st.divider()
+                    elif idx:
+                        st.divider()
+                    if str(item.get("category") or "") == "inputs" and dismiss_item is not None:
+                        if st.button(
+                            "Delete this Input" if english else "이 Input 삭제",
+                            key=f"attention-delete-input-{_stable_interaction_key(item)}-{view_key}-{idx}",
+                            use_container_width=False,
+                        ):
+                            try:
+                                dismiss_item(item)
+                                st.success("Input deleted." if english else "Input Attention을 삭제했습니다.")
+                                st.rerun()
+                            except Exception as error:
+                                st.error(str(error))
                     try:
                         _render_attention_item_body(
                             st, item, english=english, interaction_inputs=interaction_inputs,
@@ -195,6 +472,18 @@ def render_attention_queue(
             label = en if english else ko
             heading = f"[{label}] {item.get('title') or item.get('interaction_id')}"
             with st.expander(heading, expanded=card_index == 0 and index == 0):
+                if str(item.get("category") or "") == "inputs" and dismiss_item is not None:
+                    if st.button(
+                        "Delete this Input" if english else "이 Input 삭제",
+                        key=f"attention-delete-input-{_stable_interaction_key(item)}-{view_key}-standalone-{index}",
+                        use_container_width=False,
+                    ):
+                        try:
+                            dismiss_item(item)
+                            st.success("Input deleted." if english else "Input Attention을 삭제했습니다.")
+                            st.rerun()
+                        except Exception as error:
+                            st.error(str(error))
                 try:
                     _render_attention_item_body(
                         st, item, english=english, interaction_inputs=interaction_inputs,
@@ -205,6 +494,9 @@ def render_attention_queue(
 
     groups = dict(snapshot.get("groups") or {})
     category_order = ("inputs", "reviews", "decisions", "exceptions")
+    focus_category = str(st.session_state.pop("attention-focus-category", "") or "").strip()
+    if focus_category in category_order:
+        category_order = (focus_category,) + tuple(category for category in category_order if category != focus_category)
     tab_labels = []
     for category in category_order:
         ko, en = _CATEGORY_LABELS[category]

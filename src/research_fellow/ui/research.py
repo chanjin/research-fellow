@@ -78,21 +78,20 @@ def _render_new_work(
                 created = submit_research_question(result.values["research_question_input"])
                 st.session_state.pop(active_key, None)
                 progression = dict(created.get("progression") or {})
-                matched = int(progression.get("matched_knowledge_count") or 0)
                 next_action = str(progression.get("next_action") or "")
                 execution = dict(progression.get("execution") or {})
                 execution_summary = str(execution.get("summary") or "").strip()
                 if execution_summary:
                     st.session_state["research-intake-flash"] = (
-                        f"Research question accepted. Existing knowledge checked ({matched} match(es)). {execution_summary}"
+                        f"Research question accepted. A fresh first literature round was started from the question/context only. {execution_summary}"
                         if english else
-                        f"연구질문을 접수했습니다. 기존 승인 지식 {matched}건을 확인했습니다. {execution_summary}"
+                        f"연구질문을 접수했습니다. 기존 지식·문헌을 참조하지 않고 질문과 연구자 맥락만으로 첫 문헌 탐색을 시작했습니다. {execution_summary}"
                     )
                 else:
                     st.session_state["research-intake-flash"] = (
-                        f"Research question accepted. Existing knowledge checked ({matched} match(es)); next: {next_action or 'evidence acquisition'}."
+                        f"Research question accepted. A fresh first literature round was started from the question/context only; next: {next_action or 'evidence acquisition'}."
                         if english else
-                        f"연구질문을 접수했습니다. 기존 승인 지식 {matched}건을 확인했고, 다음 단계는 {next_action or '근거 확보'}입니다."
+                        f"연구질문을 접수했습니다. 기존 지식·문헌 없이 첫 문헌 탐색을 시작했고, 다음 단계는 {next_action or '근거 확보'}입니다."
                     )
                 st.rerun()
             except ValueError as error:
@@ -131,21 +130,20 @@ def _render_new_work(
             st.session_state.pop(active_key, None)
             st.session_state.pop(pending_key, None)
             progression = dict(created.get("progression") or {})
-            matched = int(progression.get("matched_knowledge_count") or 0)
             next_action = str(progression.get("next_action") or "")
             execution = dict(progression.get("execution") or {})
             execution_summary = str(execution.get("summary") or "").strip()
             if execution_summary:
                 st.session_state["research-intake-flash"] = (
-                    f"Advisory request accepted as a research question. Existing knowledge checked ({matched} match(es)). {execution_summary}"
+                    f"Advisory request accepted as a research question. A fresh first literature round was started from the interpreted question/context only. {execution_summary}"
                     if english else
-                    f"자문 요청을 연구질문으로 접수했습니다. 기존 승인 지식 {matched}건을 확인했습니다. {execution_summary}"
+                    f"자문 요청을 연구질문으로 접수했습니다. 기존 지식·문헌을 참조하지 않고 해석된 질문과 맥락만으로 첫 문헌 탐색을 시작했습니다. {execution_summary}"
                 )
             else:
                 st.session_state["research-intake-flash"] = (
-                    f"Advisory request accepted as a research question. Existing knowledge checked ({matched} match(es)); next: {next_action or 'evidence acquisition'}."
+                    f"Advisory request accepted as a research question. A fresh first literature round was started from the interpreted question/context only; next: {next_action or 'evidence acquisition'}."
                     if english else
-                    f"자문 요청을 연구질문으로 접수했습니다. 기존 승인 지식 {matched}건을 확인했고, 다음 단계는 {next_action or '근거 확보'}입니다."
+                    f"자문 요청을 연구질문으로 접수했습니다. 기존 지식·문헌 없이 첫 문헌 탐색을 시작했고, 다음 단계는 {next_action or '근거 확보'}입니다."
                 )
             st.rerun()
         except ValueError as error:
@@ -160,6 +158,7 @@ def render_research_workspace(
     prepare_external_advisory: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     submit_external_advisory: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     request_additional_literature: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    request_initial_answer: Callable[[str], Mapping[str, Any]] | None = None,
     request_answer_update: Callable[[str], Mapping[str, Any]] | None = None,
     english: bool = True,
 ) -> None:
@@ -292,7 +291,7 @@ def render_research_workspace(
             if item.get("answer_confirmation_pending"):
                 st.info("Knowledge has been updated. Confirm draft generation in Attention." if english else "현재 연구질문에 대한 지식이 업데이트되었습니다. Attention에서 답변 초안 작성 여부를 확인하세요.")
 
-            action_left, action_right = st.columns(2)
+            action_left, action_mid, action_right = st.columns(3)
             rq_id = str(item.get("rq_id") or "")
             followup_open_key = f"rq-followup-direction-open-{rq_id}"
             if request_additional_literature is not None:
@@ -303,6 +302,31 @@ def render_research_workspace(
                 ):
                     st.session_state[followup_open_key] = True
                     st.rerun()
+            if request_initial_answer is not None:
+                initial_ready = bool(
+                    int(item.get("approved_knowledge_count") or 0) > 0
+                    and not item.get("answer_draft")
+                    and int(item.get("pending_knowledge_reviews") or 0) == 0
+                )
+                if action_mid.button(
+                    "Draft answer" if english else "답변 초안 작성",
+                    key=f"rq-answer-draft-{rq_id}",
+                    use_container_width=True,
+                    disabled=not initial_ready,
+                    help=(
+                        "Start from accumulated approved knowledge. Attention is created only if an external LLM step is needed." if english else
+                        "누적 승인 지식을 바탕으로 초안 작성을 시작합니다. 외부 LLM 단계가 필요한 경우에만 이후 Attention이 생성됩니다."
+                    ),
+                ):
+                    try:
+                        request_initial_answer(rq_id)
+                        st.session_state["research-action-flash"] = (
+                            "Answer drafting started." if english else
+                            "현재까지 축적된 근거를 바탕으로 답변 초안 작성을 시작했습니다."
+                        )
+                        st.rerun()
+                    except ValueError as error:
+                        st.error(str(error))
             if request_answer_update is not None:
                 update_ready = bool(item.get("answer_update_available"))
                 if action_right.button(
@@ -335,6 +359,14 @@ def render_research_workspace(
                 current_titles = [str(x) for x in item.get("direct_evidence_titles") or [] if str(x).strip()]
                 if current_titles:
                     st.caption(("Already collected for this RQ: " if english else "현재 RQ에서 이미 확보한 근거: ") + " · ".join(_short(x, 75) for x in current_titles[:6]))
+                if item.get("answer_draft"):
+                    with st.expander("Current answer context" if english else "현재 연구결과 초안", expanded=False):
+                        st.write(str(item.get("answer_draft") or ""))
+                st.info(
+                    "Submitting this form is the researcher approval boundary. Only after approval is a new M1 literature round created; external-LLM Attention comes after that."
+                    if english else
+                    "이 입력의 제출이 연구자 승인 경계입니다. 승인 후에만 새 M1 문헌조사 라운드가 생성되고, 필요한 외부 LLM Attention도 그 이후에 만들어집니다."
+                )
                 followup_result = render_interaction(
                     st,
                     "request_followup_literature_direction",

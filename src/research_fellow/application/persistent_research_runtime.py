@@ -311,7 +311,7 @@ def advance_persistent_research(
     *,
     intent_ids: Iterable[str] | None = None,
     max_m1_items: int = 3,
-    consume_knowledge_updates: bool = True,
+    consume_knowledge_updates: bool = False,
     literature_executor: LiteratureExecutor = execute_auto_literature_review,
     research_cycle_executor: ResearchCycleExecutor = execute_auto_research_cycle,
 ) -> dict[str, Any]:
@@ -319,36 +319,26 @@ def advance_persistent_research(
 
     Human-required steps are *not* bypassed here.  Intra-workflow Interaction
     boundaries remain owned by the Workflow runtime/Attention checkpoint path.
-    This dispatcher only consumes already-ready durable work or knowledge updates
-    that were created by an approved human action or an autonomous workflow.
+    This dispatcher consumes already-ready durable work. Knowledge updates stay
+    as M1→M2 inbox signals until an explicit researcher action chooses how to use
+    them; they are not an automatic trigger for a new research cycle.
     """
     requested_ids = {
         str(value).strip() for value in (intent_ids or []) if str(value).strip()
     } or None
     links: list[ExecutionLink] = []
 
-    # First expose the researcher authority boundary once a completed literature
-    # round has no unresolved knowledge-card decisions and at least one approved
-    # card is linked to the research question.  This keeps the visible job flow
-    # focused: knowledge update -> researcher confirms draft -> answer drafting.
-    answer_confirmation_links = _ensure_research_answer_confirmations(ledger, memory)
-    links.extend(answer_confirmation_links)
-
-    # Researcher-approved answer drafting is next durable work. It may pause at
-    # the external-LLM infrastructure boundary without losing the RQ context.
+    # Knowledge approval itself never creates a new human-attention card.
+    # Approved cards remain durable M1→M2 updates until the researcher explicitly
+    # chooses the next job action from Research (draft answer or more literature).
+    # Once that action is approved, its external-LLM boundary may create Attention.
     answer_links = _execute_ready_answer_drafts(ledger, memory, bindings)
     links.extend(answer_links)
 
-    answer_boundary_active = bool(answer_confirmation_links) or any(
-        link.status == "needs_attention" for link in answer_links
-    ) or any(
-        row.get("subject_type") == "research_answer_draft" and row.get("status") == "proposed"
-        for row in ledger.phenomena(type_="decision_request")
-    )
-
-    # General M2 research-state evolution remains available, but does not jump
-    # ahead of the explicit first-round answer-confirmation boundary.
-    if consume_knowledge_updates and not answer_boundary_active:
+    # Legacy automatic M2 state evolution remains available only to an explicit
+    # caller. Normal operation keeps it off so one newly approved card cannot
+    # immediately produce a weak search/RQ prompt.
+    if consume_knowledge_updates:
         knowledge_link = _consume_knowledge_updates(
             ledger, memory, bindings, research_cycle_executor=research_cycle_executor,
         )
@@ -364,11 +354,6 @@ def advance_persistent_research(
         max_items=max_m1_items,
         literature_executor=literature_executor,
     ))
-
-    # A literature workflow may have just completed in this same advancement.
-    # Re-evaluate readiness so the UI can immediately show the next human gate.
-    if not answer_confirmation_links:
-        links.extend(_ensure_research_answer_confirmations(ledger, memory))
 
     needs_attention = any(link.status in {"needs_attention", "failed"} for link in links)
     return {

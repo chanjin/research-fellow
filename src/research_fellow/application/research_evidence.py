@@ -31,6 +31,21 @@ def _paper_text(paper: dict[str, Any], analysis: dict[str, Any] | None = None) -
     ])
 
 
+def _analysis_for_research_question(ledger: Ledger, paper_id: str, rq_id: str) -> dict[str, Any]:
+    """Return analysis valid for this RQ without leaking another RQ's interpretation.
+
+    Legacy paper-level analysis is used only when the workspace has no RQ-scoped
+    analyses for this paper, preserving old workspaces without reintroducing the
+    single-analysis overwrite model.
+    """
+    scoped = ledger.paper_question_analysis(paper_id, rq_id) if rq_id else None
+    if scoped:
+        return scoped
+    if ledger.paper_question_analyses(paper_id):
+        return {}
+    return ledger.paper_analysis(paper_id) or {}
+
+
 def has_rq_origin(item: dict[str, Any], rq_id: str) -> bool:
     return any(
         str(link.get("origin_id") or "") == rq_id
@@ -93,7 +108,7 @@ def rq_evidence_bundle(
         paper_id = str(paper.get("paper_id") or "")
         if paper_id in direct_paper_ids:
             continue
-        analysis = ledger.paper_analysis(paper_id) or {}
+        analysis = _analysis_for_research_question(ledger, paper_id, rq_id)
         title = str(paper.get("title") or "").strip().lower()
         score = _lexical_score(question, _paper_text(paper, analysis))
         reason = "question_relevance"
@@ -114,7 +129,7 @@ def rq_evidence_bundle(
 
     direct_papers_with_summary = []
     for paper in direct_papers:
-        analysis = ledger.paper_analysis(str(paper.get("paper_id") or "")) or {}
+        analysis = _analysis_for_research_question(ledger, str(paper.get("paper_id") or ""), rq_id)
         direct_papers_with_summary.append({
             **paper,
             "summary": analysis.get("summary") or paper.get("abstract") or "",

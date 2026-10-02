@@ -13,6 +13,7 @@ from research_fellow.application.paper_batch import process_top_papers
 from research_fellow.application.run_tracking import ExecutionRunTracker
 from research_fellow.application.search_profile_strategy import auto_search_strategy_prompt
 from research_fellow.application.literature_discovery_parsers import parse_external_literature_results
+from research_fellow.application.literature_discovery_formats import _json_payload
 from research_fellow.services import complete_intent
 from research_fellow.domain.knowledge import KnowledgeCard
 import uuid
@@ -37,6 +38,7 @@ def _run_tracker(context: dict[str, Any]) -> ExecutionRunTracker:
 
 def selected_paper_review_prompt(profile: dict[str, Any], papers: list[dict[str, Any]]) -> str:
     payload = []
+    full_text_sections: list[str] = []
     for paper in papers:
         payload.append({
             "source_id": paper.get("source_id", ""),
@@ -46,36 +48,145 @@ def selected_paper_review_prompt(profile: dict[str, Any], papers: list[dict[str,
             "abstract_url": paper.get("abstract_url") or paper.get("url") or paper.get("source_url") or "",
             "full_text_url": paper.get("full_text_url") or "",
             "pdf_url": paper.get("pdf_url") or "",
+            "local_pdf_filename": paper.get("local_pdf_filename") or "",
             "discovery_summary": paper.get("summary") or "",
             "why_relevant": paper.get("why_relevant") or "",
         })
+        full_text = str(paper.get("full_text_content") or "").strip()
+        if full_text:
+            source_id = str(paper.get("source_id") or "")
+            title = str(paper.get("title") or "Untitled paper")
+            note = str(paper.get("full_text_extraction_note") or "").strip()
+            header = f"SOURCE_ID: {source_id}\nTITLE: {title}"
+            if note:
+                header += f"\nEXTRACTION NOTE: {note}"
+            full_text_sections.append(
+                f"--- PAPER FULL TEXT START ---\n{header}\n\n{full_text}\n--- PAPER FULL TEXT END ---"
+            )
+    full_text_context = "\n\n".join(full_text_sections).strip()
     return apply_review_language_policy(
+        "You are a senior researcher in computer science/AI with rigorous analytical ability. "
         "You are assisting a researcher with the first review of papers selected for one research question.\n\n"
         f"RESEARCH QUESTION\n{profile.get('question', '')}\n\n"
         f"RESEARCH CONTEXT\n{profile.get('context', '')}\n\n"
         f"SELECTED PAPERS\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
-        "TASK\n"
-        "For each selected paper, open the supplied full_text_url when accessible and prepare a source-grounded first review. Use abstract_url only for metadata/abstract context; do not treat an abstract page as full text.\n"
-        "Do not invent claims that are not supported by the paper. If full text is not accessible, state that limitation and base the review only on verifiable abstract/metadata.\n"
-        "Write paper_summary, knowledge-card title, claim, evidence interpretation, limits, and review_note in Korean. Keep source_id and any short taxonomy/type tokens in English/original form.\n"
-        "For every candidate knowledge claim, propose a concise title in Korean. The title should be a short, review-friendly noun phrase or proposition label that captures the knowledge, not a truncated copy of the claim.\n\n"
+        + ((f"PAPER FULL TEXT\n{full_text_context}\n\n") if full_text_context else "")
+        + "TASK\n"
+        "For each selected paper, prepare a source-grounded first review. "
+        "When a PAPER FULL TEXT block is supplied below, treat that extracted text as the primary source and do not rely on a URL to infer the paper content. "
+        "When no extracted full text is supplied, open the verified full_text_url if accessible. "
+        "Use abstract_url only for metadata/abstract context; do not treat an abstract page as full text.\n"
+        "Do not invent claims, mechanisms, limitations, or numbers that are not supported by the paper. "
+        "If full text is not accessible, state that limitation and base the review only on verifiable abstract/metadata.\n"
+        "Create an Executive 1-Page Summary that can be scanned within one A4 page. Exclude generic background, rhetorical modifiers, and filler. "
+        "Compress around technical facts, causal relationships, concrete mechanisms, and quantitative results. "
+        "The summary is NOT a generic paper summary. It is a research-question-conditioned interpretation. Every section must prioritize what this paper contributes to answering the RESEARCH QUESTION above, while faithfully distinguishing the paper's own claims from implications for the researcher's question.\n"
+        "If the paper only provides indirect evidence for the research question, say so explicitly. Do not make the paper appear to answer the research question more directly than it does.\n"
+        "Write all researcher-facing prose in Korean. Keep source_id, short taxonomy/type values, paper/model/method names, DOI/arXiv IDs, and URLs in English/original form.\n"
+        "For unavailable or unsupported information, explicitly write '논문에서 확인되지 않음' rather than guessing.\n"
+        "For every candidate knowledge claim, propose a concise title in Korean. The title should be a short, review-friendly noun phrase or proposition label that captures the knowledge, not a truncated copy of the claim.\n"
+        "For every candidate knowledge claim, also extract up to three verbatim sentences from the accessible paper full text that directly support or qualify that claim. Put them in source_quotes. Preserve the original language and wording, but remove double-quotation mark characters (straight or curly) from source_quotes before returning JSON so pasted output remains parse-safe. Do not paraphrase inside source_quotes, and never invent a quote. If full text is unavailable or no sentence can be verified, return an empty source_quotes array.\n\n"
+        "EXECUTIVE SUMMARY CONTENT\n"
+        "1. Bottom Line: one or two sentences answering: 'What does this paper tell us about the RESEARCH QUESTION?' State whether the evidence is direct or indirect.\n"
+        "2. Problem & RQ: first restate the researcher's RESEARCH QUESTION lens, then summarize 1-2 critical prior limitations and the paper's own research question.\n"
+        "3. Key Mechanism: explain only the mechanisms needed to understand why the paper matters for the RESEARCH QUESTION; include a 2-3 step input -> processing/reasoning loop -> output/verification flow.\n"
+        "4. Contributions & Results: select up to three contributions and quantitative results that are most informative for answering or constraining the RESEARCH QUESTION, not merely the paper's most prominent headline results.\n"
+        "5. Limitations & Boundaries: emphasize conditions under which the paper's findings should NOT be transferred to the RESEARCH QUESTION, plus engineering trade-offs relevant to applying the result.\n\n"
         "Return ONLY this JSON shape:\n"
         "{\n"
         "  \"papers\": [\n"
         "    {\n"
         "      \"source_id\": \"exact source_id from input\",\n"
-        "      \"paper_summary\": \"concise summary focused on the research question\",\n"
+        "      \"executive_summary\": {\n"
+        "        \"research_question\": \"입력된 연구질문을 그대로 재진술\",\n"
+        "        \"bottom_line\": \"이 논문이 해당 연구질문에 주는 핵심 답변 또는 근거 1~2문장; 직접/간접 근거 여부 명시\",\n"
+        "        \"existing_limitations\": [\"기존 한계 1\", \"기존 한계 2\"],\n"
+        "        \"paper_rq\": \"논문이 해결하고자 하는 핵심 질문\",\n"
+        "        \"key_idea\": \"기존 방식과의 본질적 차이\",\n"
+        "        \"mechanism_flow\": [\"입력/1단계\", \"중간 처리·추론/2단계\", \"출력·검증/3단계\"],\n"
+        "        \"contributions\": [\n"
+        "          {\"type\": \"Concept/Theory\", \"content\": \"기여 내용\"},\n"
+        "          {\"type\": \"Architecture/Algorithm\", \"content\": \"기여 내용\"},\n"
+        "          {\"type\": \"Validation/Benchmark\", \"content\": \"기여 내용\"}\n"
+        "        ],\n"
+        "        \"quantitative_results\": [\"베이스라인 대비 핵심 정량 결과\"],\n"
+        "        \"limitations\": [\"전제 조건 또는 실패 경계\"],\n"
+        "        \"engineering_tradeoffs\": [\"컴퓨팅·지연·비용·구현 복잡도 등의 트레이드오프\"]\n"
+        "      },\n"
         "      \"claims\": [\n"
-        "        {\"title\": \"concise knowledge-card title\", \"claim\": \"candidate knowledge claim\", \"evidence\": \"supporting evidence or clearly attributed result\", \"limits\": \"conditions/limitations\"}\n"
+        "        {\"title\": \"concise knowledge-card title\", \"claim\": \"candidate knowledge claim\", \"evidence\": \"supporting evidence or clearly attributed result\", \"source_quotes\": [\"verbatim supporting sentence 1\", \"verbatim supporting sentence 2\", \"verbatim supporting sentence 3\"], \"limits\": \"conditions/limitations\"}\n"
         "      ],\n"
-        "      \"review_note\": \"access/quality caveats\"\n"
+        "      \"review_note\": \"원문 접근성·근거 품질 등 리뷰 주의사항\"\n"
         "    }\n"
         "  ]\n"
-        "}"
+        "}\n"
+        "Do not add a separate generic summary outside executive_summary."
     )
 
 
-def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _summary_text(value: Any, fallback: str = "논문에서 확인되지 않음") -> str:
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _summary_items(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _render_executive_one_page_summary(title: str, executive: dict[str, Any], research_question: str = "") -> str:
+    limitations = _summary_items(executive.get("existing_limitations")) or ["논문에서 확인되지 않음"]
+    flow = _summary_items(executive.get("mechanism_flow")) or ["논문에서 확인되지 않음"]
+    quantitative = _summary_items(executive.get("quantitative_results")) or ["논문에서 확인되지 않음"]
+    boundaries = _summary_items(executive.get("limitations")) or ["논문에서 확인되지 않음"]
+    tradeoffs = _summary_items(executive.get("engineering_tradeoffs")) or ["논문에서 확인되지 않음"]
+
+    contributions: list[str] = []
+    for item in executive.get("contributions") or []:
+        if isinstance(item, dict):
+            kind = str(item.get("type") or "Contribution").strip()
+            content = str(item.get("content") or "").strip()
+            if content:
+                contributions.append(f"**{kind}:** {content}")
+        elif str(item).strip():
+            contributions.append(str(item).strip())
+    if not contributions:
+        contributions = ["논문에서 확인되지 않음"]
+
+    rq_text = _summary_text(research_question or executive.get("research_question"), "연구질문 정보 없음")
+    lines = [
+        f"**{_summary_text(title, 'Untitled paper')} — 연구질문 관점 1-Page Summary**",
+        "",
+        f"**연구질문:** {rq_text}",
+        "",
+        "**1. 핵심 결론 (Bottom Line)**",
+        f"* **핵심 명제:** {_summary_text(executive.get('bottom_line'))}",
+        "",
+        "**2. 배경과 문제 정의 (Problem & RQ)**",
+        f"* **기존 한계:** {'; '.join(limitations)}",
+        f"* **연구 질문(RQ):** {_summary_text(executive.get('paper_rq'))}",
+        "",
+        "**3. 제안 방법론 및 아키텍처 (Key Mechanism)**",
+        f"* **핵심 아이디어:** {_summary_text(executive.get('key_idea'))}",
+        f"* **핵심 구조/흐름:** {' → '.join(flow)}",
+        "",
+        "**4. 핵심 기여 & 실증 성과 (Contributions & Results)**",
+        "* **주요 기여:**",
+    ]
+    lines.extend(f"  {idx}. {item}" for idx, item in enumerate(contributions[:3], start=1))
+    lines.extend([
+        f"* **정량 성과:** {'; '.join(quantitative)}",
+        "",
+        "**5. 한계점 및 적용 조건 (Limitations & Boundaries)**",
+        f"* **전제 조건 및 한계:** {'; '.join(boundaries)}",
+        f"* **공학적 트레이드오프:** {'; '.join(tradeoffs)}",
+    ])
+    return "\n".join(lines).strip()
+
+
+def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]], research_question: str = "") -> list[dict[str, Any]]:
     raw = text.strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
@@ -84,7 +195,7 @@ def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]]) -> l
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         raw = "\n".join(lines).strip()
-    payload = json.loads(raw)
+    payload = _json_payload(raw)
     rows = payload.get("papers") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise ValueError("선택 논문 리뷰 응답에 papers 배열이 없습니다.")
@@ -104,19 +215,35 @@ def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]]) -> l
             claim_text = str(claim.get("claim") or "").strip()
             evidence = str(claim.get("evidence") or "").strip()
             if claim_text and evidence:
+                source_quotes = []
+                for quote in claim.get("source_quotes") or []:
+                    quote_text = str(quote or "").translate(str.maketrans("", "", '"“”')).strip()
+                    if quote_text and quote_text not in source_quotes:
+                        source_quotes.append(quote_text)
+                    if len(source_quotes) >= 3:
+                        break
                 claims.append({
                     "title": str(claim.get("title") or "").strip(),
                     "claim": claim_text,
                     "evidence": evidence,
+                    "source_quotes": source_quotes,
                     "limits": str(claim.get("limits") or "").strip(),
                 })
-        summary = str(row.get("paper_summary") or "").strip()
+        executive = row.get("executive_summary")
+        if isinstance(executive, dict):
+            summary = _render_executive_one_page_summary(str(base.get("title") or "Untitled paper"), executive, research_question=research_question)
+        else:
+            # Legacy external responses used a single paper_summary string.
+            summary = str(row.get("paper_summary") or "").strip()
         if not summary:
             continue
+        review_note = str(row.get("review_note") or "").strip()
         reviewed.append({
             **base,
             "paper_summary": summary,
-            "full_text_review": summary + ("\n" + str(row.get("review_note") or "").strip() if row.get("review_note") else ""),
+            "executive_summary": dict(executive) if isinstance(executive, dict) else {},
+            "review_note": review_note,
+            "full_text_review": summary + ("\n\n**Review note:** " + review_note if review_note else ""),
             "full_text_status": "completed",
             "full_text_similarity": int(base.get("relevance_score") or 0),
             "knowledge_candidates": claims,
@@ -532,19 +659,7 @@ def _stage_literature_knowledge_candidates(context: dict[str, Any]) -> None:
             continue
         paper_id = str(shelf.get("paper_id") or "")
         summary = str(reviewed.get("paper_summary") or reviewed.get("summary") or "").strip()
-        if paper_id and not ledger.paper_analysis(paper_id) and summary:
-            ledger.save_paper_analysis(
-                paper_id,
-                research_question=rq_text,
-                summary=summary,
-                reading_raw_output=str(reviewed.get("full_text_review") or ""),
-                generated=True,
-            )
-            ledger.update_shelf_paper(
-                paper_id,
-                shelf_status=str(shelf.get("shelf_status") or "reference"),
-                reading_status="read",
-            )
+        review_note = str(reviewed.get("review_note") or "").strip()
         if paper_id and rq_id and summary and not ledger.paper_question_analysis(paper_id, rq_id):
             ledger.save_paper_question_analysis(
                 paper_id,
@@ -552,10 +667,26 @@ def _stage_literature_knowledge_candidates(context: dict[str, Any]) -> None:
                 intent_id=intent_id,
                 research_question=rq_text,
                 summary=summary,
-                reading_raw_output=str(reviewed.get("full_text_review") or ""),
+                reading_raw_output=str(reviewed.get("full_text_review") or (summary + ("\n\n**Review note:** " + review_note if review_note else ""))),
                 generated=True,
             )
-        if paper_id and ledger.paper_analysis(paper_id):
+        elif paper_id and summary and not rq_id and not ledger.paper_analysis(paper_id):
+            # Legacy/unscoped fallback only. RQ-bound reviews must not replace a
+            # paper-level summary with the interpretation from the latest question.
+            ledger.save_paper_analysis(
+                paper_id,
+                research_question=rq_text,
+                summary=summary,
+                reading_raw_output=str(reviewed.get("full_text_review") or (summary + ("\n\n**Review note:** " + review_note if review_note else ""))),
+                generated=True,
+            )
+        if paper_id and summary:
+            ledger.update_shelf_paper(
+                paper_id,
+                shelf_status=str(shelf.get("shelf_status") or "reference"),
+                reading_status="read",
+            )
+        if paper_id and (ledger.paper_question_analysis(paper_id, rq_id) if rq_id else ledger.paper_analysis(paper_id)):
             analysis_ids.append(paper_id)
 
         existing = []
@@ -569,14 +700,18 @@ def _stage_literature_knowledge_candidates(context: dict[str, Any]) -> None:
             for claim in reviewed.get("knowledge_candidates") or []:
                 claim_text = str(claim.get("claim") or "").strip()
                 evidence = str(claim.get("evidence") or "").strip()
+                quotes = [str(x).strip() for x in (claim.get("source_quotes") or []) if str(x).strip()][:3]
+                evidence_detail = evidence
+                if quotes:
+                    evidence_detail = "원문 근거 문장\n" + "\n".join(f"- {quote}" for quote in quotes) + "\n\n근거 요약\n" + evidence
                 if len(claim_text) < 8 or len(evidence) < 8:
                     continue
                 card = KnowledgeCard(
                     card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}",
                     title=_knowledge_candidate_title(claim, claim_text), source_kind="external_paper", claim=claim_text,
-                    context=summary[:1200], implication="", source_excerpt=evidence[:3200],
+                    context="", implication="", source_excerpt=evidence_detail[:3200],
                     labels=list(profile.get("labels") or []), evidence_level="provisional", status="verified",
-                    evidence_excerpt=evidence[:1600], conditions="", limits=str(claim.get("limits") or ""),
+                    evidence_excerpt=evidence_detail[:1600], conditions="", limits=str(claim.get("limits") or ""),
                     provenance={"source_name": str(shelf.get("title") or "paper"), "paper_id": paper_id, "research_question_id": rq_id, "intent_id": intent_id, "grounding": "m1_first_literature_round"},
                     origin_links=list(shelf.get("origin_links") or []),
                 ).model_dump(mode="json")
@@ -587,6 +722,7 @@ def _stage_literature_knowledge_candidates(context: dict[str, Any]) -> None:
                         "title": f"문헌조사 지식카드 후보 승인: {card['title']}",
                         "card": card, "paper_id": paper_id, "intent_id": intent_id, "rq_id": rq_id,
                         "research_question": rq_text,
+                        "review_note": review_note,
                         "literature_round": "first",
                         "next_action": "승인 시 지식카드로 등록합니다.",
                     },

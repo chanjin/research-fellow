@@ -65,32 +65,52 @@ def render_operating_desk(
     cols[2].metric("Knowledge" if english else "지식카드", int(knowledge_counts.get("cards", 0)))
     cols[3].metric("Active work" if english else "진행 중", active_count)
 
-    labels: list[str] = []
+    view_keys: list[str] = []
     if research is not None:
-        labels.append("Research" if english else "연구")
-    labels.append("Attention" if english else "확인 필요")
+        view_keys.append("research")
+    view_keys.append("attention")
     if knowledge is not None:
-        labels.append("Knowledge" if english else "지식")
-    labels.append("Activity" if english else "활동")
+        view_keys.append("knowledge")
+    view_keys.append("activity")
     if developer_mode and system is not None:
-        labels.append("System" if english else "시스템")
+        view_keys.append("system")
+    labels = {
+        "research": "Research" if english else "연구",
+        "attention": "Attention" if english else "확인 필요",
+        "knowledge": "Knowledge" if english else "지식",
+        "activity": "Activity" if english else "활동",
+        "system": "System" if english else "시스템",
+    }
 
-    tabs = st.tabs(labels)
-    index = 0
-    if research is not None:
-        with tabs[index]:
-            render_research_workspace(
-                st, research, english=english,
-                submit_research_question=research_submit_question,
-                prepare_external_advisory=research_prepare_external_advisory,
-                submit_external_advisory=research_submit_external_advisory,
-                request_additional_literature=research_request_additional_literature,
-                request_initial_answer=research_request_initial_answer,
-                request_answer_update=research_request_answer_update,
-            )
-        index += 1
+    # A tab cannot be selected programmatically in Streamlit.  Use a compact
+    # horizontal workspace selector so Research can send the user directly to
+    # the owning RQ's Attention work without losing context.
+    requested_view = str(st.session_state.pop("operating-desk-navigate", "") or "").strip()
+    if requested_view in view_keys:
+        st.session_state["operating-desk-view"] = requested_view
+    current_view = str(st.session_state.get("operating-desk-view") or "")
+    if current_view not in view_keys:
+        st.session_state["operating-desk-view"] = "research" if "research" in view_keys else view_keys[0]
+    selected_view = st.radio(
+        "Workspace" if english else "업무 화면",
+        view_keys,
+        format_func=lambda key: labels.get(key, key),
+        horizontal=True,
+        key="operating-desk-view",
+        label_visibility="collapsed",
+    )
 
-    with tabs[index]:
+    if selected_view == "research" and research is not None:
+        render_research_workspace(
+            st, research, english=english,
+            submit_research_question=research_submit_question,
+            prepare_external_advisory=research_prepare_external_advisory,
+            submit_external_advisory=research_submit_external_advisory,
+            request_additional_literature=research_request_additional_literature,
+            request_initial_answer=research_request_initial_answer,
+            request_answer_update=research_request_answer_update,
+        )
+    elif selected_view == "attention":
         render_attention_queue(
             st, attention, english=english,
             interaction_inputs=attention_interaction_inputs,
@@ -99,28 +119,20 @@ def render_operating_desk(
             dismiss_round=attention_dismiss_round,
             dismiss_item=attention_dismiss_item,
         )
-    index += 1
-
-    if knowledge is not None:
-        with tabs[index]:
-            render_knowledge_workspace(
-                st, knowledge, english=english,
-                update_paper_metadata=knowledge_update_paper_metadata,
-                attach_paper_pdf=knowledge_attach_paper_pdf,
-                enqueue_ontology_work=knowledge_enqueue_ontology_work,
-                manage_ontology=knowledge_manage_ontology,
-            )
-        index += 1
-
-    with tabs[index]:
+    elif selected_view == "knowledge" and knowledge is not None:
+        render_knowledge_workspace(
+            st, knowledge, english=english,
+            update_paper_metadata=knowledge_update_paper_metadata,
+            attach_paper_pdf=knowledge_attach_paper_pdf,
+            enqueue_ontology_work=knowledge_enqueue_ontology_work,
+            manage_ontology=knowledge_manage_ontology,
+        )
+    elif selected_view == "activity":
         render_activity_feed(st, activity, english=english)
         st.caption(
-            "This tab is reserved for M2 work and deliverables; for now it shows recent agent activity."
+            "This workspace is reserved for M2 work and deliverables; for now it shows recent agent activity."
             if english else
-            "이 탭은 M2의 보고서·논문·자문 수행과 산출물 공간으로 확장합니다. 현재는 최근 Agent 활동을 표시합니다."
+            "이 화면은 M2의 보고서·논문·자문 수행과 산출물 공간으로 확장합니다. 현재는 최근 Agent 활동을 표시합니다."
         )
-    index += 1
-
-    if developer_mode and system is not None:
-        with tabs[index]:
-            render_system_workspace(st, system, english=english)
+    elif selected_view == "system" and developer_mode and system is not None:
+        render_system_workspace(st, system, english=english)

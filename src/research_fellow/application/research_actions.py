@@ -76,10 +76,25 @@ def followup_literature_context(
 def _evidence_context_text(summary: Mapping[str, Any]) -> str:
     paper_titles = [str(x) for x in summary.get("paper_titles") or [] if str(x).strip()]
     knowledge_titles = [str(x) for x in summary.get("knowledge_titles") or [] if str(x).strip()]
-    lines = [
+    latest_answer = str(summary.get("latest_answer_draft") or "").strip()
+    lines = []
+    if latest_answer:
+        lines.extend([
+            "CURRENT RESEARCH ANSWER — PRIMARY FOLLOW-UP CONTEXT",
+            f"Answer version: v{int(summary.get('latest_answer_version') or 1)}",
+            latest_answer,
+            "",
+            "FOLLOW-UP SEARCH GOAL",
+            "Use the current answer to identify what could change, qualify, weaken, strengthen, or extend it.",
+            "Prioritize unsupported claims, weak evidence, unresolved contradictions, boundary conditions, missing mechanisms, and open questions.",
+            "Do not merely retrieve more papers that repeat or confirm claims already well supported in the current answer.",
+            "",
+        ])
+    lines.extend([
+        "ACCUMULATED RQ EVIDENCE",
         f"Direct papers already collected for this RQ: {int(summary.get('paper_count') or 0)}",
         f"Approved knowledge already derived for this RQ: {int(summary.get('knowledge_count') or 0)}",
-    ]
+    ])
     if paper_titles:
         lines.append("Previously collected papers: " + " | ".join(paper_titles))
     if knowledge_titles:
@@ -104,11 +119,6 @@ def _evidence_context_text(summary: Mapping[str, Any]) -> str:
             if item.get("summary"):
                 lines.append(f"- {item.get('title') or 'Paper'}\n{item.get('summary')}")
 
-    latest_answer = str(summary.get("latest_answer_draft") or "").strip()
-    if latest_answer:
-        lines.append(
-            f"LATEST RESEARCH ANSWER DRAFT (v{int(summary.get('latest_answer_version') or 1)})\n{latest_answer}"
-        )
     return "\n".join(lines)
 
 

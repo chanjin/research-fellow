@@ -756,6 +756,34 @@ def _synthesize_literature_report(context: dict[str, Any]) -> None:
         _record_failure(context, error, "synthesis", {"search_run_id": context["search_outcome"].get("run_id", "")})
         context["synthesis"] = deterministic_literature_report(context["search_profile"], context["report_run"], context["reviewed_papers"])
 
+
+def _retire_stale_search_strategy_attention(ledger: Ledger, intent_id: str, *, keep_run_id: str = "") -> None:
+    """Close historical search-strategy leftovers after a literature round finishes.
+
+    They remain as audit history but must not reappear as fresh Inputs cards.
+    """
+    if not intent_id:
+        return
+    for run in ledger.auto_research_runs(statuses=("needs_attention",), limit=200):
+        run_id = str(run.get("run_id") or "").strip()
+        if not run_id or run_id == keep_run_id:
+            continue
+        if str(run.get("intent_id") or "").strip() != intent_id:
+            continue
+        if str(run.get("current_stage") or "").strip() != "search_strategy":
+            continue
+        ledger.update_auto_research_run(
+            run_id, status="completed", stage="superseded_after_literature_completion"
+        )
+    for failure in ledger.auto_research_failures(status="needs_attention", limit=200):
+        if str(failure.get("intent_id") or "").strip() != intent_id:
+            continue
+        if str(failure.get("stage") or "").strip() != "search_strategy":
+            continue
+        failure_id = str(failure.get("failure_id") or failure.get("id") or "").strip()
+        if failure_id:
+            ledger.resolve_auto_research_failure(failure_id, status="superseded")
+
 def _finalize_literature_review(context: dict[str, Any]) -> None:
     ledger: Ledger = context["ledger"]
     intent_event = context["curation_intent"]
@@ -809,6 +837,9 @@ def _finalize_literature_review(context: dict[str, Any]) -> None:
 
     completed = context.get("completed_papers", [])
     tracker.complete()
+    _retire_stale_search_strategy_attention(
+        ledger, str(context.get("intent_id") or ""), keep_run_id=run_id
+    )
     complete_intent(
         ledger, context["curation_intent"],
         f"초록 {len(context['search_outcome']['candidates'])}편을 검토하고 상위 {len(completed)}편의 본문을 비교하여 자동 탐색 보고서 {context['report_id']}를 생성했습니다.",

@@ -254,6 +254,21 @@ def render_research_workspace(
     visible_questions = questions if selected_phase == "all" else [
         item for item in questions if str(item.get("lifecycle_phase") or "starting") == selected_phase
     ]
+    focused_rq = str(st.session_state.get("research-focus-rq") or "").strip()
+    if focused_rq and any(str(item.get("rq_id") or "") == focused_rq for item in questions):
+        focused = [item for item in questions if str(item.get("rq_id") or "") == focused_rq]
+        focus_cols = st.columns([4, 1])
+        focus_cols[0].info(
+            ("Focused research question" if english else "선택한 연구질문") + " · " + str(focused[0].get("question") or focused_rq)
+        )
+        if focus_cols[1].button(
+            "Show all" if english else "전체 보기",
+            key="research-clear-focus-rq",
+            use_container_width=True,
+        ):
+            st.session_state.pop("research-focus-rq", None)
+            st.rerun()
+        visible_questions = focused
     status_labels_ko = {"exploring": "탐색 중", "interested": "관심", "candidate": "후보", "hold": "보류", "resolved": "완료", "rejected": "종료/제외"}
     status_labels_en = {"exploring": "Exploring", "interested": "Interested", "candidate": "Candidate", "hold": "On hold", "resolved": "Completed", "rejected": "Closed"}
     for item in visible_questions:
@@ -263,86 +278,91 @@ def render_research_workspace(
         status_label = (status_labels_en if english else status_labels_ko).get(status, status)
         lifecycle_phase = str(item.get("lifecycle_phase") or "starting")
         lifecycle_label = phase_labels.get(lifecycle_phase, lifecycle_phase)
-        attention_marker = " · Attention" if human_needed else ""
-        stage_marker = f" · {stage}" if stage else ""
-        with st.expander(f"[{lifecycle_label} · {status_label}{attention_marker}{stage_marker}] {item.get('question', '')}", expanded=lifecycle_phase in {"starting", "initial_literature", "followup_literature"} or human_needed):
-            if item.get("rationale"):
-                st.write(_short(item.get("rationale", ""), 500))
-            if item.get("researcher_comment"):
-                st.markdown("**Researcher comment**" if english else "**연구자 코멘트**")
-                st.write(_short(item.get("researcher_comment", ""), 700))
-            meta = []
-            if item.get("source_type"):
-                meta.append(f"source: {item['source_type']}")
-            meta.append(f"intents: {int(item.get('intent_count') or 0)}")
-            meta.append(f"evidence: {int(item.get('evidence_source_count') or 0)}")
-            st.caption(" · ".join(meta))
-            task_cols = st.columns(3)
-            task_cols[0].metric("Attention" if english else "Attention", int(item.get("attention_item_count") or 0))
-            task_cols[1].metric("Paper review pending" if english else "논문 리뷰 대기", int(item.get("paper_review_pending") or 0))
-            task_cols[2].metric("Paper review done" if english else "논문 리뷰 완료", int(item.get("paper_review_completed") or 0))
-            next_action = str(item.get("next_agent_action") or "")
-            if stage:
-                st.markdown(
-                    f"**Current stage:** `{stage}`" if english else f"**현재 단계:** `{stage}`"
+        rq_id = str(item.get("rq_id") or "")
+
+        # The default RQ surface is deliberately compact.  Detailed execution,
+        # evidence, and lineage information remains available on demand below.
+        answer_work_status = str(item.get("answer_work_status") or "").strip()
+        if item.get("answer_work_in_progress") and answer_work_status:
+            state_summary = answer_work_status
+        elif human_needed:
+            phase = str(item.get("attention_phase") or "").strip()
+            state_summary = (
+                (f"Researcher action needed · {phase}" if phase else "Researcher action needed")
+                if english else
+                (f"사람 작업 대기 · {phase}" if phase else "사람 작업 대기")
+            )
+        elif int(item.get("pending_knowledge_reviews") or 0):
+            state_summary = "Knowledge Card review pending" if english else "지식카드 검토 대기"
+        elif int(item.get("paper_review_pending") or 0):
+            state_summary = "Paper review in progress" if english else "논문 리뷰 진행 중"
+        elif item.get("answer_update_available"):
+            state_summary = "Answer update available" if english else "새 지식 반영 · 답변 업데이트 가능"
+        elif item.get("answer_draft"):
+            version = int(item.get("answer_version") or 1)
+            state_summary = f"Answer v{version} ready" if english else f"답변 v{version} 준비됨"
+        elif int(item.get("approved_knowledge_count") or 0) > 0:
+            state_summary = "Knowledge ready · answer can be drafted" if english else "지식 업데이트 완료 · 답변 작성 가능"
+        elif int(item.get("intent_count") or 0) > 0:
+            state_summary = "Literature work in progress" if english else "문헌 탐색 진행 중"
+        else:
+            state_summary = lifecycle_label
+
+        rounds = int(item.get("intent_count") or 0)
+        direct_papers = int(item.get("direct_evidence_papers") or 0)
+        review_done = int(item.get("paper_review_completed") or 0)
+        review_pending = int(item.get("paper_review_pending") or 0)
+        review_total = review_done + review_pending
+        knowledge_count = int(item.get("approved_knowledge_count") or 0)
+        progress_bits = [
+            (f"Literature {rounds}R" if english else f"문헌 {rounds}R"),
+            (f"Papers {direct_papers}" if english else f"논문 {direct_papers}"),
+            (f"Reviewed {review_done}/{review_total}" if english else f"리뷰 {review_done}/{review_total}"),
+            (f"KC {knowledge_count}"),
+        ]
+        if item.get("answer_work_in_progress"):
+            progress_bits.append((f"Answer {item.get('answer_work_stage') or 'running'}" if english else f"답변 {item.get('answer_work_stage') or '진행 중'}"))
+        elif item.get("answer_draft"):
+            progress_bits.append(f"Answer v{int(item.get('answer_version') or 1)}" if english else f"답변 v{int(item.get('answer_version') or 1)}")
+        else:
+            progress_bits.append("Answer -" if english else "답변 -")
+
+        with st.container(border=True):
+            st.markdown(f"#### {item.get('question', '')}")
+            st.markdown(("**Current:** " if english else "**현재 상태:** ") + state_summary)
+            st.caption(" · ".join(progress_bits))
+
+            attention_count = int(item.get("attention_item_count") or 0)
+            if attention_count:
+                category_bits = []
+                for key, ko, en in (
+                    ("attention_inputs", "Input", "Input"),
+                    ("attention_reviews", "Review", "Review"),
+                    ("attention_decisions", "Decision", "Decision"),
+                    ("attention_exceptions", "Exception", "Exception"),
+                ):
+                    count = int(item.get(key) or 0)
+                    if count:
+                        category_bits.append(f"{en if english else ko} {count}")
+                attention_cols = st.columns([3, 1])
+                attention_cols[0].warning(
+                    (f"Attention {attention_count}: " if english else f"해야 할 일 {attention_count}건: ")
+                    + " · ".join(category_bits)
                 )
-            if next_action:
-                st.write(("**Next agent action:** " if english else "**다음 Agent 행동:** ") + next_action)
-            execution_status = str(item.get("execution_status") or "")
-            execution_detail = str(item.get("execution_detail") or "").strip()
-            if human_needed:
-                attention_category = str(item.get("attention_category") or "")
-                attention_phase = str(item.get("attention_phase") or "").strip()
-                attention_round = str(item.get("attention_round_label") or "").strip()
-                category_label = {"inputs": "Inputs", "reviews": "Reviews", "decisions": "Decisions", "exceptions": "Exceptions"}.get(attention_category, "Attention")
-                detail = " · ".join(x for x in [attention_round, attention_phase] if x)
-                st.warning(
-                    ((f"Researcher attention is required: Attention > {category_label}" + (f" · {detail}" if detail else "")) if english else
-                     (f"연구자 작업이 필요합니다: Attention > {category_label}" + (f" · {detail}" if detail else "")))
-                )
-            elif execution_status == "attention_projection_missing":
-                st.error(execution_detail or ("M1 is waiting for human input, but no Attention item was projected." if english else "M1은 사람 입력을 기다리지만 Attention 카드가 생성되지 않았습니다."))
-            elif execution_status == "dispatch_pending":
-                st.info(execution_detail or ("M1 dispatch is pending." if english else "M1 실행 시작을 기다리고 있습니다."))
-            elif execution_status == "agent_running":
-                st.info(execution_detail or ("M1 is running." if english else "M1이 실행 중입니다."))
-            elif execution_detail:
-                st.caption(execution_detail)
+                if attention_cols[1].button(
+                    "Open Attention" if english else "해야 할 일 보기",
+                    key=f"rq-open-attention-{rq_id}",
+                    use_container_width=True,
+                ):
+                    st.session_state["attention-focus-rq"] = rq_id
+                    st.session_state["operating-desk-navigate"] = "attention"
+                    st.rerun()
+            elif str(item.get("execution_status") or "") == "attention_projection_missing":
+                st.error(str(item.get("execution_detail") or ("Attention projection is missing." if english else "사람 입력 대기 상태이지만 Attention 연결이 없습니다.")))
             else:
-                st.caption(
-                    "No researcher action is required right now." if english else "현재 연구자 개입은 필요하지 않습니다."
-                )
-            if item.get("progress_detail"):
-                st.caption(_short(item.get("progress_detail", ""), 350))
-            st.markdown("**Research flow**" if english else "**연구 진행 흐름**")
-            flow = [
-                ("Literature exploration" if english else "문헌 탐구", bool(item.get("intent_count"))),
-                ("Paper / knowledge review" if english else "논문·지식 검토", bool(item.get("literature_round_completed"))),
-                ("Knowledge registered" if english else "지식 등록", int(item.get("approved_knowledge_count") or 0) > 0),
-                ("Answer draft" if english else "답변 초안", bool(item.get("answer_draft"))),
-            ]
-            st.caption("  →  ".join(("✓ " if done else "○ ") + label for label, done in flow))
-            st.markdown("**Evidence for this question**" if english else "**이 연구질문의 근거**")
-            direct_cols = st.columns(2)
-            direct_cols[0].metric("Direct papers" if english else "직접 탐색 논문", int(item.get("direct_evidence_papers") or 0))
-            direct_cols[1].metric("Direct knowledge" if english else "직접 생성 지식", int(item.get("direct_evidence_cards") or 0))
-            direct_titles = [x for x in item.get("direct_evidence_titles") or [] if x]
-            if direct_titles:
-                st.caption(("Primary lineage: " if english else "1차 근거 계보: ") + " · ".join(_short(x, 80) for x in direct_titles[:5]))
-            st.markdown("**Supporting prior research assets**" if english else "**기존 연구자산의 보강 근거**")
-            support_cols = st.columns(2)
-            support_cols[0].metric("Existing knowledge" if english else "기존 지식카드", int(item.get("supporting_knowledge_cards") or 0))
-            support_cols[1].metric("Existing papers" if english else "기존 논문", int(item.get("supporting_papers") or 0))
-            support_titles = [x for x in item.get("supporting_evidence_titles") or [] if x]
-            if support_titles:
-                st.caption(("Supporting: " if english else "보강: ") + " · ".join(_short(x, 80) for x in support_titles[:5]))
-            if int(item.get("pending_knowledge_reviews") or 0):
-                st.info((f"{int(item.get('pending_knowledge_reviews') or 0)} knowledge-card candidate(s) await researcher review." if english else f"논문 기반 지식카드 후보 {int(item.get('pending_knowledge_reviews') or 0)}건이 연구자 검토를 기다립니다."))
-            if item.get("answer_confirmation_pending"):
-                st.info("Knowledge has been updated. Confirm draft generation in Attention." if english else "현재 연구질문에 대한 지식이 업데이트되었습니다. Attention에서 답변 초안 작성 여부를 확인하세요.")
+                st.caption("No researcher action is required right now." if english else "현재 바로 처리할 사람 작업은 없습니다.")
 
             action_left, action_mid, action_right = st.columns(3)
-            rq_id = str(item.get("rq_id") or "")
             followup_open_key = f"rq-followup-direction-open-{rq_id}"
             if request_additional_literature is not None:
                 if action_left.button(
@@ -354,8 +374,10 @@ def render_research_workspace(
                     st.rerun()
             if request_initial_answer is not None:
                 initial_ready = bool(
-                    int(item.get("approved_knowledge_count") or 0) > 0
+                    knowledge_count > 0
                     and not item.get("answer_draft")
+                    and not item.get("answer_work_in_progress")
+                    and not item.get("answer_confirmation_pending")
                     and int(item.get("pending_knowledge_reviews") or 0) == 0
                 )
                 if action_mid.button(
@@ -365,23 +387,26 @@ def render_research_workspace(
                     disabled=not initial_ready,
                     help=(
                         "Start from accumulated approved knowledge. Attention is created only if an external LLM step is needed." if english else
-                        "누적 승인 지식을 바탕으로 초안 작성을 시작합니다. 외부 LLM 단계가 필요한 경우에만 이후 Attention이 생성됩니다."
+                        "누적 승인 지식을 바탕으로 초안 작성을 시작합니다. 외부 LLM 단계가 필요한 경우 이후 Attention이 생성됩니다."
                     ),
                 ):
                     try:
                         request_initial_answer(rq_id)
                         st.session_state["research-action-flash"] = (
-                            "Answer drafting started." if english else
-                            "현재까지 축적된 근거를 바탕으로 답변 초안 작성을 시작했습니다."
+                            "Answer drafting started. Next: complete the RQ answer Input in Attention." if english else
+                            "답변 초안 작성을 시작했습니다. 다음 작업: Attention에 생성된 RQ 답변 Input을 수행하세요."
                         )
+                        st.session_state["attention-focus-rq"] = rq_id
                         st.rerun()
                     except ValueError as error:
                         st.error(str(error))
+                if answer_work_status:
+                    action_mid.caption(("Current: " if english else "현재: ") + answer_work_status)
             if request_answer_update is not None:
                 update_ready = bool(item.get("answer_update_available"))
                 if action_right.button(
                     "Update answer" if english else "답변 업데이트",
-                    key=f"rq-answer-update-{item.get('rq_id')}",
+                    key=f"rq-answer-update-{rq_id}",
                     use_container_width=True,
                     disabled=not update_ready,
                     help=(
@@ -390,11 +415,12 @@ def render_research_workspace(
                     ),
                 ):
                     try:
-                        request_answer_update(str(item.get("rq_id") or ""))
+                        request_answer_update(rq_id)
                         st.session_state["research-action-flash"] = (
-                            "Answer update started." if english else
-                            "변경된 근거를 반영한 답변 업데이트를 시작했습니다."
+                            "Answer update started. Next: complete the RQ answer Input in Attention." if english else
+                            "변경된 근거를 반영한 답변 업데이트를 시작했습니다. 다음 작업: Attention에 생성된 RQ 답변 Input을 수행하세요."
                         )
+                        st.session_state["attention-focus-rq"] = rq_id
                         st.rerun()
                     except ValueError as error:
                         st.error(str(error))
@@ -410,12 +436,12 @@ def render_research_workspace(
                 if current_titles:
                     st.caption(("Already collected for this RQ: " if english else "현재 RQ에서 이미 확보한 근거: ") + " · ".join(_short(x, 75) for x in current_titles[:6]))
                 if item.get("answer_draft"):
-                    with st.expander("Current answer context" if english else "현재 연구결과 초안", expanded=False):
-                        st.write(str(item.get("answer_draft") or ""))
+                    st.markdown("**Current answer context**" if english else "**현재 연구결과 초안**")
+                    st.write(_short(str(item.get("answer_draft") or ""), 1200))
                 st.info(
-                    "Submitting this form is the researcher approval boundary. Only after approval is a new M1 literature round created; external-LLM Attention comes after that."
+                    "Submitting this form is the researcher approval boundary. Only after approval is a new M1 literature round created."
                     if english else
-                    "이 입력의 제출이 연구자 승인 경계입니다. 승인 후에만 새 M1 문헌조사 라운드가 생성되고, 필요한 외부 LLM Attention도 그 이후에 만들어집니다."
+                    "이 입력의 제출이 연구자 승인 경계입니다. 승인 후에만 새 M1 문헌조사 라운드가 생성됩니다."
                 )
                 followup_result = render_interaction(
                     st,
@@ -440,28 +466,73 @@ def render_research_workspace(
                         st.session_state.pop(followup_open_key, None)
                         direction = str(outcome.get("direction") or "").strip()
                         st.session_state["research-action-flash"] = (
-                            f"Additional literature exploration started: {direction}" if english else
-                            f"추가 문헌 조사 방향을 반영해 새 M1 탐색 라운드를 시작했습니다: {direction}"
+                            f"Additional literature exploration started: {direction}. Next: continue it in Attention when work appears." if english else
+                            f"추가 문헌 조사 방향을 반영해 새 탐색 라운드를 시작했습니다: {direction}. 다음 작업: Attention에 새 작업이 생성되면 이어서 처리하세요."
                         )
+                        st.session_state["attention-focus-rq"] = rq_id
                         st.rerun()
                     except ValueError as error:
                         st.error(str(error))
 
-            if item.get("answer_draft"):
-                version = int(item.get("answer_version") or 1)
-                st.markdown((f"**Research answer v{version}**" if english else f"**연구질문 답변 v{version}**"))
-                if item.get("answer_first_document"):
-                    with st.expander("1st document · direct RQ evidence" if english else "1차 문서 · 이번 연구질문의 직접 근거", expanded=False):
+            with st.expander("Progress details" if english else "세부 진행상황", expanded=False):
+                st.caption(f"{lifecycle_label} · {status_label}")
+                if item.get("rationale"):
+                    st.write(_short(item.get("rationale", ""), 500))
+                if item.get("researcher_comment"):
+                    st.markdown("**Researcher comment**" if english else "**연구자 코멘트**")
+                    st.write(_short(item.get("researcher_comment", ""), 700))
+                detail_cols = st.columns(4)
+                detail_cols[0].metric("Rounds" if english else "문헌 라운드", rounds)
+                detail_cols[1].metric("Review pending" if english else "리뷰 대기", review_pending)
+                detail_cols[2].metric("Review done" if english else "리뷰 완료", review_done)
+                detail_cols[3].metric("Approved KC" if english else "승인 KC", knowledge_count)
+                next_action = str(item.get("next_agent_action") or "").strip()
+                if next_action:
+                    st.write(("**Next agent action:** " if english else "**다음 Agent 행동:** ") + next_action)
+                execution_detail = str(item.get("execution_detail") or "").strip()
+                if execution_detail:
+                    st.caption(execution_detail)
+                if item.get("progress_detail"):
+                    st.caption(_short(item.get("progress_detail", ""), 350))
+
+                st.markdown("**Research flow**" if english else "**연구 진행 흐름**")
+                flow = [
+                    ("Literature exploration" if english else "문헌 탐구", bool(rounds)),
+                    ("Paper / knowledge review" if english else "논문·지식 검토", bool(item.get("literature_round_completed"))),
+                    ("Knowledge registered" if english else "지식 등록", knowledge_count > 0),
+                    ("Answer draft" if english else "답변 초안", bool(item.get("answer_draft"))),
+                ]
+                st.caption("  →  ".join(("✓ " if done else "○ ") + label for label, done in flow))
+
+                st.markdown("**Evidence for this question**" if english else "**이 연구질문의 근거**")
+                direct_cols = st.columns(2)
+                direct_cols[0].metric("Direct papers" if english else "직접 탐색 논문", direct_papers)
+                direct_cols[1].metric("Direct knowledge" if english else "직접 생성 지식", int(item.get("direct_evidence_cards") or 0))
+                direct_titles = [x for x in item.get("direct_evidence_titles") or [] if x]
+                if direct_titles:
+                    st.caption(("Primary lineage: " if english else "1차 근거 계보: ") + " · ".join(_short(x, 80) for x in direct_titles[:5]))
+                support_cols = st.columns(2)
+                support_cols[0].metric("Existing knowledge" if english else "기존 지식카드", int(item.get("supporting_knowledge_cards") or 0))
+                support_cols[1].metric("Existing papers" if english else "기존 논문", int(item.get("supporting_papers") or 0))
+                support_titles = [x for x in item.get("supporting_evidence_titles") or [] if x]
+                if support_titles:
+                    st.caption(("Supporting: " if english else "보강: ") + " · ".join(_short(x, 80) for x in support_titles[:5]))
+
+                if item.get("answer_draft"):
+                    version = int(item.get("answer_version") or 1)
+                    st.markdown((f"**Research answer v{version}**" if english else f"**연구질문 답변 v{version}**"))
+                    if item.get("answer_first_document"):
+                        st.markdown("**Direct-evidence summary**" if english else "**직접 근거 요약**")
                         st.write(str(item.get("answer_first_document") or ""))
-                st.markdown("**2nd / final document**" if english else "**2차 · 최종 문서**")
-                st.write(str(item.get("answer_draft") or ""))
-                if item.get("answer_update_available"):
-                    st.info(
-                        "New literature or knowledge is available after this answer. You can update it." if english else
-                        "이 답변 이후 새 문헌 또는 지식 변화가 있습니다. 답변 업데이트가 가능합니다."
-                    )
-            if item.get("exploration_need"):
-                st.caption(("Exploration need: " if english else "탐색 필요: ") + _short(item["exploration_need"], 350))
+                    st.markdown("**Final answer draft**" if english else "**최종 답변 초안**")
+                    st.write(str(item.get("answer_draft") or ""))
+                    if item.get("answer_update_available"):
+                        st.info(
+                            "New literature or knowledge is available after this answer. You can update it." if english else
+                            "이 답변 이후 새 문헌 또는 지식 변화가 있습니다. 답변 업데이트가 가능합니다."
+                        )
+                if item.get("exploration_need"):
+                    st.caption(("Exploration need: " if english else "탐색 필요: ") + _short(item["exploration_need"], 350))
 
     left, right = st.columns(2)
     with left:

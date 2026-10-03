@@ -28,10 +28,19 @@ def ensure_paper_review_task(ledger: Ledger, *, intent_id: str, paper: Mapping[s
     if not paper_id:
         raise ValueError("서재함 논문 ID가 없어 논문 리뷰 작업을 만들 수 없습니다.")
     existing = [x for x in ledger.phenomena(type_="research_task") if x.get("subject_type") == "paper_first_review" and str(x.get("subject_id") or "") == paper_id and str((x.get("payload") or {}).get("intent_id") or "") == intent_id and x.get("status") in {"ready", "completed"}]
-    if existing:
-        return existing[0]
+    completed = [x for x in existing if x.get("status") == "completed"]
+    if completed:
+        return completed[0]
     profile = _profile_for_intent(ledger, intent_id)
     prompt = selected_paper_review_prompt(profile, [dict(candidate)])
+    for task in [x for x in existing if x.get("status") == "ready"]:
+        task_prompt = str((task.get("payload") or {}).get("prompt") or "")
+        if "executive_summary" in task_prompt and "Executive 1-Page Summary" in task_prompt:
+            return task
+        # Historical follow-up rounds can contain a ready paper review created
+        # with the old paper_summary-only prompt.  Preserve it for audit but do
+        # not surface it as the current Attention task.
+        ledger.set_status(str(task.get("phenomenon_id") or ""), "superseded")
     linked = ledger.research_questions_for_intent(intent_id)
     rq_id = str((linked[0] if linked else {}).get("rq_id") or "")
     case_id = ledger.create_case("research", f"Paper first review: {str(paper.get('title') or '')[:72]}")
@@ -41,7 +50,7 @@ def ensure_paper_review_task(ledger: Ledger, *, intent_id: str, paper: Mapping[s
             "title": f"논문 원문 리뷰: {paper.get('title') or 'Untitled paper'}",
             "task_type": "paper_first_review", "intent_id": intent_id, "rq_id": rq_id,
             "paper_id": paper_id, "paper": dict(candidate), "prompt": prompt,
-            "expected_output": "JSON papers[] with executive_summary and source-grounded claims",
+            "expected_output": "JSON papers[] with executive_summary, source-grounded claims, and review_note",
         },
         subject_id=paper_id, status="ready",
     )
@@ -75,17 +84,16 @@ def apply_inline_paper_review_response(
     """
     profile = _profile_for_intent(ledger, intent_id)
     rq = _research_question_for_intent(ledger, intent_id)
+    rq_id = str(rq.get("rq_id") or "")
     rq_text = str(rq.get("question") or profile.get("question") or "")
-    reviewed = _parse_selected_paper_review(response, [dict(candidate)], research_question=rq_text)[0]
+    reviewed = _parse_selected_paper_review(
+        response, [dict(candidate)], research_question=rq_text
+    )[0]
     shelf = ledger.shelf_paper(paper_id)
     if not shelf:
         raise ValueError("서재함 논문을 찾을 수 없습니다.")
-    rq_id = str(rq.get("rq_id") or "")
     summary = str(reviewed.get("paper_summary") or "").strip()
     review_note = str(reviewed.get("review_note") or "").strip()
-    # Research-question interpretation is canonical when the review belongs to an RQ.
-    # Do not overwrite the legacy paper-level analysis: that slot is retained only
-    # for old workspaces/unscoped reading flows and researcher-owned paper notes.
     if rq_id:
         ledger.save_paper_question_analysis(
             paper_id,
@@ -96,7 +104,7 @@ def apply_inline_paper_review_response(
             reading_raw_output=str(reviewed.get("full_text_review") or response),
             generated=True,
         )
-    else:
+    elif summary:
         ledger.save_paper_analysis(
             paper_id,
             research_question=rq_text,
@@ -128,9 +136,7 @@ def apply_inline_paper_review_response(
                 title=_knowledge_candidate_title(claim, claim_text),
                 source_kind="external_paper",
                 claim=claim_text,
-                # The paper x RQ 1-page summary lives in paper_question_analyses.
-                # Do not duplicate it into every knowledge-card candidate.
-                context="",
+                context=summary[:1200],
                 implication="",
                 source_excerpt=evidence_detail[:3200],
                 labels=list(profile.get("labels") or []),
@@ -172,7 +178,6 @@ def apply_inline_paper_review_response(
     return {
         "paper_id": paper_id,
         "summary": summary,
-        "review_note": review_note,
         "knowledge_request_ids": request_ids,
         "knowledge_cards": cards,
         "reviewed": reviewed,

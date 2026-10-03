@@ -197,6 +197,223 @@ def _asset_audit(conn: sqlite3.Connection, data_dir: Path) -> dict[str, Any]:
     }
 
 
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _paper_recovery_audit(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Reconstruct research-asset integrity from papers upward without mutating state."""
+    tables = set(_table_names(conn))
+    if "paper_shelf" not in tables:
+        return {
+            "papers": [], "paper_counts": {}, "research_questions": [],
+            "rq_counts": {}, "recovery_plan": [], "ontology": {},
+        }
+
+    paper_columns = _columns(conn, "paper_shelf")
+    select_cols = [name for name in (
+        "paper_id", "title", "pdf_path", "source_url", "full_text_url",
+        "pdf_url", "origin_links_json", "reading_status", "shelf_status",
+    ) if name in paper_columns]
+    papers_raw = [dict(row) for row in conn.execute(
+        f"SELECT {', '.join(select_cols)} FROM paper_shelf ORDER BY title, paper_id"
+    ).fetchall()]
+
+    active_cards: set[str] = set()
+    if "knowledge_cards" in tables:
+        cols = _columns(conn, "knowledge_cards")
+        deleted_filter = "WHERE deleted_at IS NULL" if "deleted_at" in cols else ""
+        active_cards = {str(row[0]) for row in conn.execute(
+            f"SELECT card_id FROM knowledge_cards {deleted_filter}"
+        ).fetchall()}
+
+    cards_by_paper: dict[str, set[str]] = {}
+    if "paper_card_links" in tables:
+        for row in conn.execute("SELECT paper_id, card_id FROM paper_card_links").fetchall():
+            paper_id, card_id = str(row[0] or ""), str(row[1] or "")
+            if paper_id and card_id and (not active_cards or card_id in active_cards):
+                cards_by_paper.setdefault(paper_id, set()).add(card_id)
+
+    assigned_cards: set[str] = set()
+    if "ontology_card_assignments" in tables:
+        # Ignore assignments to deleted/missing Types where the schema supports that check.
+        if "ontology_types" in tables and "deleted_at" in _columns(conn, "ontology_types"):
+            rows = conn.execute(
+                "SELECT a.card_id FROM ontology_card_assignments a "
+                "JOIN ontology_types t ON t.type_id=a.type_id WHERE t.deleted_at IS NULL"
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT card_id FROM ontology_card_assignments").fetchall()
+        assigned_cards = {str(row[0] or "") for row in rows if str(row[0] or "")}
+
+    rq_reviews_by_paper: dict[str, set[str]] = {}
+    reviewed_papers: set[str] = set()
+    if "paper_question_analyses" in tables:
+        cols = _columns(conn, "paper_question_analyses")
+        rq_col = "research_question_id" if "research_question_id" in cols else None
+        if rq_col:
+            for row in conn.execute(
+                "SELECT paper_id, research_question_id, summary, reading_raw_output FROM paper_question_analyses"
+            ).fetchall():
+                paper_id = str(row[0] or "")
+                rq_id = str(row[1] or "")
+                has_content = bool(str(row[2] or "").strip() or str(row[3] or "").strip())
+                if paper_id and has_content:
+                    reviewed_papers.add(paper_id)
+                    if rq_id:
+                        rq_reviews_by_paper.setdefault(paper_id, set()).add(rq_id)
+    if "paper_analyses" in tables:
+        cols = _columns(conn, "paper_analyses")
+        wanted = [c for c in ("summary", "reading_raw_output", "generated_at") if c in cols]
+        if wanted:
+            expr = " OR ".join(f"TRIM(COALESCE({c}, '')) <> ''" for c in wanted)
+            reviewed_papers.update(str(row[0]) for row in conn.execute(
+                f"SELECT paper_id FROM paper_analyses WHERE {expr}"
+            ).fetchall())
+    # Some workspaces contain the later research-analysis table. Its exact schema evolved,
+    # so treat any row with a paper_id as an available analysis without assuming columns.
+    if "paper_research_analyses" in tables and "paper_id" in _columns(conn, "paper_research_analyses"):
+        reviewed_papers.update(str(row[0]) for row in conn.execute(
+            "SELECT DISTINCT paper_id FROM paper_research_analyses WHERE paper_id IS NOT NULL"
+        ).fetchall())
+
+    rq_to_papers: dict[str, set[str]] = {}
+    for paper_id, rq_ids in rq_reviews_by_paper.items():
+        for rq_id in rq_ids:
+            rq_to_papers.setdefault(rq_id, set()).add(paper_id)
+
+    # Origin lineage preserves the RQ↔paper relation even before a review was completed.
+    for paper in papers_raw:
+        paper_id = str(paper.get("paper_id") or "")
+        for origin in _json_list(paper.get("origin_links_json")):
+            if not isinstance(origin, dict):
+                continue
+            if str(origin.get("origin_type") or "") != "researcher_question":
+                continue
+            rq_id = str(origin.get("origin_id") or "").strip()
+            if rq_id:
+                rq_to_papers.setdefault(rq_id, set()).add(paper_id)
+
+    paper_rows: list[dict[str, Any]] = []
+    by_paper: dict[str, dict[str, Any]] = {}
+    recovery_counts: dict[str, int] = {}
+    for paper in papers_raw:
+        paper_id = str(paper.get("paper_id") or "")
+        pdf_path = str(paper.get("pdf_path") or "").strip()
+        local_pdf = False
+        if pdf_path and not pdf_path.lower().startswith(("http://", "https://")):
+            try:
+                local_pdf = Path(pdf_path).expanduser().is_file()
+            except OSError:
+                local_pdf = False
+        remote_source = any(str(paper.get(name) or "").strip().lower().startswith(("http://", "https://"))
+                            for name in ("full_text_url", "pdf_url"))
+        source_available = bool(local_pdf or remote_source)
+        reviewed = paper_id in reviewed_papers
+        card_ids = cards_by_paper.get(paper_id, set())
+        card_count = len(card_ids)
+        assigned_count = sum(1 for card_id in card_ids if card_id in assigned_cards)
+        ontology_complete = card_count > 0 and assigned_count == card_count
+        ontology_partial = assigned_count > 0 and not ontology_complete
+
+        if reviewed and card_count > 0 and ontology_complete:
+            stage = "complete"
+            recovery = "keep"
+        elif reviewed and card_count > 0:
+            stage = "knowledge_ready"
+            recovery = "ontology"
+        elif reviewed:
+            stage = "reviewed"
+            recovery = "knowledge_card"
+        elif source_available:
+            stage = "source_only"
+            recovery = "paper_review"
+        else:
+            stage = "broken"
+            recovery = "source"
+        recovery_counts[recovery] = recovery_counts.get(recovery, 0) + 1
+        row = {
+            "paper_id": paper_id,
+            "title": str(paper.get("title") or paper_id),
+            "source_available": source_available,
+            "local_pdf": local_pdf,
+            "reviewed": reviewed,
+            "knowledge_cards": card_count,
+            "ontology_assigned": assigned_count,
+            "ontology_complete": ontology_complete,
+            "ontology_partial": ontology_partial,
+            "stage": stage,
+            "recovery": recovery,
+        }
+        paper_rows.append(row)
+        by_paper[paper_id] = row
+
+    stage_order = {"complete": 0, "knowledge_ready": 1, "reviewed": 2, "source_only": 3, "broken": 4}
+    paper_rows.sort(key=lambda row: (stage_order.get(str(row.get("stage")), 9), str(row.get("title") or "").casefold()))
+    paper_counts: dict[str, int] = {key: 0 for key in stage_order}
+    for row in paper_rows:
+        paper_counts[str(row["stage"])] = paper_counts.get(str(row["stage"]), 0) + 1
+    paper_counts["total"] = len(paper_rows)
+
+    rq_rows: list[dict[str, Any]] = []
+    if "research_questions" in tables:
+        rq_cols = _columns(conn, "research_questions")
+        where = "WHERE deleted_at IS NULL" if "deleted_at" in rq_cols else ""
+        select = [c for c in ("rq_id", "question", "status") if c in rq_cols]
+        for rq in conn.execute(f"SELECT {', '.join(select)} FROM research_questions {where} ORDER BY updated_at DESC").fetchall():
+            item = dict(rq)
+            rq_id = str(item.get("rq_id") or "")
+            paper_ids = sorted(rq_to_papers.get(rq_id, set()))
+            rows = [by_paper[p] for p in paper_ids if p in by_paper]
+            total = len(rows)
+            complete = sum(1 for row in rows if row.get("stage") == "complete")
+            reviewed = sum(1 for row in rows if row.get("reviewed"))
+            knowledge = sum(1 for row in rows if int(row.get("knowledge_cards") or 0) > 0)
+            rq_rows.append({
+                "rq_id": rq_id,
+                "question": str(item.get("question") or rq_id),
+                "status": str(item.get("status") or ""),
+                "papers": total,
+                "complete_papers": complete,
+                "complete_pct": round(100.0 * complete / total) if total else 0,
+                "reviewed_papers": reviewed,
+                "reviewed_pct": round(100.0 * reviewed / total) if total else 0,
+                "knowledge_papers": knowledge,
+                "knowledge_pct": round(100.0 * knowledge / total) if total else 0,
+                "paper_ids": paper_ids,
+            })
+
+    total_cards = len(active_cards)
+    assigned_active = len(active_cards & assigned_cards) if active_cards else 0
+    ontology = {
+        "active_cards": total_cards,
+        "assigned_cards": assigned_active,
+        "unassigned_cards": max(0, total_cards - assigned_active),
+        "assignment_pct": round(100.0 * assigned_active / total_cards) if total_cards else 0,
+    }
+    recovery_plan = [
+        {"action": key, "papers": recovery_counts.get(key, 0)}
+        for key in ("keep", "ontology", "knowledge_card", "paper_review", "source")
+        if recovery_counts.get(key, 0)
+    ]
+    return {
+        "papers": paper_rows,
+        "paper_counts": paper_counts,
+        "research_questions": rq_rows,
+        "rq_counts": {"total": len(rq_rows), "with_papers": sum(1 for row in rq_rows if int(row.get("papers") or 0) > 0)},
+        "recovery_plan": recovery_plan,
+        "ontology": ontology,
+    }
+
 def audit_workspace(db_path: str | Path, *, data_dir: str | Path | None = None) -> dict[str, Any]:
     """Inspect one workspace without modifying the DB or any assets."""
     db = Path(db_path).expanduser()
@@ -288,6 +505,7 @@ def audit_workspace(db_path: str | Path, *, data_dir: str | Path | None = None) 
                     pass
         report["status_counts"] = status_tables
         report["assets"] = _asset_audit(conn, root)
+        report["research_recovery"] = _paper_recovery_audit(conn)
 
         issues: list[dict[str, Any]] = []
         if report["integrity"] != "ok":

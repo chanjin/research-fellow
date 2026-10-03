@@ -688,6 +688,110 @@ def _render_workspace_audit(st: Any, snapshot: Mapping[str, Any], *, english: bo
     cols[3].metric("Orphans" if english else "Orphan", int(report.get("orphan_total") or 0))
     cols[4].metric("Integrity", str(report.get("integrity") or "unknown"))
 
+    recovery = dict(report.get("research_recovery") or {})
+    paper_counts = dict(recovery.get("paper_counts") or {})
+    paper_rows = list(recovery.get("papers") or [])
+    rq_rows = list(recovery.get("research_questions") or [])
+    if paper_rows or rq_rows:
+        st.markdown("#### " + ("Research asset integrity" if english else "연구 자산 Integrity"))
+        st.caption(
+            "Paper is the primary recovery unit. Research-question progress is reconstructed from its linked papers; no recovery action is executed here."
+            if english else
+            "Paper를 1차 복원 단위로 보고, 연결된 논문 상태에서 연구질문 작업 상태를 재구성합니다. 이 화면에서는 실제 복원을 실행하지 않습니다."
+        )
+        total_papers = int(paper_counts.get("total") or 0)
+        complete = int(paper_counts.get("complete") or 0)
+        recoverable = sum(int(paper_counts.get(key) or 0) for key in ("knowledge_ready", "reviewed", "source_only"))
+        broken = int(paper_counts.get("broken") or 0)
+        icols = st.columns(4)
+        icols[0].metric("Papers", total_papers)
+        icols[1].metric("Complete" if english else "완전 연결", complete, f"{round(100 * complete / total_papers) if total_papers else 0}%")
+        icols[2].metric("Recoverable" if english else "중간부터 재개", recoverable)
+        icols[3].metric("Broken" if english else "원천 복구 필요", broken)
+
+        stage_label = {
+            "complete": "Complete" if english else "Complete · 그대로 사용",
+            "knowledge_ready": "Knowledge-ready" if english else "KC 정상 · Ontology 보완",
+            "reviewed": "Reviewed" if english else "Review 정상 · KC부터",
+            "source_only": "Source-only" if english else "원문 있음 · Review부터",
+            "broken": "Broken" if english else "원문/연결 복구 필요",
+        }
+        recovery_label = {
+            "keep": "Keep" if english else "그대로 사용",
+            "ontology": "Resume at Ontology" if english else "Ontology 연결부터",
+            "knowledge_card": "Resume at Knowledge Card" if english else "Knowledge Card 생성부터",
+            "paper_review": "Resume at Paper Review" if english else "Paper Review부터",
+            "source": "Restore source" if english else "원문 확보부터",
+        }
+        with st.expander("Paper integrity" if english else "Paper 단위 현재 상태", expanded=True):
+            filter_options = ["all", "complete", "knowledge_ready", "reviewed", "source_only", "broken"]
+            selected = st.selectbox(
+                "Status" if english else "상태 필터", filter_options, index=0,
+                format_func=lambda value: ("All" if value == "all" and english else "전체" if value == "all" else stage_label.get(value, value)),
+                key=f"paper-integrity-filter::{db_path}",
+            )
+            shown = [row for row in paper_rows if selected == "all" or str(row.get("stage")) == selected]
+            display_rows = []
+            for row in shown:
+                kc = int(row.get("knowledge_cards") or 0)
+                assigned = int(row.get("ontology_assigned") or 0)
+                display_rows.append({
+                    "Paper" if english else "논문": _short(row.get("title", ""), 110),
+                    "Source" if english else "원문": "✓" if row.get("source_available") else "—",
+                    "Review": "✓" if row.get("reviewed") else "—",
+                    "KC": kc,
+                    "Type": f"{assigned}/{kc}" if kc else "—",
+                    "Status" if english else "상태": stage_label.get(str(row.get("stage") or ""), str(row.get("stage") or "")),
+                    "Recovery" if english else "복원 시작점": recovery_label.get(str(row.get("recovery") or ""), str(row.get("recovery") or "")),
+                })
+            if display_rows:
+                st.dataframe(display_rows, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No papers in this status." if english else "해당 상태의 논문이 없습니다.")
+
+        with st.expander("Research question integrity" if english else "연구질문 단위 복원 상태", expanded=True):
+            if rq_rows:
+                rq_display = []
+                for row in rq_rows:
+                    paper_total = int(row.get("papers") or 0)
+                    rq_display.append({
+                        "Research question" if english else "연구질문": _short(row.get("question", ""), 100),
+                        "Papers" if english else "관련 논문": paper_total,
+                        "Complete" if english else "정상": f"{int(row.get('complete_papers') or 0)}/{paper_total} ({int(row.get('complete_pct') or 0)}%)" if paper_total else "0",
+                        "Reviewed" if english else "Review 정상률": f"{int(row.get('reviewed_pct') or 0)}%" if paper_total else "—",
+                        "Knowledge" if english else "KC 보유율": f"{int(row.get('knowledge_pct') or 0)}%" if paper_total else "—",
+                        "Status" if english else "RQ 상태": str(row.get("status") or ""),
+                    })
+                st.dataframe(rq_display, use_container_width=True, hide_index=True)
+                st.caption(
+                    "Complete % means the share of linked papers whose Review → Knowledge Card → Type assignment chain is intact."
+                    if english else
+                    "정상 %는 해당 연구질문에 연결된 논문 중 Review → Knowledge Card → Type 할당이 모두 이어진 논문의 비율입니다."
+                )
+            else:
+                st.caption("No research questions found." if english else "복원 상태를 계산할 연구질문이 없습니다.")
+
+        with st.expander("Recovery plan (preview only)" if english else "복원 방법 · Preview", expanded=False):
+            plan = list(recovery.get("recovery_plan") or [])
+            if plan:
+                plan_rows = [{
+                    "Recovery" if english else "복원 방법": recovery_label.get(str(item.get("action") or ""), str(item.get("action") or "")),
+                    "Papers" if english else "논문 수": int(item.get("papers") or 0),
+                } for item in plan]
+                st.dataframe(plan_rows, use_container_width=True, hide_index=True)
+            ontology_status = dict(recovery.get("ontology") or {})
+            if ontology_status:
+                st.caption(
+                    (f"Ontology coverage: {ontology_status.get('assigned_cards', 0)}/{ontology_status.get('active_cards', 0)} active Knowledge Cards assigned ({ontology_status.get('assignment_pct', 0)}%)."
+                     if english else
+                     f"Ontology 연결: 승인 Knowledge Card {ontology_status.get('active_cards', 0)}개 중 {ontology_status.get('assigned_cards', 0)}개 Type 할당 ({ontology_status.get('assignment_pct', 0)}%).")
+                )
+            st.info(
+                "Recovery execution is intentionally disabled. The current step only identifies which existing assets can be reused and where each paper should resume."
+                if english else
+                "복원 실행은 아직 비활성화되어 있습니다. 현재 단계에서는 기존 자산을 어디까지 재사용할 수 있는지와 각 논문의 재시작 지점만 계산합니다."
+            )
+
     assets = dict(report.get("assets") or {})
     st.markdown("#### " + ("PDF / file footprint" if english else "PDF · 파일 사용량"))
     acols = st.columns(5)

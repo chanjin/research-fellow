@@ -21,40 +21,7 @@ from research_fellow.infrastructure.workflow_checkpoint import JsonFileCheckpoin
 from research_fellow.memory import KnowledgeMemory, RelationMemory
 from research_fellow.storage import Ledger
 from research_fellow.application.paper_review_tasks import apply_paper_review_response
-from research_fellow.application.ontology_workflow import (
-    ONTOLOGY_TYPE_TASK,
-    KNOWLEDGE_RELATION_TASK,
-    ONTOLOGY_RELATION_TASK,
-    ONTOLOGY_FACET_TASK,
-    apply_ontology_task_response,
-)
 from research_fellow.application.literature_candidate_review import candidate_library_context
-from research_fellow.application.literature_discovery_formats import _json_payload
-
-
-def _review_note_from_analysis(analysis: Mapping[str, Any] | None) -> str:
-    """Recover review_note from both current composed review text and legacy raw JSON."""
-    if not analysis:
-        return ""
-    raw = str(analysis.get("reading_raw_output") or "").strip()
-    if not raw:
-        return ""
-    marker = "**Review note:**"
-    if marker in raw:
-        return raw.split(marker, 1)[1].strip()
-    try:
-        payload = _json_payload(raw)
-    except Exception:
-        return ""
-    rows = payload.get("papers") if isinstance(payload, Mapping) else None
-    if not isinstance(rows, list):
-        return ""
-    for row in rows:
-        if isinstance(row, Mapping):
-            note = str(row.get("review_note") or "").strip()
-            if note:
-                return note
-    return ""
 
 
 @dataclass(frozen=True)
@@ -79,21 +46,7 @@ def interaction_inputs_for_attention_item(item: Mapping[str, Any], ledger: Ledge
     payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
 
     if source_type == "decision_request" and interaction_id == "resolve_pending_decision_requests":
-        # Attention stores the whole durable decision_request in item.payload.
-        # Knowledge-card fields such as paper_id/rq_id live one level deeper in
-        # request["payload"], so enrich that nested payload rather than the wrapper.
-        decision_request = dict(payload)
-        decision_payload = dict(decision_request.get("payload") or {})
-        if str(decision_request.get("subject_type") or item.get("subject_type") or "") == "knowledge_card" or isinstance(decision_payload.get("card"), Mapping):
-            if not str(decision_payload.get("review_note") or "").strip():
-                paper_id = str(decision_payload.get("paper_id") or "").strip()
-                rq_id = str(decision_payload.get("rq_id") or "").strip()
-                analysis = ledger.paper_question_analysis(paper_id, rq_id) if paper_id and rq_id else None
-                review_note = _review_note_from_analysis(analysis)
-                if review_note:
-                    decision_payload["review_note"] = review_note
-            decision_request["payload"] = decision_payload
-        return {"decision_requests": [decision_request]}
+        return {"decision_requests": [dict(payload)]}
 
     if source_type == "ontology_change_review":
         review = dict(payload)
@@ -109,82 +62,28 @@ def interaction_inputs_for_attention_item(item: Mapping[str, Any], ledger: Ledge
     if source_type == "research_task" and interaction_id == "provide_external_llm_result":
         task = dict(payload)
         task_payload = dict(task.get("payload") or {})
-        subject_type = str(task.get("subject_type") or "")
-        if subject_type == "paper_first_review":
-            return {"external_llm_task": {
-                "task_id": str(task.get("phenomenon_id") or ""),
-                "stage": "single_paper_first_review",
-                "item_key": str(task_payload.get("paper_id") or task.get("subject_id") or ""),
-                "prompt": str(task_payload.get("prompt") or ""),
-                "prompt_source": "durable_paper_review_task",
-                "expected_output": str(task_payload.get("expected_output") or "JSON papers[] with paper_summary and claims"),
-            }}
-        if subject_type in {
-            ONTOLOGY_TYPE_TASK,
-            KNOWLEDGE_RELATION_TASK,
-            ONTOLOGY_RELATION_TASK,
-            ONTOLOGY_FACET_TASK,
-        }:
-            return {"external_llm_task": {
-                "task_id": str(task.get("phenomenon_id") or ""),
-                "stage": subject_type,
-                "item_key": str(task.get("subject_id") or ""),
-                "prompt": str(task_payload.get("prompt") or ""),
-                "prompt_source": "durable_ontology_task",
-                "expected_output": str(task_payload.get("expected_output") or "Ontology proposal JSON"),
-            }}
-        return None
+        if str(task.get("subject_type") or "") != "paper_first_review":
+            return None
+        return {"external_llm_task": {
+            "task_id": str(task.get("phenomenon_id") or ""),
+            "stage": "single_paper_first_review",
+            "item_key": str(task_payload.get("paper_id") or task.get("subject_id") or ""),
+            "prompt": str(task_payload.get("prompt") or ""),
+            "prompt_source": "durable_paper_review_task",
+            "expected_output": str(task_payload.get("expected_output") or "JSON papers[] with executive_summary, source-grounded claims, and review_note"),
+        }}
 
     if source_type == "workflow_interaction":
         request = payload.get("interaction") if isinstance(payload, Mapping) else None
         if isinstance(request, Mapping) and isinstance(request.get("inputs"), Mapping):
             values = dict(request["inputs"])
             if interaction_id == "review_literature_candidates":
-                intent_id = str(item.get("round_id") or "").strip()
-                linked_rqs = ledger.research_questions_for_intent(intent_id) if intent_id else []
-                rq_id = str((linked_rqs[0] if linked_rqs else {}).get("rq_id") or "")
                 candidates = []
                 for candidate in list(values.get("discovered_candidates") or []):
                     if not isinstance(candidate, Mapping):
                         continue
                     row = dict(candidate)
-                    library_context = candidate_library_context(ledger, row)
-                    row.update(library_context)
-
-                    # Review progress must survive Streamlit/session refreshes.
-                    # The canonical durable marker is the paper×RQ analysis that is
-                    # written as soon as the inline paper review is accepted.
-                    paper = library_context.get("library_paper") if isinstance(library_context, Mapping) else None
-                    paper_id = str((paper or {}).get("paper_id") or "") if isinstance(paper, Mapping) else ""
-                    analysis = None
-                    if paper_id and rq_id:
-                        analysis = ledger.paper_question_analysis(paper_id, rq_id)
-                    elif paper_id:
-                        analysis = ledger.paper_analysis(paper_id)
-                    if analysis:
-                        knowledge_requests = []
-                        knowledge_cards = []
-                        for request in ledger.phenomena(type_="decision_request"):
-                            if str(request.get("subject_type") or "") != "knowledge_card":
-                                continue
-                            request_payload = dict(request.get("payload") or {})
-                            if str(request_payload.get("intent_id") or "") != intent_id:
-                                continue
-                            if str(request_payload.get("paper_id") or "") != paper_id:
-                                continue
-                            knowledge_requests.append(str(request.get("phenomenon_id") or ""))
-                            card = request_payload.get("card")
-                            if isinstance(card, Mapping):
-                                knowledge_cards.append(dict(card))
-                        review_note = _review_note_from_analysis(analysis)
-                        row.update({
-                            "review_completed": True,
-                            "paper_id": paper_id,
-                            "paper_summary": str(analysis.get("summary") or ""),
-                            "review_note": review_note,
-                            "knowledge_request_ids": [x for x in knowledge_requests if x],
-                            "knowledge_candidates": knowledge_cards,
-                        })
+                    row.update(candidate_library_context(ledger, row))
                     candidates.append(row)
                 values["discovered_candidates"] = candidates
             return values
@@ -361,25 +260,11 @@ def apply_attention_response(
         response = str(values.get("external_llm_response") or "").strip()
         if not response:
             raise ValueError("외부 LLM 응답이 비어 있습니다.")
-        subject_type = str(task.get("subject_type") or "")
-        if subject_type == "paper_first_review":
-            try:
-                outcome = apply_paper_review_response(ledger, task, response)
-            except Exception as error:
-                raise ValueError(f"논문 원문 리뷰 응답을 반영하지 못했습니다: {error}") from error
-            return AttentionResolutionResult(str(item.get("attention_id") or ""), interaction_id, "completed", dict(outcome))
-        if subject_type in {
-            ONTOLOGY_TYPE_TASK,
-            KNOWLEDGE_RELATION_TASK,
-            ONTOLOGY_RELATION_TASK,
-            ONTOLOGY_FACET_TASK,
-        }:
-            try:
-                outcome = apply_ontology_task_response(ledger, memory, task, response)
-            except Exception as error:
-                raise ValueError(f"Ontology 외부 LLM 응답을 반영하지 못했습니다: {error}") from error
-            return AttentionResolutionResult(str(item.get("attention_id") or ""), interaction_id, "completed", dict(outcome))
-        raise ValueError(f"지원하지 않는 외부 LLM 연구 작업입니다: {subject_type}")
+        try:
+            outcome = apply_paper_review_response(ledger, task, response)
+        except Exception as error:
+            raise ValueError(f"논문 원문 리뷰 응답을 반영하지 못했습니다: {error}") from error
+        return AttentionResolutionResult(str(item.get("attention_id") or ""), interaction_id, "completed", dict(outcome))
 
     if source_type == "workflow_interaction":
         if checkpoint_dir is None:
@@ -389,7 +274,6 @@ def apply_attention_response(
         )
 
     raise ValueError(f"Attention item is not actionable through an Interaction Contract: {source_type}/{interaction_id}")
-
 
 def dismiss_attention_item(
     item: Mapping[str, Any],
@@ -408,6 +292,22 @@ def dismiss_attention_item(
     source_id = str(item.get("source_id") or "").strip()
     round_id = str(item.get("round_id") or "").strip()
     attention_id = str(item.get("attention_id") or "")
+    interaction_id = str(item.get("interaction_id") or "").strip()
+    payload = dict(item.get("payload") or {}) if isinstance(item.get("payload"), Mapping) else {}
+
+    # A literature-discovery external-LLM Input is only the visible boundary of
+    # the whole literature round.  Closing just the recovered run/failure leaves
+    # the ready curation intent/search profile behind, so the same Input can be
+    # projected again on the next advance.  Treat deletion as cancellation of
+    # the round, matching workflow_interaction behavior.
+    stage = str(payload.get("stage") or payload.get("current_stage") or "").strip()
+    if (
+        round_id
+        and interaction_id == "provide_external_llm_result"
+        and stage == "search_strategy"
+        and source_type in {"auto_research_failure", "auto_research_run_attention"}
+    ):
+        return dismiss_attention_round(item, ledger=ledger, checkpoint_dir=checkpoint_dir)
 
     if source_type == "research_task":
         if not source_id:

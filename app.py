@@ -267,6 +267,7 @@ from research_fellow.application.research_intake import (
 )
 from research_fellow.application.research_question_progression import start_research_question_progression
 from research_fellow.application.research_actions import request_additional_literature, request_initial_answer, request_answer_update
+from research_fellow.application.research_answer import latest_research_answer
 from research_fellow.application.persistent_research_runtime import (
     PersistentResearchBindings, advance_persistent_research,
 )
@@ -1176,9 +1177,27 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         return interaction_inputs_for_attention_item(item, ledger)
 
     def _attention_candidate_action(item: Mapping[str, Any], candidate: Mapping[str, Any], decision: str):
-        if str(item.get("interaction_id") or "") != "review_literature_candidates":
-            return {}
+        interaction_id = str(item.get("interaction_id") or "")
         intent_id = str(item.get("round_id") or "")
+
+        # Follow-up paper_first_review tasks are rendered through the generic
+        # external-LLM interaction. Allow the same local-PDF attachment action
+        # used by the inline literature-review path.
+        if interaction_id == "provide_external_llm_result" and decision == "attach_local_pdf":
+            source_task = dict(item.get("payload") or {})
+            task_payload = dict(source_task.get("payload") or {})
+            if str(source_task.get("subject_type") or "") != "paper_first_review":
+                return {}
+            paper_id = str(task_payload.get("paper_id") or candidate.get("paper_id") or source_task.get("subject_id") or "")
+            paper_candidate = dict(task_payload.get("paper") or {})
+            return attach_candidate_local_pdf(
+                ledger, intent_id=str(task_payload.get("intent_id") or intent_id), paper_id=paper_id,
+                candidate=paper_candidate, filename=str(candidate.get("filename") or "paper.pdf"),
+                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_shelf",
+            )
+
+        if interaction_id != "review_literature_candidates":
+            return {}
         if decision == "preserve":
             return preserve_literature_candidate(
                 ledger, candidate, intent_id=intent_id, create_review_task=False,
@@ -1223,6 +1242,24 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         if continuation.get("advanced_count"):
             st.session_state["attention-continuation-flash"] = continuation.get("summary", "")
             result.outcome["continuation"] = continuation
+
+        if is_external_llm and external_stage in {"research_answer_first_draft", "research_answer_enrichment"}:
+            rq_id = str(payload.get("intent_id") or item.get("round_id") or "").strip()
+            latest_answer = latest_research_answer(ledger, rq_id) if rq_id else None
+            answer_payload = dict((latest_answer or {}).get("payload") or {})
+            unresolved_answer = [
+                failure for failure in ledger.auto_research_failures(status="needs_attention", limit=200)
+                if str(failure.get("intent_id") or "") == rq_id
+                and str(failure.get("stage") or "") in {"research_answer_first_draft", "research_answer_enrichment"}
+            ]
+            result.outcome["research_answer_progress"] = {
+                "rq_id": rq_id,
+                "submitted_stage": external_stage,
+                "next_stage": str((unresolved_answer[0] if unresolved_answer else {}).get("stage") or ""),
+                "completed": bool(latest_answer),
+                "answer_version": int(answer_payload.get("answer_version") or (1 if latest_answer else 0)),
+                "answer_id": str((latest_answer or {}).get("phenomenon_id") or ""),
+            }
 
         # A valid M1 discovery response must advance to a durable candidate-review
         # checkpoint.  Do not silently report success if the response was accepted
@@ -9267,6 +9304,100 @@ def render_workspace_sync() -> None:
             total_conflicts = sum(item.conflicts for item in statuses)
             if total_conflicts:
                 st.warning(f"양쪽에서 같은 레코드를 변경한 충돌 {total_conflicts}건은 자동으로 덮어쓰지 않고 보류합니다.")
+                review_enabled = st.checkbox(
+                    "충돌 검토 화면 열기",
+                    value=bool(st.session_state.get("workspace-sync-conflict-review-open", False)),
+                    key="workspace-sync-conflict-review-open",
+                    help="Local과 Server의 실제 필드 차이를 비교하고 어느 쪽을 유지할지 선택합니다.",
+                )
+                if review_enabled:
+                    conflict_statuses = [item for item in statuses if item.conflicts]
+                    selected_conflict_workspace = st.selectbox(
+                        "충돌 Workspace",
+                        [item.key for item in conflict_statuses],
+                        format_func=lambda key: next(
+                            f"{item.label} · {item.conflicts}건" for item in conflict_statuses if item.key == key
+                        ),
+                        key="workspace-sync-conflict-workspace",
+                    )
+                    selected_profile = WORKSPACE_PROFILES[selected_conflict_workspace]
+                    local_db, server_db, _, _ = sync._paths(selected_conflict_workspace, selected_profile)
+                    conflict_sync = WorkspaceSync(local_db, server_db)
+                    details = conflict_sync.conflict_details()
+                    counts_by_table: dict[str, int] = {}
+                    for detail in details:
+                        counts_by_table[detail.table] = counts_by_table.get(detail.table, 0) + 1
+                    table_names = sorted(counts_by_table)
+                    selected_table = st.selectbox(
+                        "테이블",
+                        table_names,
+                        format_func=lambda table: f"{table} · {counts_by_table[table]}건",
+                        key="workspace-sync-conflict-table",
+                    )
+                    table_details = [detail for detail in details if detail.table == selected_table]
+                    selected_key = st.selectbox(
+                        "충돌 레코드",
+                        [detail.key for detail in table_details],
+                        format_func=lambda key: key if len(key) <= 72 else key[:69] + "...",
+                        key="workspace-sync-conflict-record",
+                    )
+                    detail = next(item for item in table_details if item.key == selected_key)
+                    st.caption(
+                        f"남은 충돌 {len(details)}건 · 이 테이블 {len(table_details)}건 · "
+                        "기존 baseline은 hash만 저장되어 과거 필드값은 표시할 수 없습니다."
+                    )
+                    if detail.differing_fields:
+                        diff_rows = []
+                        local = detail.local_row or {}
+                        server = detail.server_row or {}
+                        for field in detail.differing_fields:
+                            local_value = "<삭제됨>" if detail.local_row is None else local.get(field)
+                            server_value = "<삭제됨>" if detail.server_row is None else server.get(field)
+                            diff_rows.append({
+                                "Field": field,
+                                "Local": "" if local_value is None else str(local_value),
+                                "Server": "" if server_value is None else str(server_value),
+                            })
+                        st.dataframe(diff_rows, use_container_width=True, hide_index=True, height=min(360, 38 + 35 * len(diff_rows)))
+                    else:
+                        st.info("비교 가능한 필드 차이는 없지만 row 상태 차이로 충돌로 판정되었습니다.")
+                    st.caption(
+                        f"Baseline hash · {detail.baseline_hash or '없음'}\n\n"
+                        f"Local hash · {detail.local_hash or '삭제'}\n\n"
+                        f"Server hash · {detail.server_hash or '삭제'}"
+                    )
+                    resolution = st.radio(
+                        "이 레코드 해소",
+                        ["보류", "Local 유지", "Server 유지"],
+                        horizontal=True,
+                        key=f"workspace-sync-conflict-choice-{selected_conflict_workspace}-{selected_table}-{selected_key}",
+                    )
+                    if resolution != "보류":
+                        chosen_side = "local" if resolution == "Local 유지" else "server"
+                        warning_text = (
+                            "Local 내용을 Server에 덮어씁니다."
+                            if chosen_side == "local"
+                            else "Server 내용을 Local에 덮어씁니다."
+                        )
+                        st.warning(warning_text)
+                        if st.button(
+                            f"{resolution} 적용",
+                            type="primary",
+                            use_container_width=True,
+                            key="workspace-sync-resolve-selected-conflict",
+                        ):
+                            try:
+                                conflict_sync.resolve_conflict(selected_table, selected_key, chosen_side)
+                                st.session_state["workspace-sync-conflict-resolution-message"] = (
+                                    f"{selected_profile.label} · {selected_table} 충돌 1건을 {resolution}로 해소했습니다. "
+                                    "양쪽 DB와 동기화 baseline을 같은 상태로 갱신했습니다."
+                                )
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"충돌 해소 실패: {exc}")
+                    resolved_message = st.session_state.pop("workspace-sync-conflict-resolution-message", None)
+                    if resolved_message:
+                        st.success(resolved_message)
             if st.button("모든 워크스페이스 동기화", type="primary", use_container_width=True, key="workspace-sync-apply-all"):
                 results = sync.apply()
                 result_rows = []

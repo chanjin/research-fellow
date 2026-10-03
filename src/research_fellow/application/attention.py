@@ -37,6 +37,7 @@ class AttentionItem:
     round_id: str = ""
     round_label: str = ""
     phase_label: str = ""
+    rq_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +57,7 @@ class AttentionItem:
             "round_id": self.round_id,
             "round_label": self.round_label,
             "phase_label": self.phase_label,
+            "rq_id": self.rq_id,
         }
 
 
@@ -68,7 +70,7 @@ def _attention_item(
     *, category: str, interaction_id: str, source_type: str, source_id: str,
     title: str, summary: str = "", priority: str = "medium", created_at: str = "",
     payload: Mapping[str, Any] | None = None,
-    subject_title: str = "", round_id: str = "", round_label: str = "", phase_label: str = "",
+    subject_title: str = "", round_id: str = "", round_label: str = "", phase_label: str = "", rq_id: str = "",
 ) -> AttentionItem:
     if category not in ATTENTION_CATEGORIES:
         raise ValueError(f"Unsupported attention category: {category}")
@@ -90,6 +92,7 @@ def _attention_item(
         round_id=round_id.strip(),
         round_label=round_label.strip(),
         phase_label=phase_label.strip(),
+        rq_id=rq_id.strip(),
     )
 
 
@@ -99,6 +102,17 @@ def _rq_for_intent(ledger: Ledger, intent_id: str) -> tuple[str, str, int]:
         return ("", "", 0)
     linked = ledger.research_questions_for_intent(intent_id)
     if not linked:
+        # Research-answer execution uses the Research Question id itself as the
+        # durable run intent_id.  Treat that as an RQ-scoped Attention item so
+        # the queue can still show the owning question instead of a generic task.
+        direct_rq = ledger.research_question(intent_id)
+        if direct_rq:
+            rq = dict(direct_rq)
+            return (
+                str(rq.get("rq_id") or intent_id),
+                str(rq.get("question") or rq.get("title") or "").strip(),
+                0,
+            )
         return ("", "", 0)
     rq = dict(linked[0])
     rq_id = str(rq.get("rq_id") or "")
@@ -113,9 +127,15 @@ def _rq_for_intent(ledger: Ledger, intent_id: str) -> tuple[str, str, int]:
     return (rq_id, title, round_no)
 
 
-def _phase_label(interaction_id: str) -> str:
+def _phase_label(interaction_id: str, *, stage: str = "") -> str:
+    if interaction_id == "provide_external_llm_result":
+        return {
+            "research_answer_first_draft": "RQ 답변 작성 · 1/2 직접 근거 초안",
+            "research_answer_enrichment": "RQ 답변 작성 · 2/2 최종 답변 보강",
+            "single_paper_first_review": "논문 원문 리뷰",
+            "search_strategy": "문헌 발견 · 외부 LLM 검색",
+        }.get(stage, "외부 LLM 실행")
     return {
-        "provide_external_llm_result": "외부 LLM 실행",
         "review_literature_candidates": "발견 문헌 검토",
         "resolve_pending_decision_requests": "지식카드 검토",
         "request_followup_literature_direction": "추가 문헌 조사 방향",
@@ -147,14 +167,17 @@ def attention_from_waiting_workflow(waiting_result: Mapping[str, Any], ledger: L
     resume_metadata = dict(waiting_result.get("resume_metadata") or {}) if isinstance(waiting_result.get("resume_metadata"), Mapping) else {}
     intent_id = str(resume_metadata.get("intent_id") or "").strip()
     rq_title = str(resume_metadata.get("research_question") or "").strip()
+    rq_id = str(resume_metadata.get("rq_id") or "").strip()
     round_no = 0
     if ledger is not None and intent_id:
-        _, linked_title, round_no = _rq_for_intent(ledger, intent_id)
+        linked_rq_id, linked_title, round_no = _rq_for_intent(ledger, intent_id)
+        rq_id = linked_rq_id or rq_id
         rq_title = linked_title or rq_title
     subject_title = rq_title
     phase = _phase_label(interaction_id)
     interaction_title = contract.raw.get("purpose", interaction_id).split("\n", 1)[0].strip()
     title = subject_title or interaction_title
+    rq_scoped_execution = bool(ledger is not None and rq_id and rq_id == intent_id and not ledger.research_questions_for_intent(intent_id))
     return _attention_item(
         category=_waiting_category(interaction_id),
         interaction_id=interaction_id,
@@ -170,11 +193,36 @@ def attention_from_waiting_workflow(waiting_result: Mapping[str, Any], ledger: L
         },
         subject_title=subject_title,
         round_id=intent_id,
-        round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
+        round_label=("" if rq_scoped_execution else (f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else ""))),
         phase_label=phase,
+        rq_id=rq_id,
     )
 
 
+
+
+def _completed_literature_intent_ids(ledger: Ledger) -> set[str]:
+    """Return literature Intent ids that already reached durable completion.
+
+    Historical runs/failures can outlive their workflow checkpoint.  Once the
+    curation Intent or its auto-literature report is completed, those execution
+    leftovers must not be projected back into Attention as a new search Input.
+    """
+    completed: set[str] = set()
+    for row in ledger.phenomena(type_="curation_intent", status="completed"):
+        payload = dict(row.get("payload") or {})
+        intent = dict(payload.get("intent") or {})
+        intent_id = str(intent.get("intent_id") or row.get("subject_id") or "").strip()
+        if intent_id:
+            completed.add(intent_id)
+    for row in ledger.phenomena(type_="advice_report", status="completed"):
+        if str(row.get("subject_type") or "") != "auto_literature_report":
+            continue
+        payload = dict(row.get("payload") or {})
+        intent_id = str(payload.get("intent_id") or row.get("subject_id") or "").strip()
+        if intent_id:
+            completed.add(intent_id)
+    return completed
 
 
 def _synthetic_external_llm_attention(ledger: Ledger, existing: list[AttentionItem]) -> list[AttentionItem]:
@@ -187,6 +235,7 @@ def _synthetic_external_llm_attention(ledger: Ledger, existing: list[AttentionIt
     """
     represented_runs: set[str] = set()
     waiting_intents: set[str] = set()
+    completed_intents = _completed_literature_intent_ids(ledger)
     for item in existing:
         payload = dict(item.payload or {})
         run_id = str(payload.get("run_id") or "").strip()
@@ -202,6 +251,10 @@ def _synthetic_external_llm_attention(ledger: Ledger, existing: list[AttentionIt
         error_type = str(run.get("last_error_type") or "").strip()
         if not run_id or run_id in represented_runs or intent_id in waiting_intents:
             continue
+        if intent_id and intent_id in completed_intents:
+            # The paper-review/literature round already finished.  Do not revive
+            # a stale search_strategy run as a brand-new Inputs card.
+            continue
         if error_type != "external_llm_required":
             continue
         # search_strategy is reconstructible from the durable SearchProfile. Other
@@ -209,7 +262,7 @@ def _synthetic_external_llm_attention(ledger: Ledger, existing: list[AttentionIt
         # intentionally not guessed here.
         if stage != "search_strategy":
             continue
-        _, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+        rq_id, rq_title, round_no = _rq_for_intent(ledger, intent_id)
         recovered.append(_attention_item(
             category="inputs",
             interaction_id="provide_external_llm_result",
@@ -223,7 +276,8 @@ def _synthetic_external_llm_attention(ledger: Ledger, existing: list[AttentionIt
             subject_title=rq_title,
             round_id=intent_id,
             round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
-            phase_label="외부 LLM 실행",
+            phase_label=_phase_label("provide_external_llm_result", stage=stage),
+            rq_id=rq_id,
         ))
     return recovered
 
@@ -256,16 +310,14 @@ def build_attention_queue(
             paper = ledger.shelf_paper(paper_id) if paper_id else None
             payload["review_summary"] = str((analysis or {}).get("summary") or "")
             payload["review_paper_title"] = str((paper or {}).get("title") or "")
-            # Keep source links in the Attention read model rather than copying
-            # them into the durable Knowledge Card / decision request.
-            payload["paper_abstract_url"] = str((paper or {}).get("abstract_url") or (paper or {}).get("source_url") or "")
-            payload["paper_full_text_url"] = str((paper or {}).get("full_text_url") or "")
-            payload["paper_pdf_url"] = str((paper or {}).get("pdf_url") or "")
-            payload["paper_pdf_path"] = str((paper or {}).get("pdf_path") or "")
             request_view["payload"] = payload
         source_id = str(request_view.get("phenomenon_id") or request_view.get("request_id") or "")
         intent_id = str(payload.get("intent_id") or "").strip()
-        _, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+        linked_rq_id, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+        request_rq_id = str(payload.get("rq_id") or "").strip() or linked_rq_id
+        if request_rq_id and not rq_title:
+            rq = ledger.research_question(request_rq_id) or {}
+            rq_title = str(rq.get("question") or rq.get("title") or "").strip()
         items.append(_attention_item(
             category="decisions",
             interaction_id="resolve_pending_decision_requests",
@@ -280,6 +332,7 @@ def build_attention_queue(
             round_id=intent_id,
             round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
             phase_label=("지식카드 검토" if intent_id else ""),
+            rq_id=request_rq_id,
         ))
 
     for review in pending_ontology_change_reviews(ledger):
@@ -299,40 +352,24 @@ def build_attention_queue(
             payload=review,
         ))
 
-    ontology_task_labels = {
-        "ontology_type_suggestion": "Ontology Type 제안",
-        "knowledge_relation_suggestion": "지식카드 관계 제안",
-        "ontology_relation_suggestion": "Ontology Type 관계 제안",
-        "ontology_facet_suggestion": "Ontology Facet 제안",
-    }
     for task in ledger.phenomena(type_="research_task", status="ready"):
-        subject_type = str(task.get("subject_type") or "")
-        payload = dict(task.get("payload") or {})
-        if subject_type == "paper_first_review":
-            intent_id = str(payload.get("intent_id") or "").strip()
-            _, rq_title, round_no = _rq_for_intent(ledger, intent_id)
-            paper = dict(payload.get("paper") or {})
-            paper_title = str(paper.get("title") or payload.get("title") or "Paper").strip()
-            items.append(_attention_item(
-                category="inputs", interaction_id="provide_external_llm_result",
-                source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
-                title=rq_title or paper_title, summary=f"논문별 원문 리뷰 · {paper_title}",
-                priority="medium", created_at=str(task.get("created_at") or ""), payload=task,
-                subject_title=rq_title, round_id=intent_id,
-                round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
-                phase_label=f"논문 원문 리뷰 · {paper_title[:60]}",
-            ))
+        if str(task.get("subject_type") or "") != "paper_first_review":
             continue
-        if subject_type in ontology_task_labels:
-            label = ontology_task_labels[subject_type]
-            task_title = str(payload.get("title") or label).strip()
-            items.append(_attention_item(
-                category="inputs", interaction_id="provide_external_llm_result",
-                source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
-                title=task_title, summary=label, priority="medium",
-                created_at=str(task.get("created_at") or ""), payload=task,
-                subject_title=task_title, phase_label=label,
-            ))
+        payload = dict(task.get("payload") or {})
+        intent_id = str(payload.get("intent_id") or "").strip()
+        rq_id, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+        paper = dict(payload.get("paper") or {})
+        paper_title = str(paper.get("title") or payload.get("title") or "Paper").strip()
+        items.append(_attention_item(
+            category="inputs", interaction_id="provide_external_llm_result",
+            source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
+            title=rq_title or paper_title, summary=f"논문별 원문 리뷰 · {paper_title}",
+            priority="medium", created_at=str(task.get("created_at") or ""), payload=task,
+            subject_title=rq_title, round_id=intent_id,
+            round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
+            phase_label=f"논문 원문 리뷰 · {paper_title[:60]}",
+            rq_id=rq_id,
+        ))
 
     for result in waiting_workflows:
         item = attention_from_waiting_workflow(result, ledger)
@@ -347,9 +384,14 @@ def build_attention_queue(
         if item.source_type == "workflow_interaction" and item.round_id
     }
 
+    completed_literature_intents = _completed_literature_intent_ids(ledger)
     for index, exception in enumerate(exceptions):
         intent_id = str(exception.get("intent_id") or "").strip()
         if intent_id and intent_id in active_round_ids:
+            continue
+        if intent_id and intent_id in completed_literature_intents:
+            # Completed literature rounds may retain historical run/failure rows
+            # for audit, but they are no longer actionable Attention items.
             continue
         source_id = str(exception.get("id") or exception.get("task_id") or f"exception-{index}")
         interaction_id = str(exception.get("interaction_id") or "").strip()
@@ -363,21 +405,24 @@ def build_attention_queue(
                 category = _waiting_category(interaction_id)
             except Exception:
                 category = "exceptions"
-        _, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+        linked_rq_id, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+        stage = str(exception.get("stage") or exception.get("current_stage") or "").strip()
+        rq_scoped_execution = bool(linked_rq_id and linked_rq_id == intent_id and not ledger.research_questions_for_intent(intent_id))
         items.append(_attention_item(
             category=category,
             interaction_id=interaction_id,
             source_type=str(exception.get("source_type") or "execution_exception"),
             source_id=source_id,
-            title=str(exception.get("title") or "Execution exception"),
+            title=rq_title or str(exception.get("title") or "Execution exception"),
             summary=str(exception.get("summary") or exception.get("error") or ""),
             priority=str(exception.get("priority") or ("medium" if category != "exceptions" else "high")),
             created_at=str(exception.get("created_at") or ""),
             payload=exception,
             subject_title=rq_title,
             round_id=intent_id,
-            round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
-            phase_label=_phase_label(interaction_id) if intent_id else "",
+            round_label=("" if rq_scoped_execution else (f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else ""))),
+            phase_label=_phase_label(interaction_id, stage=stage) if intent_id else "",
+            rq_id=linked_rq_id,
         ))
 
     # Recover durable run-level external LLM boundaries when an older/partial

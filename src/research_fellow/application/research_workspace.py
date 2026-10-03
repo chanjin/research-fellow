@@ -38,6 +38,9 @@ class ResearchQuestionView:
     answer_first_document: str = ""
     answer_version: int = 0
     answer_update_available: bool = False
+    answer_work_in_progress: bool = False
+    answer_work_stage: str = ""
+    answer_work_status: str = ""
     direct_evidence_cards: int = 0
     direct_evidence_papers: int = 0
     supporting_knowledge_cards: int = 0
@@ -49,6 +52,10 @@ class ResearchQuestionView:
     attention_round_label: str = ""
     researcher_comment: str = ""
     attention_item_count: int = 0
+    attention_inputs: int = 0
+    attention_reviews: int = 0
+    attention_decisions: int = 0
+    attention_exceptions: int = 0
     execution_status: str = ""
     execution_detail: str = ""
     paper_review_pending: int = 0
@@ -185,10 +192,20 @@ def _active_questions(
         thread = ledger.research_question_thread(rq_id) or {}
         intents = ledger.research_question_intents(rq_id)
         intent_ids = {str(x.get("intent_id") or "") for x in intents if str(x.get("intent_id") or "")}
-        rq_attention = [
-            dict(x) for x in (attention_items or [])
-            if str(x.get("round_id") or "") in intent_ids
-        ]
+        rq_attention = []
+        for attention in (attention_items or []):
+            attention_row = dict(attention)
+            attention_payload = dict(attention_row.get("payload") or {})
+            attention_round_id = str(attention_row.get("round_id") or "")
+            attention_subject_id = str(attention_row.get("subject_id") or "")
+            attention_intent_id = str(attention_payload.get("intent_id") or "")
+            if (
+                attention_round_id in intent_ids
+                or attention_round_id == rq_id
+                or attention_subject_id == rq_id
+                or attention_intent_id == rq_id
+            ):
+                rq_attention.append(attention_row)
         paper_tasks = [
             x for x in ledger.phenomena(type_="research_task")
             if str(x.get("subject_type") or "") == "paper_first_review"
@@ -196,14 +213,45 @@ def _active_questions(
         ]
         paper_review_pending = sum(1 for x in paper_tasks if x.get("status") == "ready")
         paper_review_completed = sum(1 for x in paper_tasks if x.get("status") == "completed")
-        runs = [
-            x for x in ledger.auto_research_runs(statuses=("running", "needs_attention", "completed", "failed"), limit=200)
-            if str(x.get("intent_id") or "") in intent_ids
+        round_state = _rq_research_round_state(ledger, rq_id, intents)
+        all_runs = ledger.auto_research_runs(statuses=("running", "needs_attention", "completed", "failed"), limit=200)
+        runs = [x for x in all_runs if str(x.get("intent_id") or "") in intent_ids]
+        answer_runs = [
+            x for x in all_runs
+            if str(x.get("intent_id") or "") == rq_id
+            and str(x.get("current_stage") or "") in {"research_answer_draft", "research_answer_first_draft", "research_answer_enrichment"}
         ]
         latest_run = runs[0] if runs else None
+        latest_answer_run = answer_runs[0] if answer_runs else None
+        answer_run_status = str((latest_answer_run or {}).get("status") or "")
+        answer_run_stage = str((latest_answer_run or {}).get("current_stage") or "")
+        answer_work_in_progress = bool(
+            not round_state.get("answer_draft")
+            and (
+                round_state.get("answer_pending")
+                or answer_run_status in {"running", "needs_attention"}
+            )
+        )
+        answer_work_stage = ""
+        answer_work_status = ""
+        if round_state.get("answer_draft"):
+            answer_work_stage = "completed"
+            answer_work_status = f"답변 v{int(round_state.get('answer_version') or 1)} 준비됨"
+        elif answer_work_in_progress:
+            if answer_run_stage == "research_answer_first_draft":
+                answer_work_stage = "1/2"
+                answer_work_status = "답변 작성 중 · 1/2 직접 근거 초안 입력 대기"
+            elif answer_run_stage == "research_answer_enrichment":
+                answer_work_stage = "2/2"
+                answer_work_status = "답변 작성 중 · 1/2 완료 · 2/2 최종 답변 보강 입력 대기"
+            elif round_state.get("answer_pending"):
+                answer_work_stage = "queued"
+                answer_work_status = "답변 작성 요청이 등록되었습니다 · Attention 작업 생성/확인 대기"
+            else:
+                answer_work_stage = "running"
+                answer_work_status = "답변 작성 작업이 진행 중입니다"
         sources = ledger.research_question_sources(rq_id)
         status = str(row.get("status") or "candidate")
-        round_state = _rq_research_round_state(ledger, rq_id, intents)
         evidence_bundle = rq_evidence_bundle(ledger, memory_cards, rq_id)
         evidence_counts = dict(evidence_bundle.get("counts") or {})
         current_evidence_fingerprint = evidence_fingerprint(evidence_bundle)
@@ -287,6 +335,21 @@ def _active_questions(
         if rq_attention:
             execution_status = "waiting_for_researcher"
             execution_detail = f"실제 Attention {len(rq_attention)}건이 생성되어 연구자 작업을 기다립니다."
+        elif latest_answer_run is not None:
+            run_status = str(latest_answer_run.get("status") or "")
+            run_stage = str(latest_answer_run.get("current_stage") or "")
+            if run_status == "needs_attention":
+                execution_status = "attention_projection_missing"
+                execution_detail = f"RQ 답변 run은 사람 입력 대기 상태(stage={run_stage or 'unknown'})이지만 연결된 Attention item이 없습니다."
+            elif run_status == "running":
+                execution_status = "agent_running"
+                execution_detail = f"RQ 답변 작성이 진행 중입니다(stage={run_stage or 'unknown'})."
+            elif run_status == "completed":
+                execution_status = "answer_completed"
+                execution_detail = "최근 RQ 답변 작성 run이 완료되었습니다."
+            else:
+                execution_status = "execution_error"
+                execution_detail = f"RQ 답변 run 상태가 {run_status or 'unknown'}입니다(stage={run_stage or 'unknown'})."
         elif latest_run is not None:
             run_status = str(latest_run.get("status") or "")
             run_stage = str(latest_run.get("current_stage") or "")
@@ -326,6 +389,11 @@ def _active_questions(
 
         source_payload = dict(thread.get("source_payload") or {}) if isinstance(thread.get("source_payload"), dict) else {}
         researcher_comment = str(source_payload.get("researcher_comment") or source_payload.get("request_context") or row.get("research_context") or "").strip()
+        attention_counts = {"inputs": 0, "reviews": 0, "decisions": 0, "exceptions": 0}
+        for attention_row in rq_attention:
+            category = str(attention_row.get("category") or "")
+            if category in attention_counts:
+                attention_counts[category] += 1
 
         result.append(ResearchQuestionView(
             rq_id=rq_id,
@@ -350,6 +418,9 @@ def _active_questions(
             answer_first_document=str(round_state.get("answer_first_document") or ""),
             answer_version=int(round_state.get("answer_version") or 0),
             answer_update_available=answer_update_ready,
+            answer_work_in_progress=answer_work_in_progress,
+            answer_work_stage=answer_work_stage,
+            answer_work_status=answer_work_status,
             direct_evidence_cards=int(evidence_counts.get("direct_cards") or 0),
             direct_evidence_papers=int(evidence_counts.get("direct_papers") or 0),
             supporting_knowledge_cards=int(evidence_counts.get("supporting_cards") or 0),
@@ -361,6 +432,10 @@ def _active_questions(
             attention_round_label=attention_round_label,
             researcher_comment=researcher_comment,
             attention_item_count=len(rq_attention),
+            attention_inputs=attention_counts["inputs"],
+            attention_reviews=attention_counts["reviews"],
+            attention_decisions=attention_counts["decisions"],
+            attention_exceptions=attention_counts["exceptions"],
             execution_status=execution_status,
             execution_detail=execution_detail,
             paper_review_pending=paper_review_pending,

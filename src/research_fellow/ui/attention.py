@@ -18,41 +18,6 @@ _CATEGORY_LABELS = {
     "exceptions": ("예외", "Exceptions"),
 }
 
-_WORK_KIND_LABELS = {
-    "research": ("연구질문", "Research"),
-    "literature": ("문헌조사", "Literature"),
-    "knowledge": ("지식카드", "Knowledge"),
-    "ontology": ("온톨로지", "Ontology"),
-    "system": ("시스템", "System"),
-}
-
-
-def _attention_work_kind(item: Mapping[str, Any]) -> str:
-    """Classify what the Attention item is about, independently of what action is required."""
-    source_type = str(item.get("source_type") or "")
-    interaction_id = str(item.get("interaction_id") or "")
-    payload = dict(item.get("payload") or {}) if isinstance(item.get("payload"), Mapping) else {}
-    subject_type = str(payload.get("subject_type") or "")
-    nested = dict(payload.get("payload") or {}) if isinstance(payload.get("payload"), Mapping) else {}
-    nested_subject = str(nested.get("subject_type") or "")
-    combined = " ".join([source_type, interaction_id, subject_type, nested_subject, str(item.get("title") or ""), str(item.get("phase_label") or "")]).lower()
-    if "ontology" in combined or "facet" in combined or "type_suggestion" in combined:
-        return "ontology"
-    if "knowledge_card" in combined or "knowledge relation" in combined or "knowledge_relation" in combined:
-        return "knowledge"
-    if str(item.get("round_id") or "").strip() or "literature" in combined or "paper" in combined:
-        return "literature"
-    if "research_question" in combined or "research question" in combined or "advisory" in combined:
-        return "research"
-    return "system"
-
-
-def _attention_work_label(item: Mapping[str, Any], *, english: bool) -> str:
-    kind = _attention_work_kind(item)
-    ko, en = _WORK_KIND_LABELS.get(kind, (kind, kind))
-    return en if english else ko
-
-
 
 def _stable_interaction_key(item: Mapping[str, Any]) -> str:
     """Return a stable UI key across Attention projection/source transitions.
@@ -129,6 +94,19 @@ def _knowledge_review_local_pdf(item: Mapping[str, Any]) -> str:
     payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
     return str(payload.get("paper_pdf_path") or "").strip()
 
+
+
+def _external_stage(item: Mapping[str, Any]) -> str:
+    payload = dict(item.get("payload") or {})
+    return str(payload.get("stage") or payload.get("current_stage") or "").strip()
+
+
+def _knowledge_decision_subject(item: Mapping[str, Any]) -> str:
+    if str(item.get("source_type") or "") != "decision_request":
+        return ""
+    payload = dict(item.get("payload") or {})
+    return str(payload.get("subject_type") or "").strip()
+
 def _attention_error_key(item: Mapping[str, Any]) -> str:
     return f"attention-submit-error::{_stable_interaction_key(item)}"
 
@@ -158,8 +136,11 @@ def _render_attention_item_body(
     phase = str(item.get("phase_label") or "").strip()
     summary = str(item.get("summary") or "").strip()
     badge = en if english else ko
-    work_label = _attention_work_label(item, english=english)
-    st.markdown(f"**[{badge} · {work_label}] {phase or item.get('title') or item.get('interaction_id')}**")
+    st.markdown(f"**[{badge}] {phase or item.get('title') or item.get('interaction_id')}**")
+    rq_title = str(item.get("subject_title") or "").strip()
+    round_label = str(item.get("round_label") or "").strip()
+    if rq_title:
+        st.caption(("Research Question · " if english else "연구질문 · ") + rq_title + (f" · {round_label}" if round_label else ""))
     st.caption(" · ".join(x for x in [summary, suffix, str(item.get("interaction_id") or "")] if x))
     if not str(item.get("interaction_id") or ""):
         st.info(
@@ -206,7 +187,49 @@ def _render_attention_item_body(
         source_type = str(item.get("source_type") or "")
         source_payload = dict(item.get("payload") or {})
         ontology_subject = str(source_payload.get("subject_type") or "")
-        if (
+        external_stage = _external_stage(item)
+        if str(item.get("interaction_id") or "") == "provide_external_llm_result" and external_stage in {"research_answer_first_draft", "research_answer_enrichment"}:
+            progress = dict(outcome_payload.get("research_answer_progress") or {})
+            version = int(progress.get("answer_version") or 0)
+            completed = bool(progress.get("completed"))
+            st.session_state["attention-focus-category"] = "inputs"
+            if external_stage == "research_answer_first_draft":
+                st.session_state["attention-continuation-flash"] = (
+                    "Direct-evidence draft applied. Current state: step 1/2 complete. Next: run the new 'RQ answer · 2/2 final enrichment' Input."
+                    if english else
+                    "직접 근거 초안을 반영했습니다. 현재 상태: 1/2 완료. 다음 작업: 새로 생성된 ‘RQ 답변 작성 · 2/2 최종 답변 보강’ Input에서 외부 LLM 응답을 반영하세요."
+                )
+            elif completed:
+                st.session_state["attention-continuation-flash"] = (
+                    f"Research answer v{version or 1} was created. Current state: answer draft complete. Next: open Research and review the answer."
+                    if english else
+                    f"연구질문 답변 v{version or 1}을 생성했습니다. 현재 상태: 답변 초안 완료. 다음 작업: Research에서 해당 연구질문의 ‘최종 답변 초안’을 검토하세요."
+                )
+            else:
+                st.session_state["attention-continuation-flash"] = (
+                    "Answer input was applied, but the final answer is not published yet. Check the next Input or the RQ status in Research."
+                    if english else
+                    "RQ 답변 입력을 반영했지만 최종 답변은 아직 발행되지 않았습니다. 다음 Input 또는 Research의 해당 RQ 상태를 확인하세요."
+                )
+        elif str(item.get("interaction_id") or "") == "review_literature_candidates":
+            st.session_state["attention-focus-category"] = "inputs"
+            st.session_state["attention-continuation-flash"] = (
+                "Literature selection was applied. Next: review preserved papers and create/approve Knowledge Card candidates as they appear in Attention."
+                if english else
+                "발견 문헌 검토 결과를 반영했습니다. 다음 작업: 보존한 논문의 원문 리뷰와 Knowledge Card 후보 검토가 Attention에 나타나면 이어서 처리하세요."
+            )
+        elif _knowledge_decision_subject(item) == "knowledge_card":
+            # Keep the researcher in Decisions while a sequence of Knowledge Card
+            # decisions is being processed. The resolved request disappears from
+            # the durable pending queue on rerun, so the next unresolved card is
+            # naturally shown in the same workstream instead of jumping to Inputs.
+            st.session_state["attention-focus-category"] = "decisions"
+            st.session_state["attention-continuation-flash"] = (
+                "Knowledge Card decision applied. The processed card was removed from the pending Decision queue. Continue with the next Knowledge Card if one remains; when the queue is clear, return to Research for the next research action."
+                if english else
+                "Knowledge Card 결정을 반영했습니다. 처리한 카드는 Decision 대기 목록에서 제거되었습니다. 남은 Knowledge Card가 있으면 다음 카드를 계속 검토하고, 모두 끝나면 Research에서 다음 연구 작업을 선택하세요."
+            )
+        elif (
             source_type == "research_task"
             and ontology_subject in {
                 "ontology_type_suggestion",
@@ -216,25 +239,61 @@ def _render_attention_item_body(
             and str(outcome_payload.get("review_id") or "").strip()
         ):
             st.session_state["attention-focus-category"] = "reviews"
+            superseded = len(outcome_payload.get("superseded_review_ids") or [])
             st.session_state["attention-continuation-flash"] = (
-                "Ontology proposal created. Review it first; it is not published to Knowledge until researcher approval."
+                (
+                    "One Ontology proposal was created. Check it in Reviews; after review it moves to Decisions, and only final approval publishes it to Knowledge. "
+                    f"{superseded} older proposal(s) for the same card set were closed."
+                )
                 if english else
-                "Ontology 제안이 생성되었습니다. 먼저 Reviews에서 검토하세요. 연구자 승인 전에는 Knowledge에 반영되지 않습니다."
+                (
+                    "Ontology 변경안 1건을 생성했습니다. Reviews에서 검토하면 Decisions로 이동하고, Decisions에서 최종 승인해야 Knowledge에 반영됩니다. "
+                    f"같은 지식카드 범위의 이전 변경안 {superseded}건은 중복 방지를 위해 종료했습니다."
+                )
             )
         elif source_type == "ontology_change_review" and str(item.get("interaction_id") or "") == "review_ontology_change":
             st.session_state["attention-focus-category"] = "decisions"
             st.session_state["attention-continuation-flash"] = (
-                "Ontology review completed. Make the final publish decision in Decisions."
+                "Review completed. The proposal is not published yet. Open Decisions and approve it to update Knowledge."
                 if english else
-                "Ontology 검토가 완료되었습니다. Decisions에서 최종 반영 여부를 결정하세요."
+                "Ontology 검토를 완료했습니다. 아직 Knowledge에는 반영되지 않았습니다. Decisions에서 최종 승인하면 Knowledge > 지식 구조에 반영됩니다."
             )
         elif source_type == "ontology_change_review" and str(item.get("interaction_id") or "") == "resolve_ontology_change_reviews":
             st.session_state["attention-focus-category"] = "inputs"
-            st.session_state["attention-continuation-flash"] = (
-                "Ontology decision processed. Approved changes are now reflected in Knowledge."
-                if english else
-                "Ontology 최종 결정이 처리되었습니다. 승인된 변경은 Knowledge에 반영되었습니다."
-            )
+            counts = dict(outcome_payload.get("counts") or {})
+            published = [dict(x) for x in (outcome_payload.get("published_versions") or []) if isinstance(x, Mapping)]
+            approved = int(counts.get("approved") or 0)
+            if approved and published:
+                latest = published[-1]
+                change = dict(latest.get("change") or {})
+                new_types = len(change.get("new_type_ids") or [])
+                type_relations = len(change.get("new_relation_ids") or [])
+                assignments = len(change.get("assignment_changes") or [])
+                card_relations = len(change.get("approved_card_relation_ids") or [])
+                version_label = str(latest.get("version_label") or "")
+                st.session_state["attention-continuation-flash"] = (
+                    (
+                        f"Ontology {version_label or 'version'} published: {new_types} new type(s), {type_relations} type relation(s), "
+                        f"{assignments} card assignment change(s), {card_relations} card relation(s). Check Knowledge > Knowledge Structure."
+                    )
+                    if english else
+                    (
+                        f"Ontology {version_label or '새 버전'}을 발행했습니다. 신규 Type {new_types}개, Type 관계 {type_relations}개, "
+                        f"지식카드 Type 배정 변경 {assignments}건, 카드 관계 {card_relations}건이 반영되었습니다. Knowledge > 지식 구조에서 확인하세요."
+                    )
+                )
+            elif approved:
+                st.session_state["attention-continuation-flash"] = (
+                    "Ontology approval was processed, but no published version payload was returned. Check Knowledge > Knowledge Structure and Activity."
+                    if english else
+                    "Ontology 승인은 처리되었지만 발행 버전 정보가 반환되지 않았습니다. Knowledge > 지식 구조와 Activity에서 결과를 확인하세요."
+                )
+            else:
+                st.session_state["attention-continuation-flash"] = (
+                    "Ontology decision processed. No ontology version was published."
+                    if english else
+                    "Ontology 최종 결정을 처리했습니다. 승인된 변경이 없어 Knowledge 구조는 변경되지 않았습니다."
+                )
         elif category == "decisions":
             st.session_state["attention-focus-category"] = "decisions"
         status = str(getattr(outcome, "status", "completed"))
@@ -243,6 +302,79 @@ def _render_attention_item_body(
             if english else f"Interaction을 처리했습니다: {status}."
         )
         st.rerun()
+
+
+
+
+def _render_single_knowledge_decision_queue(
+    st: Any,
+    items: list[Mapping[str, Any]],
+    *,
+    english: bool,
+    interaction_inputs: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None,
+    submit_response: Callable[[Mapping[str, Any], Mapping[str, Any]], Any] | None,
+    candidate_action: Callable[[Mapping[str, Any], Mapping[str, Any], str], Any] | None,
+    view_key: str,
+) -> set[str]:
+    """Render one pending Knowledge Card decision at a time.
+
+    Returns the attention ids consumed by this specialized queue so the generic
+    renderer can skip them.  The durable Decision queue remains the source of
+    truth: after a resolution the handled request disappears and rerun naturally
+    advances to the next unresolved card.
+    """
+    candidates = [item for item in items if _knowledge_decision_subject(item) == "knowledge_card"]
+    if not candidates:
+        return set()
+
+    active = candidates[0]
+    remaining = len(candidates)
+    paper_id, paper_title, rq_text, review_summary = _knowledge_review_header(active)
+    round_label = str(active.get("round_label") or "").strip()
+
+    st.markdown("**Knowledge Card Decision Queue**" if english else "**Knowledge Card 결정 대기열**")
+    st.caption(
+        (f"{remaining} Knowledge Card candidate(s) remain. Decide the current card to continue to the next one." if english else
+         f"남은 Knowledge Card 후보 {remaining}건 · 현재 카드 1건만 판단하면 다음 카드로 이어집니다.")
+    )
+    if rq_text:
+        st.caption(("Research Question · " if english else "연구질문 · ") + rq_text + (f" · {round_label}" if round_label else ""))
+    if paper_title:
+        st.markdown(("**Source paper · **" if english else "**출처 논문 · **") + paper_title)
+
+    if review_summary:
+        with st.expander("Paper interpretation" if english else "논문 해석 결과 보기", expanded=False):
+            links = _knowledge_review_links(active)
+            local_pdf_path = _knowledge_review_local_pdf(active)
+            if links or local_pdf_path:
+                st.caption("Source paper" if english else "논문 원문 확인")
+                if links:
+                    link_cols = st.columns(len(links))
+                    for col, (label, url) in zip(link_cols, links):
+                        col.link_button(label, url, use_container_width=True)
+                if local_pdf_path:
+                    path = Path(local_pdf_path).expanduser()
+                    if path.is_file():
+                        try:
+                            st.download_button(
+                                "Open local PDF" if english else "로컬 PDF 원문 열기",
+                                data=path.read_bytes(),
+                                file_name=path.name,
+                                mime="application/pdf",
+                                key=f"attention-kc-local-pdf-{paper_id}-{view_key}",
+                                use_container_width=True,
+                            )
+                        except OSError:
+                            pass
+            st.markdown(_compact_summary_markdown(review_summary))
+
+    st.divider()
+    _render_attention_item_body(
+        st, active, english=english, interaction_inputs=interaction_inputs,
+        submit_response=submit_response, candidate_action=candidate_action,
+        key_suffix=f"{view_key}-knowledge-current",
+    )
+    return {str(item.get("attention_id") or "") for item in candidates}
 
 
 def render_attention_queue(
@@ -272,41 +404,105 @@ def render_attention_queue(
         st.success("No work currently requires human attention." if english else "현재 사람의 확인이 필요한 작업이 없습니다.")
         return
 
-    st.caption(
-        "Tabs describe what you need to do now (Input / Review / Decision / Exception). The work badge on each card shows what the task is about (Research / Literature / Knowledge / Ontology)."
-        if english else
-        "탭은 지금 해야 할 행동(Input / Review / Decision / Exception)을 뜻하고, 각 카드의 업무 badge는 그 일이 무엇에 관한 것인지(연구질문 / 문헌조사 / 지식카드 / 온톨로지)를 뜻합니다."
-    )
-    kind_counts: dict[str, int] = {}
-    for item in items:
-        kind = _attention_work_kind(item)
-        kind_counts[kind] = kind_counts.get(kind, 0) + 1
-    work_summary = []
-    for kind in ("research", "literature", "knowledge", "ontology", "system"):
-        count = int(kind_counts.get(kind, 0))
-        if not count:
+    # Research Question is the owning workstream.  Attention remains a task
+    # projection, but the default overview makes the parent RQ visible first.
+    rq_summary: dict[str, dict[str, Any]] = {}
+    for row in items:
+        rq_id = str(row.get("rq_id") or "").strip()
+        if not rq_id:
             continue
-        ko_label, en_label = _WORK_KIND_LABELS[kind]
-        work_summary.append(f"{en_label if english else ko_label} {count}")
-    if work_summary:
-        st.caption(("Work types: " if english else "업무 종류: ") + " · ".join(work_summary))
+        entry = rq_summary.setdefault(rq_id, {
+            "title": str(row.get("subject_title") or row.get("title") or rq_id).strip(),
+            "total": 0, "inputs": 0, "reviews": 0, "decisions": 0, "exceptions": 0,
+        })
+        entry["total"] += 1
+        category = str(row.get("category") or "")
+        if category in {"inputs", "reviews", "decisions", "exceptions"}:
+            entry[category] += 1
 
-    available_kinds = [kind for kind in ("research", "literature", "knowledge", "ontology", "system") if kind_counts.get(kind)]
-    if len(available_kinds) > 1:
-        selected_kinds = st.multiselect(
-            "Work type filter" if english else "업무 종류 필터",
-            options=available_kinds,
-            default=available_kinds,
-            format_func=lambda kind: (_WORK_KIND_LABELS.get(kind, (kind, kind))[1] if english else _WORK_KIND_LABELS.get(kind, (kind, kind))[0]),
-            key="attention-work-kind-filter",
+    selected_rq = "__all__"
+    if rq_summary:
+        st.markdown("**Research Question work**" if english else "**연구질문별 해야 할 일**")
+        focused_rq = str(st.session_state.get("attention-focus-rq") or "").strip()
+        options = ["__all__"] + list(rq_summary.keys())
+        if focused_rq in rq_summary:
+            st.session_state["attention-rq-filter"] = focused_rq
+        elif str(st.session_state.get("attention-rq-filter") or "") not in options:
+            st.session_state["attention-rq-filter"] = "__all__"
+
+        def _rq_filter_label(value: str) -> str:
+            if value == "__all__":
+                return "All research questions" if english else "전체 연구질문"
+            entry = rq_summary[value]
+            title = str(entry.get("title") or value)
+            if len(title) > 72:
+                title = title[:69] + "..."
+            return f"{title} · {int(entry.get('total') or 0)}"
+
+        selected_rq = st.selectbox(
+            "Research Question" if english else "연구질문",
+            options,
+            format_func=_rq_filter_label,
+            key="attention-rq-filter",
         )
-        selected_set = set(selected_kinds)
-        items = [item for item in items if _attention_work_kind(item) in selected_set]
+        if selected_rq != "__all__":
+            entry = rq_summary[selected_rq]
+            bits = []
+            for key, label in (("inputs", "Input"), ("reviews", "Review"), ("decisions", "Decision"), ("exceptions", "Exception")):
+                count = int(entry.get(key) or 0)
+                if count:
+                    bits.append(f"{label} {count}")
+            focus_cols = st.columns([4, 1])
+            focus_cols[0].info(
+                (("Focused RQ · " if english else "현재 연구질문 · ") + str(entry.get("title") or selected_rq) + (" · " + " · ".join(bits) if bits else ""))
+            )
+            if focus_cols[1].button(
+                "Open Research" if english else "Research로 이동",
+                key=f"attention-open-research-{selected_rq}",
+                use_container_width=True,
+            ):
+                st.session_state["research-focus-rq"] = selected_rq
+                st.session_state["operating-desk-navigate"] = "research"
+                st.rerun()
+        else:
+            summary_bits = []
+            for rq_id, entry in list(rq_summary.items())[:6]:
+                title = str(entry.get("title") or rq_id)
+                if len(title) > 44:
+                    title = title[:41] + "..."
+                summary_bits.append(f"{title} ({int(entry.get('total') or 0)})")
+            if summary_bits:
+                st.caption(" · ".join(summary_bits))
 
     def _render_item_set(view_items: list[Mapping[str, Any]], *, view_key: str) -> None:
         if not view_items:
             st.caption("No items in this category." if english else "이 범주에는 현재 작업이 없습니다.")
             return
+
+        # Knowledge Card decisions are a sequential researcher queue, not a page
+        # containing every candidate at once. Render only the current unresolved
+        # card; after approval/defer/reject the durable request disappears and the
+        # next card becomes current on rerun.
+        consumed_knowledge_ids: set[str] = set()
+        if view_key == "decisions":
+            consumed_knowledge_ids = _render_single_knowledge_decision_queue(
+                st, view_items, english=english, interaction_inputs=interaction_inputs,
+                submit_response=submit_response, candidate_action=candidate_action,
+                view_key=view_key,
+            )
+            if consumed_knowledge_ids:
+                view_items = [
+                    item for item in view_items
+                    if str(item.get("attention_id") or "") not in consumed_knowledge_ids
+                ]
+                if view_items:
+                    st.divider()
+                    st.caption(
+                        "Other pending decisions" if english else
+                        "기타 Decision은 Knowledge Card 대기열 아래에서 확인할 수 있습니다."
+                    )
+                else:
+                    return
 
         # Bulk cleanup is intentionally expressed as "keep selected, delete the rest".
         # Attention itself is only a projection; dismiss_item closes each durable
@@ -429,8 +625,7 @@ def render_attention_queue(
             round_label = str(first.get("round_label") or "문헌조사")
             phases = [str(x.get("phase_label") or "").strip() for x in group if str(x.get("phase_label") or "").strip()]
             current = " / ".join(dict.fromkeys(phases))
-            work_label = _attention_work_label(first, english=english)
-            heading = f"[{work_label}] {subject} · {round_label}" + (f" · {current}" if current else "")
+            heading = f"{subject} · {round_label}" + (f" · {current}" if current else "")
             with st.expander(heading, expanded=card_index == 0):
                 st.caption(
                     "One literature round continues through its current human boundaries (Input → Review → Input → Decision)."
@@ -538,8 +733,7 @@ def render_attention_queue(
             category = str(item.get("category") or "")
             ko, en = _CATEGORY_LABELS.get(category, (category, category))
             label = en if english else ko
-            work_label = _attention_work_label(item, english=english)
-            heading = f"[{label} · {work_label}] {item.get('title') or item.get('interaction_id')}"
+            heading = f"[{label}] {item.get('title') or item.get('interaction_id')}"
             with st.expander(heading, expanded=card_index == 0 and index == 0):
                 if str(item.get("category") or "") == "inputs" and dismiss_item is not None:
                     if st.button(
@@ -561,12 +755,13 @@ def render_attention_queue(
                 except (ValueError, TypeError, KeyError) as error:
                     st.error(str(error))
 
-    groups = {category: [] for category in ("inputs", "reviews", "decisions", "exceptions")}
-    for item in items:
-        category = str(item.get("category") or "")
-        if category in groups:
-            groups[category].append(item)
-    filtered_counts = {category: len(groups.get(category) or []) for category in groups}
+    groups = dict(snapshot.get("groups") or {})
+    if selected_rq != "__all__":
+        groups = {
+            category: [row for row in list(groups.get(category) or []) if str(row.get("rq_id") or "") == selected_rq]
+            for category in ("inputs", "reviews", "decisions", "exceptions")
+        }
+        counts = {category: len(rows) for category, rows in groups.items()}
     category_order = ("inputs", "reviews", "decisions", "exceptions")
     focus_category = str(st.session_state.pop("attention-focus-category", "") or "").strip()
     if focus_category in category_order:
@@ -575,7 +770,7 @@ def render_attention_queue(
     for category in category_order:
         ko, en = _CATEGORY_LABELS[category]
         label = en if english else ko
-        tab_labels.append(f"{label} ({int(filtered_counts.get(category, 0))})")
+        tab_labels.append(f"{label} ({int(counts.get(category, 0))})")
     category_tabs = st.tabs(tab_labels)
     for tab, category in zip(category_tabs, category_order):
         with tab:

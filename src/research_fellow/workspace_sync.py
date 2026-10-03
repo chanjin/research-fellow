@@ -30,6 +30,7 @@ SYNC_TABLES = (
     "paper_shelf",
     "paper_abstracts",
     "paper_analyses",
+    "paper_research_analyses",
     "paper_question_analyses",
     "paper_card_links",
     "paper_reading_questions",
@@ -103,6 +104,18 @@ class SyncChange:
     action: str
     direction: str
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class SyncConflictDetail:
+    table: str
+    key: str
+    local_row: dict[str, Any] | None
+    server_row: dict[str, Any] | None
+    differing_fields: tuple[str, ...]
+    baseline_hash: str | None
+    local_hash: str | None
+    server_hash: str | None
 
 
 @dataclass
@@ -375,6 +388,70 @@ class WorkspaceSync:
                     action = "delete" if server_hash is None else ("add" if base_hash is None else "update")
                     changes.append(SyncChange(table, key, action, "server→local"))
         return SyncPreview(changes)
+
+    def conflict_details(self) -> list[SyncConflictDetail]:
+        """Return current unresolved conflicts with concrete local/server rows.
+
+        Existing sync_baseline stores only row hashes, so historical base field values
+        cannot be reconstructed. The baseline hash is included for diagnostics.
+        """
+        if not self.server_exists:
+            return []
+        preview = self.preview()
+        result: list[SyncConflictDetail] = []
+        by_table: dict[str, list[SyncChange]] = {}
+        for change in preview.conflicts:
+            by_table.setdefault(change.table, []).append(change)
+        for table, changes in by_table.items():
+            local_rows, _ = self._rows(self.local_db, table)
+            server_rows, _ = self._rows(self.server_db, table)
+            baseline = self._baseline(table)
+            ignored = LOCAL_ONLY_COLUMNS.get(table, set())
+            for change in changes:
+                local_row = local_rows.get(change.key)
+                server_row = server_rows.get(change.key)
+                fields = sorted(
+                    (set(local_row or {}) | set(server_row or {})) - ignored
+                )
+                differing = tuple(
+                    field for field in fields
+                    if (local_row or {}).get(field) != (server_row or {}).get(field)
+                )
+                result.append(SyncConflictDetail(
+                    table=table,
+                    key=change.key,
+                    local_row=local_row,
+                    server_row=server_row,
+                    differing_fields=differing,
+                    baseline_hash=baseline.get(change.key),
+                    local_hash=_row_hash(table, local_row),
+                    server_hash=_row_hash(table, server_row),
+                ))
+        return result
+
+    def resolve_conflict(self, table: str, key: str, choice: str) -> SyncConflictDetail:
+        """Resolve one current conflict by making both replicas match the chosen side.
+
+        choice must be ``local`` or ``server``. After convergence the local baseline
+        is refreshed so the conflict does not reappear on the next preview.
+        """
+        choice = str(choice).strip().lower()
+        if choice not in {"local", "server"}:
+            raise ValueError("충돌 해소 선택은 local 또는 server 여야 합니다.")
+        if table not in SYNC_TABLES:
+            raise ValueError(f"동기화 대상 테이블이 아닙니다: {table}")
+        current = next(
+            (item for item in self.conflict_details() if item.table == table and item.key == key),
+            None,
+        )
+        if current is None:
+            raise ValueError("이미 해소되었거나 더 이상 충돌 상태가 아닌 레코드입니다. Preview를 새로고침하세요.")
+        if choice == "local":
+            self._copy_row(self.local_db, self.server_db, table, key)
+        else:
+            self._copy_row(self.server_db, self.local_db, table, key)
+        self._refresh_baseline(table, {key})
+        return current
 
     @staticmethod
     def _copy_row(

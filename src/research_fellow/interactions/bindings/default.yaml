@@ -66,9 +66,9 @@ interactions:
   renderer:
     type: review_form
     title: Ontology 변경안 수정·보완 검토
-    help: 변경안에 대한 구조화 의견과 자유 의견을 작성하고 저장하거나 수정 Diff 재생성을 요청합니다.
+    help: 변경안을 검토합니다. 여기서는 검토만 완료되며 아직 Knowledge에는 반영되지 않습니다. 검토 완료 후 Decisions에서 최종 승인해야 발행됩니다.
     variant: ontology_change
-    submit_label: 검토 의견 저장
+    submit_label: 검토 완료 → Decisions
     regenerate_label: 의견 반영 Diff 재생성
 - id: review_revision_todo_reconciliation
   renderer:

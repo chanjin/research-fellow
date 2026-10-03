@@ -1,0 +1,34 @@
+{
+  "workspaces": [
+    {
+      "key": "physics_ai",
+      "label": "Physics AI",
+      "short_label": "Physics AI",
+      "purpose": "물리방정식을 이해하는 AI",
+      "topic_ko": "Physics AI",
+      "topic_en": "Physics AI",
+      "browser_title": "Physics AI · Research Fellow",
+      "expertise_instruction": "Maintain research knowledge and evidence for Physics AI."
+    },
+    {
+      "key": "agent_theory",
+      "label": "Agent Concept",
+      "short_label": "Agent Concept",
+      "purpose": "Agent related research",
+      "topic_ko": "Agent Concept",
+      "topic_en": "Agent Concept",
+      "browser_title": "Agent Concept · Research Fellow",
+      "expertise_instruction": "Maintain research knowledge and evidence for Agent Concept."
+    },
+    {
+      "key": "software_eng",
+      "label": "Software Engineering",
+      "short_label": "Software Engineering",
+      "purpose": "별도로 축적·관리하는 연구 작업공간",
+      "topic_ko": "Software Engineering",
+      "topic_en": "Software Engineering",
+      "browser_title": "Software Engineering · Research Fellow",
+      "expertise_instruction": "Maintain research knowledge and evidence for Software Engineering."
+    }
+  ]
+}

@@ -298,6 +298,7 @@ from research_fellow.workspace_profiles import (
     bootstrap_local_workspace_from_server, load_workspace_profiles, persist_workspace_profile_metadata, save_custom_workspace,
 )
 from research_fellow.workspace_archive import build_workspace_archive, restore_workspace_archive
+from research_fellow.workspace_portable import restore_workspace_db_if_missing
 from research_fellow.workspace_sync import AllWorkspacesSync, WorkspaceSync
 from research_fellow.local_settings import get_workspace_sync_server_root, set_workspace_sync_server_root
 from research_fellow.ui.developer import render_developer_screen
@@ -363,6 +364,14 @@ _db_override = os.environ.get(f"RESEARCH_FELLOW_DB_FILENAME_{_workspace_env_suff
 if not _db_override and WORKSPACE_KEY == "general":
     _db_override = os.environ.get("RESEARCH_FELLOW_DB_FILENAME", "").strip()
 LOCAL_DB = DATA / (_db_override or WORKSPACE_PROFILE.db_filename)
+_portable_restore = None
+if not LOCAL_DB.exists():
+    try:
+        _portable_restore = restore_workspace_db_if_missing(
+            LOCAL_DB, data_dir=DATA, workspace_key=WORKSPACE_KEY
+        )
+    except Exception:
+        _portable_restore = None
 if not LOCAL_DB.exists():
     bootstrap_local_workspace_from_server(
         WORKSPACE_PROFILE, data_dir=DATA, server_root=_workspace_discovery_server_root or None
@@ -1327,6 +1336,43 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
     def _enqueue_ontology_work() -> Mapping[str, Any]:
         return enqueue_untyped_cards(ledger, memory, limit=20)
 
+    def _manage_ontology(action: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        data = dict(payload or {})
+        if action == "create_facet":
+            return dict(ledger.create_ontology_facet(str(data.get("name") or ""), str(data.get("description") or "")))
+        if action == "delete_facet":
+            return {"deleted": bool(ledger.delete_ontology_facet(str(data.get("facet_id") or "")))}
+        if action == "create_type":
+            return dict(ledger.create_ontology_type(
+                str(data.get("name") or ""), str(data.get("description") or ""),
+                str(data.get("facet_id") or "") or None,
+            ))
+        if action == "update_type":
+            return {"updated": bool(ledger.update_ontology_type(
+                str(data.get("type_id") or ""),
+                name=str(data.get("name") or ""),
+                description=str(data.get("description") or ""),
+                facet_id=str(data.get("facet_id") or "") or None,
+            ))}
+        if action == "delete_type":
+            return {"deleted": bool(ledger.delete_ontology_type(str(data.get("type_id") or "")))}
+        if action == "create_relation":
+            return dict(ledger.create_ontology_type_relation(
+                str(data.get("source_type_id") or ""), str(data.get("target_type_id") or ""),
+                str(data.get("relation_name") or ""), str(data.get("description") or ""),
+            ))
+        if action == "update_relation":
+            return {"updated": bool(ledger.update_ontology_type_relation(
+                str(data.get("relation_id") or ""),
+                source_type_id=str(data.get("source_type_id") or ""),
+                target_type_id=str(data.get("target_type_id") or ""),
+                relation_name=str(data.get("relation_name") or ""),
+                description=str(data.get("description") or ""),
+            ))}
+        if action == "delete_relation":
+            return {"deleted": bool(ledger.delete_ontology_type_relation(str(data.get("relation_id") or "")))}
+        raise ValueError(f"지원하지 않는 Ontology 편집 작업입니다: {action}")
+
     render_operating_desk(
         st,
         workspace_label=WORKSPACE_PROFILE.label,
@@ -1356,6 +1402,7 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         knowledge_update_paper_metadata=_update_paper_metadata,
         knowledge_attach_paper_pdf=_attach_paper_pdf,
         knowledge_enqueue_ontology_work=_enqueue_ontology_work,
+        knowledge_manage_ontology=_manage_ontology,
         english=english,
     )
 
@@ -9252,6 +9299,11 @@ def main() -> None:
     hr { border: 0 !important; border-top: 2px solid #2F80ED !important; margin: 1.45rem 0 1.15rem 0 !important; opacity: .72 !important; }
     </style>""", unsafe_allow_html=True)
     st.sidebar.title("Research Fellow")
+    if _portable_restore is not None and getattr(_portable_restore, "restored", False):
+        st.sidebar.success(ui_text(
+            f"workspace.json에서 DB를 복원했습니다 · {getattr(_portable_restore, 'inserted_rows', 0)} records",
+            f"Rebuilt the DB from workspace.json · {getattr(_portable_restore, 'inserted_rows', 0)} records",
+        ))
     if workspace_restore_message := st.session_state.pop("workspace-restore-message", ""):
         st.sidebar.success(str(workspace_restore_message))
     workspace_keys = list(WORKSPACE_PROFILES)

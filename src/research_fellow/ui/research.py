@@ -201,19 +201,71 @@ def render_research_workspace(
                 )
 
     counts = dict(snapshot.get("counts") or {})
-    cols = st.columns(4)
-    cols[0].metric("Active questions" if english else "활성 연구질문", int(counts.get("active_questions", 0)))
-    cols[1].metric("Exploring" if english else "탐색 중", int(counts.get("exploring_questions", 0)))
-    cols[2].metric("New knowledge" if english else "새 지식", int(counts.get("new_knowledge", 0)))
-    cols[3].metric("Next actions" if english else "다음 행동", int(counts.get("next_actions", 0)))
-
-    st.markdown("### " + ("Active Research Questions" if english else "활성 연구질문"))
     questions = list(snapshot.get("questions") or [])
-    if not questions:
-        st.caption("No active research questions." if english else "활성 연구질문이 없습니다.")
+    needs_attention = sum(1 for item in questions if bool(item.get("human_attention_required")))
+
+    phase_counts = {}
     for item in questions:
+        phase = str(item.get("lifecycle_phase") or "starting")
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+
+    cols = st.columns(6)
+    cols[0].metric("All" if english else "전체 질문", len(questions))
+    cols[1].metric("Starting" if english else "시작 전", phase_counts.get("starting", 0))
+    cols[2].metric("First literature" if english else "최초 문헌조사", phase_counts.get("initial_literature", 0))
+    cols[3].metric("Follow-up" if english else "추가 문헌조사", phase_counts.get("followup_literature", 0))
+    cols[4].metric("Completed" if english else "완료", phase_counts.get("completed", 0))
+    cols[5].metric("Needs attention" if english else "사람 작업 필요", needs_attention)
+    st.caption(
+        "Research shows the full lifecycle of every research question, including completed work."
+        if english else
+        "Research는 현재 탐색 중인 질문뿐 아니라 시작 전·추가 문헌조사·완료된 질문까지 전체 생애주기를 보여줍니다."
+    )
+
+    st.markdown("### " + ("Research Questions" if english else "연구질문"))
+    if not questions:
+        st.caption("No research questions yet." if english else "아직 연구질문이 없습니다.")
+
+    phase_labels_ko = {
+        "starting": "시작 전",
+        "initial_literature": "최초 문헌조사",
+        "followup_literature": "추가 문헌조사",
+        "completed": "완료",
+        "hold": "보류",
+        "closed": "종료/제외",
+    }
+    phase_labels_en = {
+        "starting": "Starting",
+        "initial_literature": "First literature",
+        "followup_literature": "Follow-up literature",
+        "completed": "Completed",
+        "hold": "On hold",
+        "closed": "Closed",
+    }
+    phase_labels = phase_labels_en if english else phase_labels_ko
+    filter_options = ["all", "starting", "initial_literature", "followup_literature", "completed", "hold", "closed"]
+    selected_phase = st.selectbox(
+        "Lifecycle" if english else "연구 단계",
+        filter_options,
+        index=0,
+        format_func=lambda value: ("All" if english else "전체") if value == "all" else phase_labels.get(value, value),
+        key="research-lifecycle-filter",
+    )
+    visible_questions = questions if selected_phase == "all" else [
+        item for item in questions if str(item.get("lifecycle_phase") or "starting") == selected_phase
+    ]
+    status_labels_ko = {"exploring": "탐색 중", "interested": "관심", "candidate": "후보", "hold": "보류", "resolved": "완료", "rejected": "종료/제외"}
+    status_labels_en = {"exploring": "Exploring", "interested": "Interested", "candidate": "Candidate", "hold": "On hold", "resolved": "Completed", "rejected": "Closed"}
+    for item in visible_questions:
         status = str(item.get("status") or "candidate")
-        with st.expander(f"[{status}] {item.get('question', '')}", expanded=status == "exploring"):
+        stage = str(item.get("current_stage") or "")
+        human_needed = bool(item.get("human_attention_required"))
+        status_label = (status_labels_en if english else status_labels_ko).get(status, status)
+        lifecycle_phase = str(item.get("lifecycle_phase") or "starting")
+        lifecycle_label = phase_labels.get(lifecycle_phase, lifecycle_phase)
+        attention_marker = " · Attention" if human_needed else ""
+        stage_marker = f" · {stage}" if stage else ""
+        with st.expander(f"[{lifecycle_label} · {status_label}{attention_marker}{stage_marker}] {item.get('question', '')}", expanded=lifecycle_phase in {"starting", "initial_literature", "followup_literature"} or human_needed):
             if item.get("rationale"):
                 st.write(_short(item.get("rationale", ""), 500))
             if item.get("researcher_comment"):
@@ -229,9 +281,7 @@ def render_research_workspace(
             task_cols[0].metric("Attention" if english else "Attention", int(item.get("attention_item_count") or 0))
             task_cols[1].metric("Paper review pending" if english else "논문 리뷰 대기", int(item.get("paper_review_pending") or 0))
             task_cols[2].metric("Paper review done" if english else "논문 리뷰 완료", int(item.get("paper_review_completed") or 0))
-            stage = str(item.get("current_stage") or "")
             next_action = str(item.get("next_agent_action") or "")
-            human_needed = bool(item.get("human_attention_required"))
             if stage:
                 st.markdown(
                     f"**Current stage:** `{stage}`" if english else f"**현재 단계:** `{stage}`"

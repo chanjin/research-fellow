@@ -209,6 +209,23 @@ def _custom_profile(payload: dict[str, Any]) -> ResearchWorkspaceProfile:
     )
 
 
+
+def _discovered_portable_profile(manifest_path: Path) -> ResearchWorkspaceProfile | None:
+    """Recover a workspace profile from workspaces/<key>/workspace.json."""
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("format") != "research-fellow-portable-v1":
+        return None
+    workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
+    fallback_key = manifest_path.parent.name
+    workspace = {**workspace, "key": str(workspace.get("key") or fallback_key)}
+    try:
+        return _custom_profile(workspace)
+    except ValueError:
+        return None
+
 def load_workspace_profiles(
     config_path: str | Path, *, data_dir: str | Path | None = None, server_root: str | Path | None = None
 ) -> dict[str, ResearchWorkspaceProfile]:
@@ -234,6 +251,15 @@ def load_workspace_profiles(
     if data_dir is not None:
         root = Path(data_dir)
         if root.exists():
+            # Portable workspace folders are sufficient for discovery even when the
+            # working SQLite DB has intentionally been omitted.
+            portable_root = root / "workspaces"
+            if portable_root.exists():
+                for manifest_path in sorted(portable_root.glob("*/workspace.json")):
+                    profile = _discovered_portable_profile(manifest_path)
+                    if profile and profile.key not in profiles:
+                        profiles[profile.key] = profile
+                        known_files.add(profile.db_filename)
             for db_path in sorted(root.glob("research_fellow_*.db")):
                 if db_path.name in known_files:
                     continue

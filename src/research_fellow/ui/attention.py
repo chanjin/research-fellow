@@ -18,6 +18,41 @@ _CATEGORY_LABELS = {
     "exceptions": ("예외", "Exceptions"),
 }
 
+_WORK_KIND_LABELS = {
+    "research": ("연구질문", "Research"),
+    "literature": ("문헌조사", "Literature"),
+    "knowledge": ("지식카드", "Knowledge"),
+    "ontology": ("온톨로지", "Ontology"),
+    "system": ("시스템", "System"),
+}
+
+
+def _attention_work_kind(item: Mapping[str, Any]) -> str:
+    """Classify what the Attention item is about, independently of what action is required."""
+    source_type = str(item.get("source_type") or "")
+    interaction_id = str(item.get("interaction_id") or "")
+    payload = dict(item.get("payload") or {}) if isinstance(item.get("payload"), Mapping) else {}
+    subject_type = str(payload.get("subject_type") or "")
+    nested = dict(payload.get("payload") or {}) if isinstance(payload.get("payload"), Mapping) else {}
+    nested_subject = str(nested.get("subject_type") or "")
+    combined = " ".join([source_type, interaction_id, subject_type, nested_subject, str(item.get("title") or ""), str(item.get("phase_label") or "")]).lower()
+    if "ontology" in combined or "facet" in combined or "type_suggestion" in combined:
+        return "ontology"
+    if "knowledge_card" in combined or "knowledge relation" in combined or "knowledge_relation" in combined:
+        return "knowledge"
+    if str(item.get("round_id") or "").strip() or "literature" in combined or "paper" in combined:
+        return "literature"
+    if "research_question" in combined or "research question" in combined or "advisory" in combined:
+        return "research"
+    return "system"
+
+
+def _attention_work_label(item: Mapping[str, Any], *, english: bool) -> str:
+    kind = _attention_work_kind(item)
+    ko, en = _WORK_KIND_LABELS.get(kind, (kind, kind))
+    return en if english else ko
+
+
 
 def _stable_interaction_key(item: Mapping[str, Any]) -> str:
     """Return a stable UI key across Attention projection/source transitions.
@@ -123,7 +158,8 @@ def _render_attention_item_body(
     phase = str(item.get("phase_label") or "").strip()
     summary = str(item.get("summary") or "").strip()
     badge = en if english else ko
-    st.markdown(f"**[{badge}] {phase or item.get('title') or item.get('interaction_id')}**")
+    work_label = _attention_work_label(item, english=english)
+    st.markdown(f"**[{badge} · {work_label}] {phase or item.get('title') or item.get('interaction_id')}**")
     st.caption(" · ".join(x for x in [summary, suffix, str(item.get("interaction_id") or "")] if x))
     if not str(item.get("interaction_id") or ""):
         st.info(
@@ -235,6 +271,37 @@ def render_attention_queue(
     if not items:
         st.success("No work currently requires human attention." if english else "현재 사람의 확인이 필요한 작업이 없습니다.")
         return
+
+    st.caption(
+        "Tabs describe what you need to do now (Input / Review / Decision / Exception). The work badge on each card shows what the task is about (Research / Literature / Knowledge / Ontology)."
+        if english else
+        "탭은 지금 해야 할 행동(Input / Review / Decision / Exception)을 뜻하고, 각 카드의 업무 badge는 그 일이 무엇에 관한 것인지(연구질문 / 문헌조사 / 지식카드 / 온톨로지)를 뜻합니다."
+    )
+    kind_counts: dict[str, int] = {}
+    for item in items:
+        kind = _attention_work_kind(item)
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    work_summary = []
+    for kind in ("research", "literature", "knowledge", "ontology", "system"):
+        count = int(kind_counts.get(kind, 0))
+        if not count:
+            continue
+        ko_label, en_label = _WORK_KIND_LABELS[kind]
+        work_summary.append(f"{en_label if english else ko_label} {count}")
+    if work_summary:
+        st.caption(("Work types: " if english else "업무 종류: ") + " · ".join(work_summary))
+
+    available_kinds = [kind for kind in ("research", "literature", "knowledge", "ontology", "system") if kind_counts.get(kind)]
+    if len(available_kinds) > 1:
+        selected_kinds = st.multiselect(
+            "Work type filter" if english else "업무 종류 필터",
+            options=available_kinds,
+            default=available_kinds,
+            format_func=lambda kind: (_WORK_KIND_LABELS.get(kind, (kind, kind))[1] if english else _WORK_KIND_LABELS.get(kind, (kind, kind))[0]),
+            key="attention-work-kind-filter",
+        )
+        selected_set = set(selected_kinds)
+        items = [item for item in items if _attention_work_kind(item) in selected_set]
 
     def _render_item_set(view_items: list[Mapping[str, Any]], *, view_key: str) -> None:
         if not view_items:
@@ -362,7 +429,8 @@ def render_attention_queue(
             round_label = str(first.get("round_label") or "문헌조사")
             phases = [str(x.get("phase_label") or "").strip() for x in group if str(x.get("phase_label") or "").strip()]
             current = " / ".join(dict.fromkeys(phases))
-            heading = f"{subject} · {round_label}" + (f" · {current}" if current else "")
+            work_label = _attention_work_label(first, english=english)
+            heading = f"[{work_label}] {subject} · {round_label}" + (f" · {current}" if current else "")
             with st.expander(heading, expanded=card_index == 0):
                 st.caption(
                     "One literature round continues through its current human boundaries (Input → Review → Input → Decision)."
@@ -470,7 +538,8 @@ def render_attention_queue(
             category = str(item.get("category") or "")
             ko, en = _CATEGORY_LABELS.get(category, (category, category))
             label = en if english else ko
-            heading = f"[{label}] {item.get('title') or item.get('interaction_id')}"
+            work_label = _attention_work_label(item, english=english)
+            heading = f"[{label} · {work_label}] {item.get('title') or item.get('interaction_id')}"
             with st.expander(heading, expanded=card_index == 0 and index == 0):
                 if str(item.get("category") or "") == "inputs" and dismiss_item is not None:
                     if st.button(
@@ -492,7 +561,12 @@ def render_attention_queue(
                 except (ValueError, TypeError, KeyError) as error:
                     st.error(str(error))
 
-    groups = dict(snapshot.get("groups") or {})
+    groups = {category: [] for category in ("inputs", "reviews", "decisions", "exceptions")}
+    for item in items:
+        category = str(item.get("category") or "")
+        if category in groups:
+            groups[category].append(item)
+    filtered_counts = {category: len(groups.get(category) or []) for category in groups}
     category_order = ("inputs", "reviews", "decisions", "exceptions")
     focus_category = str(st.session_state.pop("attention-focus-category", "") or "").strip()
     if focus_category in category_order:
@@ -501,7 +575,7 @@ def render_attention_queue(
     for category in category_order:
         ko, en = _CATEGORY_LABELS[category]
         label = en if english else ko
-        tab_labels.append(f"{label} ({int(counts.get(category, 0))})")
+        tab_labels.append(f"{label} ({int(filtered_counts.get(category, 0))})")
     category_tabs = st.tabs(tab_labels)
     for tab, category in zip(category_tabs, category_order):
         with tab:

@@ -115,6 +115,28 @@ def _complete_ready_legacy_relation_tasks(ledger: Ledger) -> None:
             ledger.set_status(str(item.get("phenomenon_id") or ""), "completed")
 
 
+def _supersede_pending_reviews_for_scope(ledger: Ledger, card_ids: list[str]) -> list[str]:
+    """Close stale pending Ontology reviews for the same batch of source cards."""
+    scope = sorted({str(value) for value in card_ids if str(value)})
+    if not scope:
+        return []
+    closed: list[str] = []
+    for review in ledger.ontology_change_reviews(status="proposed", limit=200):
+        review_scope = sorted({str(value) for value in (review.get("source_card_ids") or []) if str(value)})
+        if review_scope != scope:
+            continue
+        review_id = str(review.get("review_id") or "")
+        if not review_id:
+            continue
+        ledger.resolve_ontology_change_review(
+            review_id,
+            "rejected",
+            note="Superseded by a newer Ontology Graph run for the same knowledge-card scope.",
+        )
+        closed.append(review_id)
+    return closed
+
+
 def ensure_type_graph_work(ledger: Ledger, memory: KnowledgeMemory, *, limit: int = 30) -> str | None:
     """Keep exactly one graph-level ontology Input for the current untyped-card batch.
 
@@ -143,6 +165,9 @@ def ensure_type_graph_work(ledger: Ledger, memory: KnowledgeMemory, *, limit: in
     reference_cards = [card for card in all_cards if str(card.get("card_id") or "") not in batch_ids][:30]
     card_ids = [str(card.get("card_id") or "") for card in cards]
     reference_card_ids = [str(card.get("card_id") or "") for card in reference_cards]
+    # A deliberate graph re-run replaces an older still-pending proposal for the
+    # exact same card batch. Otherwise the researcher sees duplicate Reviews.
+    _supersede_pending_reviews_for_scope(ledger, card_ids)
     prompt = type_graph_suggestion_prompt(
         cards=cards,
         reference_cards=reference_cards,
@@ -286,6 +311,7 @@ def apply_ontology_task_response(
                 if key in proposed_keys:
                     ledger.set_status(str(request.get("phenomenon_id") or ""), "completed")
 
+        superseded_review_ids = _supersede_pending_reviews_for_scope(ledger, card_ids)
         review = ledger.create_ontology_change_review(
             source_card_ids=card_ids,
             proposal=parsed,
@@ -296,6 +322,7 @@ def apply_ontology_task_response(
             "task_id": task_id,
             "review_id": str(review["review_id"]),
             "kind": subject_type,
+            "superseded_review_ids": superseded_review_ids,
         }
 
     if subject_type == KNOWLEDGE_RELATION_TASK:

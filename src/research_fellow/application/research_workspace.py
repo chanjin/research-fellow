@@ -53,6 +53,7 @@ class ResearchQuestionView:
     execution_detail: str = ""
     paper_review_pending: int = 0
     paper_review_completed: int = 0
+    lifecycle_phase: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -176,7 +177,7 @@ def _active_questions(
     attention_items: list[dict[str, Any]] | None = None,
 ) -> list[ResearchQuestionView]:
     rows = ledger.research_question_backlog(
-        statuses=["exploring", "interested", "candidate", "hold"], limit=limit
+        statuses=["exploring", "interested", "candidate", "hold", "resolved", "rejected"], limit=limit
     )
     result: list[ResearchQuestionView] = []
     for row in rows:
@@ -305,6 +306,24 @@ def _active_questions(
             execution_status = "dispatch_pending"
             execution_detail = "탐색 Intent는 있지만 아직 M1 실행 run 또는 Attention item이 생성되지 않았습니다."
 
+        # User-facing lifecycle phase is intentionally separate from the durable RQ status.
+        # It answers "where is this research question in its job lifecycle?" while status
+        # continues to preserve the canonical domain state.
+        if status == "resolved":
+            lifecycle_phase = "completed"
+        elif status == "rejected":
+            lifecycle_phase = "closed"
+        elif status == "hold":
+            lifecycle_phase = "hold"
+        elif status in {"candidate", "interested"} and not intents:
+            lifecycle_phase = "starting"
+        elif status == "exploring" and len(intents) > 1:
+            lifecycle_phase = "followup_literature"
+        elif status == "exploring":
+            lifecycle_phase = "initial_literature"
+        else:
+            lifecycle_phase = "starting"
+
         source_payload = dict(thread.get("source_payload") or {}) if isinstance(thread.get("source_payload"), dict) else {}
         researcher_comment = str(source_payload.get("researcher_comment") or source_payload.get("request_context") or row.get("research_context") or "").strip()
 
@@ -346,6 +365,7 @@ def _active_questions(
             execution_detail=execution_detail,
             paper_review_pending=paper_review_pending,
             paper_review_completed=paper_review_completed,
+            lifecycle_phase=lifecycle_phase,
         ))
     return result
 
@@ -519,8 +539,10 @@ def research_workspace_snapshot(
     }
     return {
         "counts": {
-            "active_questions": len(questions),
+            "active_questions": sum(1 for item in questions if item.status not in {"resolved", "rejected"}),
+            "total_questions": len(questions),
             "exploring_questions": question_counts.get("exploring", 0),
+            "completed_questions": question_counts.get("resolved", 0),
             "evidence_items": len(evidence),
             "new_knowledge": sum(1 for item in knowledge if item.status == "new"),
             "advisory_requests": len(advisory),

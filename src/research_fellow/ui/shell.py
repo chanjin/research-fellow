@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from research_fellow.ui.attention import render_attention_queue
-from research_fellow.ui.running import render_running_work
 from research_fellow.ui.activity import render_activity_feed
 from research_fellow.ui.research import render_research_workspace
 from research_fellow.ui.knowledge import render_knowledge_workspace
@@ -36,6 +35,7 @@ def render_operating_desk(
     knowledge_update_paper_metadata: Callable[[str, list[str] | str, str, str | None], Mapping[str, Any]] | None = None,
     knowledge_attach_paper_pdf: Callable[[str, str, bytes], Mapping[str, Any]] | None = None,
     knowledge_enqueue_ontology_work: Callable[[], Mapping[str, Any]] | None = None,
+    knowledge_manage_ontology: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     english: bool = True,
 ) -> None:
     st.header("Research Fellow" if english else "연구위원")
@@ -56,41 +56,29 @@ def render_operating_desk(
 
     attention_count = int(attention.get("total") or 0)
     running_counts = dict(running.get("counts") or {})
-    recent_count = int(activity.get("total") or 0)
-    cols = st.columns(3)
-    cols[0].metric("Attention" if english else "확인 필요", attention_count)
-    cols[1].metric("Active work" if english else "진행 중", int(running_counts.get("running", 0)) + int(running_counts.get("queued", 0)) + int(running_counts.get("waiting", 0)))
-    cols[2].metric("Recent activity" if english else "최근 활동", recent_count)
+    active_count = int(running_counts.get("running", 0)) + int(running_counts.get("queued", 0)) + int(running_counts.get("waiting", 0))
+    knowledge_counts = dict((knowledge or {}).get("counts") or {})
+    research_total = int((research or {}).get("total", 0))
+    cols = st.columns(4)
+    cols[0].metric("Research" if english else "연구", research_total)
+    cols[1].metric("Attention" if english else "확인 필요", attention_count)
+    cols[2].metric("Knowledge" if english else "지식카드", int(knowledge_counts.get("cards", 0)))
+    cols[3].metric("Active work" if english else "진행 중", active_count)
 
-    labels = [
-        "Attention" if english else "확인 필요",
-        "Running" if english else "진행 중",
-        "Activity" if english else "활동",
-    ]
+    labels: list[str] = []
     if research is not None:
         labels.append("Research" if english else "연구")
+    labels.append("Attention" if english else "확인 필요")
     if knowledge is not None:
         labels.append("Knowledge" if english else "지식")
+    labels.append("Activity" if english else "활동")
     if developer_mode and system is not None:
         labels.append("System" if english else "시스템")
+
     tabs = st.tabs(labels)
-    attention_tab, running_tab, activity_tab = tabs[:3]
-    with attention_tab:
-        render_attention_queue(
-            st, attention, english=english,
-            interaction_inputs=attention_interaction_inputs,
-            submit_response=attention_submit_response,
-            candidate_action=attention_candidate_action,
-            dismiss_round=attention_dismiss_round,
-            dismiss_item=attention_dismiss_item,
-        )
-    with running_tab:
-        render_running_work(st, running, english=english)
-    with activity_tab:
-        render_activity_feed(st, activity, english=english)
-    next_tab = 3
+    index = 0
     if research is not None:
-        with tabs[next_tab]:
+        with tabs[index]:
             render_research_workspace(
                 st, research, english=english,
                 submit_research_question=research_submit_question,
@@ -100,16 +88,39 @@ def render_operating_desk(
                 request_initial_answer=research_request_initial_answer,
                 request_answer_update=research_request_answer_update,
             )
-        next_tab += 1
+        index += 1
+
+    with tabs[index]:
+        render_attention_queue(
+            st, attention, english=english,
+            interaction_inputs=attention_interaction_inputs,
+            submit_response=attention_submit_response,
+            candidate_action=attention_candidate_action,
+            dismiss_round=attention_dismiss_round,
+            dismiss_item=attention_dismiss_item,
+        )
+    index += 1
+
     if knowledge is not None:
-        with tabs[next_tab]:
+        with tabs[index]:
             render_knowledge_workspace(
                 st, knowledge, english=english,
                 update_paper_metadata=knowledge_update_paper_metadata,
                 attach_paper_pdf=knowledge_attach_paper_pdf,
                 enqueue_ontology_work=knowledge_enqueue_ontology_work,
+                manage_ontology=knowledge_manage_ontology,
             )
-        next_tab += 1
+        index += 1
+
+    with tabs[index]:
+        render_activity_feed(st, activity, english=english)
+        st.caption(
+            "This tab is reserved for M2 work and deliverables; for now it shows recent agent activity."
+            if english else
+            "이 탭은 M2의 보고서·논문·자문 수행과 산출물 공간으로 확장합니다. 현재는 최근 Agent 활동을 표시합니다."
+        )
+    index += 1
+
     if developer_mode and system is not None:
-        with tabs[next_tab]:
+        with tabs[index]:
             render_system_workspace(st, system, english=english)

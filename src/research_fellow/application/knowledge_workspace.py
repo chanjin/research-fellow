@@ -12,7 +12,6 @@ from typing import Any
 
 from research_fellow.memory import KnowledgeMemory, RelationMemory
 from research_fellow.storage import Ledger
-from research_fellow.application.literature_discovery_formats import _json_payload
 
 
 @dataclass(frozen=True)
@@ -57,53 +56,6 @@ class KnowledgeGapView:
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
-
-
-def _paper_review_parts(summary: str, reading_raw_output: str) -> tuple[str, str]:
-    """Split persisted paper review into non-duplicated detail and review note.
-
-    Current reviews persist `summary + **Review note:** ...`; older workspaces may
-    persist the original response JSON. Evidence Library should never render the
-    1-page summary twice merely because reading_raw_output contains the same text.
-    """
-    summary = str(summary or "").strip()
-    raw = str(reading_raw_output or "").strip()
-    if not raw:
-        return "", ""
-
-    detail = raw
-    if summary and detail.startswith(summary):
-        detail = detail[len(summary):].strip()
-
-    note = ""
-    note_marker = "**Review note:**"
-    if note_marker in detail:
-        before, after = detail.split(note_marker, 1)
-        detail = before.strip()
-        note = after.strip()
-    elif note_marker in raw:
-        note = raw.split(note_marker, 1)[1].strip()
-
-    # Some historical rows stored the raw external-LLM JSON rather than the
-    # composed review text. Recover review_note, but do not expose raw JSON as a
-    # second "detailed review" in the Evidence Library.
-    if not note and raw.lstrip().startswith(("{", "```")):
-        try:
-            payload = _json_payload(raw)
-        except Exception:
-            payload = None
-        rows = payload.get("papers") if isinstance(payload, dict) else None
-        if isinstance(rows, list):
-            for row in rows:
-                if isinstance(row, dict):
-                    note = str(row.get("review_note") or "").strip()
-                    if note:
-                        break
-            detail = ""
-
-    if detail == summary:
-        detail = ""
-    return detail, note
 
 
 def _relation_counts(relations: list[dict[str, Any]]) -> dict[str, int]:
@@ -295,16 +247,13 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
             rq_id = str(row.get("research_question_id") or "")
             origin = rq_origins.get(rq_id, {})
             rq = ledger.research_question_thread(rq_id) if rq_id else None
-            summary = str(row.get("summary") or "")
-            review, review_note = _paper_review_parts(summary, str(row.get("reading_raw_output") or ""))
             bundles[rq_id] = {
                 "rq_id": rq_id,
                 "question": str((rq or {}).get("question") or row.get("research_question") or origin.get("research_question") or ""),
                 "researcher_comment": str(((rq or {}).get("source_payload") or {}).get("researcher_comment") or origin.get("researcher_comment") or ""),
                 "intent_id": str(row.get("intent_id") or ""),
-                "summary": summary,
-                "review": review,
-                "review_note": review_note,
+                "summary": str(row.get("summary") or ""),
+                "review": str(row.get("reading_raw_output") or ""),
                 "updated_at": str(row.get("updated_at") or ""),
                 "pending_knowledge_cards": [],
                 "approved_knowledge_cards": [],
@@ -316,7 +265,7 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
                 "rq_id": rq_id,
                 "question": str(origin.get("research_question") or ""),
                 "researcher_comment": str(origin.get("researcher_comment") or ""),
-                "intent_id": "", "summary": "", "review": "", "review_note": "", "updated_at": "",
+                "intent_id": "", "summary": "", "review": "", "updated_at": "",
                 "pending_knowledge_cards": [], "approved_knowledge_cards": [],
             })
 
@@ -328,14 +277,11 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
             key = match_id or "legacy"
             bundle = bundles.setdefault(key, {
                 "rq_id": match_id, "question": legacy_question or "Legacy review", "researcher_comment": "",
-                "intent_id": "", "summary": "", "review": "", "review_note": "", "updated_at": "",
+                "intent_id": "", "summary": "", "review": "", "updated_at": "",
                 "pending_knowledge_cards": [], "approved_knowledge_cards": [],
             })
-            legacy_summary = str(legacy_analysis.get("summary") or "")
-            legacy_review, legacy_note = _paper_review_parts(legacy_summary, str(legacy_analysis.get("reading_raw_output") or ""))
-            bundle["summary"] = legacy_summary
-            bundle["review"] = legacy_review
-            bundle["review_note"] = legacy_note
+            bundle["summary"] = str(legacy_analysis.get("summary") or "")
+            bundle["review"] = str(legacy_analysis.get("reading_raw_output") or "")
             bundle["updated_at"] = str(legacy_analysis.get("updated_at") or "")
 
         for item in pending_by_paper.get(paper_id, []):
@@ -346,7 +292,7 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
             key = rq_id or "unscoped"
             bundle = bundles.setdefault(key, {
                 "rq_id": rq_id, "question": str(item.get("research_question") or ""), "researcher_comment": "",
-                "intent_id": str(item.get("intent_id") or ""), "summary": "", "review": "", "review_note": "", "updated_at": "",
+                "intent_id": str(item.get("intent_id") or ""), "summary": "", "review": "", "updated_at": "",
                 "pending_knowledge_cards": [], "approved_knowledge_cards": [],
             })
             bundle["pending_knowledge_cards"].append(item)
@@ -359,7 +305,7 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
             bundle = bundles.setdefault(key, {
                 "rq_id": rq_id, "question": str(rq_origins.get(rq_id, {}).get("research_question") or ""),
                 "researcher_comment": str(rq_origins.get(rq_id, {}).get("researcher_comment") or ""),
-                "intent_id": "", "summary": "", "review": "", "review_note": "", "updated_at": "",
+                "intent_id": "", "summary": "", "review": "", "updated_at": "",
                 "pending_knowledge_cards": [], "approved_knowledge_cards": [],
             })
             bundle["approved_knowledge_cards"].append(card)
@@ -367,10 +313,7 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
         abstract = str(paper.get("abstract") or "").strip()
         common_summary = abstract
         common_summary_source = "abstract" if abstract else ""
-        if not common_summary and legacy_analysis and not question_analyses:
-            # Legacy compatibility only. Once RQ-specific analyses exist, a paper
-            # without an abstract/general discovery summary should remain blank at
-            # the paper level rather than display one question's interpretation.
+        if not common_summary and legacy_analysis:
             common_summary = str(legacy_analysis.get("summary") or "").strip()
             common_summary_source = "legacy_analysis" if common_summary else ""
 
@@ -434,8 +377,22 @@ def knowledge_workspace_snapshot(
         statuses[card.status] = statuses.get(card.status, 0) + 1
         source_kinds[card.source_kind] = source_kinds.get(card.source_kind, 0) + 1
 
-    assigned_ids = {str(item.get("card_id") or "") for item in ontology.get("assignments", [])}
+    assignments = [dict(item) for item in (ontology.get("assignments", []) or []) if isinstance(item, dict)]
+    assigned_ids = {str(item.get("card_id") or "") for item in assignments}
     typed_cards = sum(1 for card in cards if card.card_id in assigned_ids or card.ontology_types)
+    card_view_by_id = {card.card_id: card.as_dict() for card in cards}
+    cards_by_type: dict[str, list[dict[str, Any]]] = {}
+    for assignment in assignments:
+        type_id = str(assignment.get("type_id") or "").strip()
+        card_id = str(assignment.get("card_id") or "").strip()
+        if not type_id or not card_id:
+            continue
+        card_view = card_view_by_id.get(card_id)
+        if card_view is None:
+            continue
+        cards_by_type.setdefault(type_id, []).append(dict(card_view))
+    for type_cards in cards_by_type.values():
+        type_cards.sort(key=lambda item: (str(item.get("title") or "").casefold(), str(item.get("card_id") or "")))
     reinforced = sum(1 for card in cards if card.supporting_evidence_count > 0)
     contradicted_relations = sum(1 for item in relations if str(item.get("relation_type") or "") == "contradicts")
 
@@ -470,9 +427,6 @@ def knowledge_workspace_snapshot(
             "assignments": len(ontology.get("assignments", [])),
             "pending_reviews": len(pending_reviews),
             "latest_version": versions[0] if versions else None,
-            "facet_rows": list(ontology.get("facets", [])),
-            "type_rows": list(ontology.get("types", [])),
-            "relation_rows": list(ontology.get("relations", [])),
             "top_types": [
                 {
                     "type_id": str(item.get("type_id") or ""),
@@ -482,9 +436,21 @@ def knowledge_workspace_snapshot(
                 }
                 for item in sorted(ontology.get("types", []), key=lambda row: int(row.get("card_count") or 0), reverse=True)[:12]
             ],
+            # Keep the ontology editor and the summary metrics on the same
+            # canonical snapshot.  The metrics above use aggregate counts, while
+            # the editor needs the actual approved rows.
+            "facet_rows": [dict(item) for item in ontology.get("facets", [])],
+            "type_rows": [dict(item) for item in ontology.get("types", [])],
+            "relation_rows": [dict(item) for item in ontology.get("relations", [])],
+            "assignment_rows": [dict(item) for item in ontology.get("assignments", [])],
+            "cards_by_type": cards_by_type,
         },
         "evidence_library": evidence_library,
         "gaps": [item.as_dict() for item in gaps],
+        "workspace_storage": {
+            "db_path": str(ledger.path),
+            "data_dir": str(ledger.path.parent),
+        },
     }
 
 

@@ -7,6 +7,9 @@ and paper analyses keep their existing lifecycles.
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
+from io import BytesIO
+import re
 
 from research_fellow.storage import Ledger
 
@@ -64,6 +67,47 @@ def update_paper_researcher_metadata(
     }
 
 
+def _safe_filename_part(value: str, *, max_chars: int) -> str:
+    text = re.sub(r'[\\/:*?"<>|]+', " ", str(value or "")).strip()
+    text = re.sub(r"\s+", "-", text).strip("-._ ")
+    return (text[:max_chars] or "paper")
+
+
+def _extract_pdf_text_for_storage(content: bytes, *, max_chars: int = 150000) -> tuple[str, str]:
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(BytesIO(content))
+    except Exception as error:
+        raise ValueError(f"PDF를 열 수 없습니다: {error}") from error
+    chunks: list[str] = []
+    for index, page in enumerate(reader.pages, start=1):
+        try:
+            text = str(page.extract_text() or "").strip()
+        except Exception:
+            text = ""
+        if text:
+            chunks.append(f"[PAGE {index}]\n{text}")
+    raw = "\n\n".join(chunks).strip()
+    if not raw:
+        raise ValueError("PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF인지 확인해 주세요.")
+    heading = re.compile(r"(?im)^\s*(?:\d+(?:\.\d+)*[.)]?\s+)?(?:references|bibliography)\s*$")
+    min_offset = max(5_000, int(len(raw) * 0.35))
+    references_trimmed = False
+    for match in heading.finditer(raw):
+        if match.start() >= min_offset:
+            raw = raw[:match.start()].rstrip()
+            references_trimmed = True
+            break
+    truncated = len(raw) > max_chars
+    text = raw[:max_chars].rstrip() if truncated else raw
+    note = f"로컬 PDF {len(reader.pages)}페이지에서 텍스트 {len(text):,}자를 추출했습니다."
+    if references_trimmed:
+        note += " References/Bibliography 이후 텍스트는 제외했습니다."
+    if truncated:
+        note += f" Prompt 크기를 위해 본문 앞쪽 {max_chars:,}자까지만 포함했습니다."
+    return text, note
+
+
 def attach_paper_local_pdf(
     ledger: Ledger,
     paper_id: str,
@@ -71,10 +115,10 @@ def attach_paper_local_pdf(
     filename: str,
     content: bytes,
     storage_root,
+    workspace_keyword: str = "workspace",
 ) -> dict[str, Any]:
-    """Attach a researcher-provided local PDF to an existing shelf paper."""
+    """Attach a researcher-provided local PDF using a stable researcher-facing filename."""
     from pathlib import Path
-    from research_fellow.application.paper_shelf import StoredPaperUpload, store_paper_upload
 
     paper = ledger.shelf_paper(str(paper_id))
     if not paper:
@@ -85,6 +129,31 @@ def attach_paper_local_pdf(
     payload = bytes(content or b"")
     if not payload.startswith(b"%PDF"):
         raise ValueError("선택한 파일이 유효한 PDF로 보이지 않습니다.")
-    stored = store_paper_upload(StoredPaperUpload(name=name, content=payload), Path(storage_root))
-    ledger.update_shelf_pdf_path(str(paper_id), stored)
-    return {"paper_id": str(paper_id), "pdf_path": stored, "filename": name}
+
+    root = Path(storage_root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    date_prefix = datetime.now().strftime("%y%m%d")
+    title_part = _safe_filename_part(str(paper.get("title") or "paper"), max_chars=20)
+    workspace_part = _safe_filename_part(str(workspace_keyword or "workspace"), max_chars=24)
+    base = f"{date_prefix}-{title_part}-{workspace_part}"
+    target = root / f"{base}.pdf"
+    suffix = 2
+    while target.exists():
+        target = root / f"{base}-{suffix}.pdf"
+        suffix += 1
+    target.write_bytes(payload)
+    ledger.update_shelf_pdf_path(str(paper_id), str(target))
+    try:
+        full_text, extraction_note = _extract_pdf_text_for_storage(payload)
+    except Exception:
+        # Keep the original PDF for manual recovery even when it is image-only or
+        # otherwise not extractable; the caller can surface the extraction error.
+        raise
+    ledger.save_paper_full_text(
+        str(paper_id), content=full_text, source_type="uploaded_pdf",
+        source_name=target.name, extraction_note=extraction_note,
+    )
+    return {
+        "paper_id": str(paper_id), "pdf_path": str(target), "filename": target.name,
+        "full_text_content": full_text, "full_text_extraction_note": extraction_note,
+    }

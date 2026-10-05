@@ -75,6 +75,7 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
         abstract_url = normalize_result_url(str(item.get("abstract_url", item.get("source_url", item.get("url", "")))))
         full_text_url = normalize_result_url(str(item.get("full_text_url", "")))
         pdf_url = normalize_result_url(str(item.get("pdf_url", "")))
+        landing_url = normalize_result_url(str(item.get("landing_url", "")))
         # Legacy external responses often used full_text_url for a PDF. Preserve
         # that information, but do not collapse the three researcher-facing URLs.
         if not pdf_url and full_text_url.lower().endswith(".pdf"):
@@ -108,6 +109,7 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
                 "html_url": links.get("html_url", ""),
                 "pdf_url": links.get("pdf_url") or normalized_pdf,
                 "full_text_url": full_text_url,
+                "landing_url": landing_url,
                 "title": title,
                 "summary": str(item.get("abstract_or_summary", item.get("summary", ""))).strip(),
                 "published": str(item.get("publication_year", item.get("published", ""))).strip(),
@@ -117,6 +119,8 @@ def parse_external_literature_results(text: str, max_results: int = 20) -> dict[
                 "quick_take": str(item.get("quick_take", "")).strip(),
                 "why_relevant": str(item.get("why_relevant", "")).strip(),
                 "caution": str(item.get("caution", "")).strip(),
+                "citation_count": item.get("citation_count"),
+                "citation_source": str(item.get("citation_source", "")).strip(),
                 "discovery_source": "external",
                 "discovery_sources": list(item.get("discovery_sources", [])) if isinstance(item.get("discovery_sources"), list) else ["External LLM"],
                 "subjects": list(item.get("keywords", [])) if isinstance(item.get("keywords"), list) else [],

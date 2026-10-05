@@ -169,6 +169,13 @@ interactions:
     - why_relevant
     submit_label: 후보 검토 완료 · 원문 요약으로 계속
     empty_label: 서재함에 보존할 논문을 하나 이상 선택하세요.
+- id: review_research_answer_draft
+  renderer:
+    type: review_form
+    variant: research_answer_draft
+    title: 연구질문 답변 Draft 검토
+    help: Markdown을 직접 수정해 저장할 수 있습니다. 최신 Draft를 승인하면 다음 문헌 라운드가 열리며, 필요하면 다음 라운드에서 사용할 연구질문도 함께 보완할 수 있습니다.
+    submit_label: Draft 승인 · 다음 라운드 준비
 - id: request_followup_literature_direction
   renderer:
     type: text_input

@@ -133,3 +133,7 @@ types:
     extends: Artifact
   - id: FollowupLiteratureDirection
     extends: Artifact
+  - id: ResearchAnswerReviewContext
+    extends: Artifact
+  - id: ResearchAnswerReviewResolution
+    extends: Artifact

@@ -8,10 +8,65 @@ structure or review is still needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 from research_fellow.memory import KnowledgeMemory, RelationMemory
 from research_fellow.storage import Ledger
+
+
+def _review_assets_from_raw(value: str) -> tuple[str, str, list[dict[str, Any]]]:
+    """Recover review body, note, and source-grounded claims from durable text.
+
+    The durable schema intentionally stays unchanged. Canonical reviews persist
+    source-grounded claim metadata inside ``reading_raw_output`` so the Knowledge
+    projection can render exact supporting quotes without creating UI-only state.
+    Historical optional-figure metadata is silently removed.
+    """
+    raw = str(value or "").strip()
+    note_marker = "**Review note:**"
+    note = ""
+    if note_marker in raw:
+        raw, note = raw.rsplit(note_marker, 1)
+        raw = raw.strip()
+        note = note.strip()
+
+    claims: list[dict[str, Any]] = []
+    claims_marker = "**Source-grounded claims JSON:**"
+    if claims_marker in raw:
+        body, encoded = raw.split(claims_marker, 1)
+        raw = body.strip()
+        try:
+            parsed = json.loads(encoded.strip())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = []
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                claim = str(item.get("claim") or "").strip()
+                evidence = str(item.get("evidence") or "").strip()
+                if not claim or not evidence:
+                    continue
+                quotes = [str(q).strip() for q in (item.get("source_quotes") or []) if str(q).strip()][:3]
+                claims.append({
+                    "title": str(item.get("title") or "").strip(),
+                    "claim": claim,
+                    "evidence": evidence,
+                    "source_quotes": quotes,
+                    "limits": str(item.get("limits") or "").strip(),
+                })
+
+    figure_marker = "**Important figures JSON:**"
+    if figure_marker in raw:
+        raw = raw.split(figure_marker, 1)[0].strip()
+    return raw, note, claims
+
+
+def _review_note_from_raw(value: str) -> tuple[str, str]:
+    """Backward-compatible helper used by older projection code/tests."""
+    body, note, _claims = _review_assets_from_raw(value)
+    return body, note
 
 
 @dataclass(frozen=True)
@@ -22,6 +77,8 @@ class KnowledgeCardView:
     status: str
     evidence_level: str
     source_kind: str
+    source_name: str
+    publication_year: str
     supporting_evidence_count: int
     relation_count: int
     ontology_types: tuple[str, ...]
@@ -85,6 +142,9 @@ def _card_views(
             for item in ledger.ontology_types_for_card(card_id)
             if item.get("name") or item.get("type_id")
         )
+        provenance = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+        paper_id = str(provenance.get("paper_id") or "").strip()
+        paper = ledger.shelf_paper(paper_id) if paper_id else None
         views.append(KnowledgeCardView(
             card_id=card_id,
             title=str(card.get("title") or "Untitled knowledge card"),
@@ -92,6 +152,8 @@ def _card_views(
             status=str(card.get("status") or "verified"),
             evidence_level=str(card.get("evidence_level") or "provisional"),
             source_kind=str(card.get("source_kind") or ""),
+            source_name=str(provenance.get("source_name") or (paper or {}).get("title") or ""),
+            publication_year=str(provenance.get("publication_year") or (paper or {}).get("publication_year") or ""),
             supporting_evidence_count=len(card.get("supporting_evidence") or []),
             relation_count=counts.get(card_id, 0),
             ontology_types=ontology_names,
@@ -247,13 +309,16 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
             rq_id = str(row.get("research_question_id") or "")
             origin = rq_origins.get(rq_id, {})
             rq = ledger.research_question_thread(rq_id) if rq_id else None
+            review_body, review_note, source_grounded_claims = _review_assets_from_raw(str(row.get("reading_raw_output") or ""))
             bundles[rq_id] = {
                 "rq_id": rq_id,
                 "question": str((rq or {}).get("question") or row.get("research_question") or origin.get("research_question") or ""),
                 "researcher_comment": str(((rq or {}).get("source_payload") or {}).get("researcher_comment") or origin.get("researcher_comment") or ""),
                 "intent_id": str(row.get("intent_id") or ""),
                 "summary": str(row.get("summary") or ""),
-                "review": str(row.get("reading_raw_output") or ""),
+                "review": review_body,
+                "review_note": review_note,
+                "source_grounded_claims": source_grounded_claims,
                 "updated_at": str(row.get("updated_at") or ""),
                 "pending_knowledge_cards": [],
                 "approved_knowledge_cards": [],
@@ -281,7 +346,10 @@ def _evidence_library(memory: KnowledgeMemory, ledger: Ledger, *, limit: int) ->
                 "pending_knowledge_cards": [], "approved_knowledge_cards": [],
             })
             bundle["summary"] = str(legacy_analysis.get("summary") or "")
-            bundle["review"] = str(legacy_analysis.get("reading_raw_output") or "")
+            legacy_review, legacy_review_note, legacy_claims = _review_assets_from_raw(str(legacy_analysis.get("reading_raw_output") or ""))
+            bundle["review"] = legacy_review
+            bundle["review_note"] = legacy_review_note
+            bundle["source_grounded_claims"] = legacy_claims
             bundle["updated_at"] = str(legacy_analysis.get("updated_at") or "")
 
         for item in pending_by_paper.get(paper_id, []):

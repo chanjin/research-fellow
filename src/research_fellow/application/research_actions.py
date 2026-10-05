@@ -4,7 +4,7 @@ from typing import Any, Iterable, Mapping
 
 from research_fellow.application.advising_rq_intents import create_auto_exploration_intent_for_rq
 from research_fellow.application.advising_state import recent_knowledge_updates
-from research_fellow.application.research_answer import latest_research_answer, request_initial_research_answer, request_research_answer_update
+from research_fellow.application.research_answer import latest_research_answer, research_answer_is_approved, request_initial_research_answer, request_research_answer_update
 from research_fellow.application.research_evidence import rq_evidence_bundle
 from research_fellow.storage import Ledger
 
@@ -137,6 +137,10 @@ def request_additional_literature(
     rq = ledger.research_question(rq_id)
     if not rq:
         raise ValueError("Unknown research question")
+    if latest_research_answer(ledger, rq_id) is None:
+        raise ValueError("추가 문헌 조사 전에 현재 연구질문에 대한 Research Answer Draft를 먼저 작성하세요.")
+    if not research_answer_is_approved(ledger, rq_id):
+        raise ValueError("추가 문헌 조사 전에 최신 Research Answer Draft를 연구자가 승인해야 합니다.")
     direction_text = str(direction.get("direction") or "").strip()
     if not direction_text:
         raise ValueError("추가 문헌 조사 방향을 입력하세요.")

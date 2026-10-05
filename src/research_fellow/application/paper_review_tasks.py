@@ -4,7 +4,13 @@ from __future__ import annotations
 import uuid
 from typing import Any, Mapping
 
-from research_fellow.application.auto_literature import selected_paper_review_prompt, _parse_selected_paper_review, _knowledge_candidate_title
+from research_fellow.application.auto_literature import (
+    selected_paper_review_prompt,
+    _parse_selected_paper_review,
+    _knowledge_candidate_title,
+    _normalized_candidate_quotes,
+    _reconcile_pending_knowledge_requests,
+)
 from research_fellow.domain.knowledge import KnowledgeCard
 from research_fellow.storage import Ledger
 
@@ -16,6 +22,22 @@ def _profile_for_intent(ledger: Ledger, intent_id: str) -> dict[str, Any]:
 def _research_question_for_intent(ledger: Ledger, intent_id: str) -> dict[str, Any]:
     linked = ledger.research_questions_for_intent(intent_id)
     return dict(linked[0]) if linked else {}
+
+
+def build_rq_paper_review_prompt(
+    ledger: Ledger,
+    *,
+    intent_id: str,
+    candidate: Mapping[str, Any],
+) -> str:
+    """Build the canonical RQ-conditioned 1-page Paper Review prompt.
+
+    Initial and follow-up literature rounds, local-PDF prompt refreshes, and
+    transitional durable review tasks all call this entry point so prompt format
+    cannot drift by UI path.
+    """
+    profile = _profile_for_intent(ledger, intent_id)
+    return selected_paper_review_prompt(profile, [dict(candidate)])
 
 
 def ensure_paper_review_task(ledger: Ledger, *, intent_id: str, paper: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
@@ -31,8 +53,7 @@ def ensure_paper_review_task(ledger: Ledger, *, intent_id: str, paper: Mapping[s
     completed = [x for x in existing if x.get("status") == "completed"]
     if completed:
         return completed[0]
-    profile = _profile_for_intent(ledger, intent_id)
-    prompt = selected_paper_review_prompt(profile, [dict(candidate)])
+    prompt = build_rq_paper_review_prompt(ledger, intent_id=intent_id, candidate=candidate)
     for task in [x for x in existing if x.get("status") == "ready"]:
         task_prompt = str((task.get("payload") or {}).get("prompt") or "")
         if "executive_summary" in task_prompt and "Executive 1-Page Summary" in task_prompt:
@@ -75,6 +96,7 @@ def apply_inline_paper_review_response(
     paper_id: str,
     candidate: Mapping[str, Any],
     response: str,
+    allow_legacy_summary: bool = False,
 ) -> dict[str, Any]:
     """Persist one paper summary and stage its Knowledge Card candidates.
 
@@ -87,7 +109,10 @@ def apply_inline_paper_review_response(
     rq_id = str(rq.get("rq_id") or "")
     rq_text = str(rq.get("question") or profile.get("question") or "")
     reviewed = _parse_selected_paper_review(
-        response, [dict(candidate)], research_question=rq_text
+        response,
+        [dict(candidate)],
+        research_question=rq_text,
+        allow_legacy_summary=allow_legacy_summary,
     )[0]
     shelf = ledger.shelf_paper(paper_id)
     if not shelf:
@@ -118,63 +143,70 @@ def apply_inline_paper_review_response(
         reading_status="read",
     )
 
-    prior = _existing_knowledge_requests(ledger, intent_id=intent_id, paper_id=paper_id)
-    request_ids = [str(row.get("phenomenon_id") or "") for row in prior]
-    cards = [dict((row.get("payload") or {}).get("card") or {}) for row in prior if isinstance((row.get("payload") or {}).get("card"), Mapping)]
-    if not prior:
-        for claim in reviewed.get("knowledge_candidates") or []:
-            claim_text = str(claim.get("claim") or "").strip()
-            evidence = str(claim.get("evidence") or "").strip()
-            quotes = [str(x).strip() for x in (claim.get("source_quotes") or []) if str(x).strip()][:3]
-            evidence_detail = evidence
-            if quotes:
-                evidence_detail = "원문 근거 문장\n" + "\n".join(f"- {quote}" for quote in quotes) + "\n\n근거 요약\n" + evidence
-            if len(claim_text) < 8 or len(evidence) < 8:
-                continue
-            card = KnowledgeCard(
-                card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}",
-                title=_knowledge_candidate_title(claim, claim_text),
-                source_kind="external_paper",
-                claim=claim_text,
-                context=summary[:1200],
-                implication="",
-                source_excerpt=evidence_detail[:3200],
-                labels=list(profile.get("labels") or []),
-                evidence_level="provisional",
-                status="verified",
-                evidence_excerpt=evidence_detail[:1600],
-                conditions="",
-                limits=str(claim.get("limits") or ""),
-                provenance={
-                    "source_name": str(shelf.get("title") or "paper"),
-                    "paper_id": paper_id,
-                    "research_question_id": rq_id,
-                    "intent_id": intent_id,
-                    "grounding": "m1_single_paper_review",
-                },
-                origin_links=list(shelf.get("origin_links") or []),
-            ).model_dump(mode="json")
-            case_id = ledger.create_case("research", f"Paper knowledge candidate: {str(shelf.get('title') or '')[:72]}")
-            req = ledger.record(
-                case_id,
-                "decision_request",
-                "m1",
-                ["researcher"],
-                "knowledge_card",
-                {
-                    "title": f"논문 지식카드 후보 승인: {card['title']}",
-                    "card": card,
-                    "paper_id": paper_id,
-                    "intent_id": intent_id,
-                    "rq_id": rq_id,
-                    "research_question": rq_text,
-                    "review_note": review_note,
-                    "next_action": "승인 시 연구질문에 연결된 지식카드로 등록합니다.",
-                },
-                subject_id=card["card_id"],
-            )
-            request_ids.append(req)
-            cards.append(card)
+    claims = [dict(x) for x in (reviewed.get("knowledge_candidates") or []) if isinstance(x, Mapping)]
+    matched, _stale = _reconcile_pending_knowledge_requests(
+        ledger, intent_id=intent_id, paper_id=paper_id, claims=claims
+    )
+    request_ids: list[str] = []
+    cards: list[dict[str, Any]] = []
+    for claim_index, claim in enumerate(claims):
+        claim_text = str(claim.get("claim") or "").strip()
+        evidence = str(claim.get("evidence") or "").strip()
+        quotes = _normalized_candidate_quotes(claim.get("source_quotes"))
+        if len(claim_text) < 8 or len(evidence) < 8:
+            continue
+        prior = matched.get(claim_index)
+        if prior is not None:
+            request_ids.append(str(prior.get("phenomenon_id") or ""))
+            prior_card = (prior.get("payload") or {}).get("card")
+            if isinstance(prior_card, Mapping):
+                cards.append(dict(prior_card))
+            continue
+        card = KnowledgeCard(
+            card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}",
+            title=_knowledge_candidate_title(claim, claim_text),
+            source_kind="external_paper",
+            claim=claim_text,
+            context="",
+            implication="",
+            source_excerpt=evidence[:3200],
+            source_quotes=quotes,
+            labels=list(profile.get("labels") or []),
+            evidence_level="provisional",
+            status="verified",
+            evidence_excerpt=evidence[:1600],
+            conditions="",
+            limits=str(claim.get("limits") or ""),
+            provenance={
+                "source_name": str(shelf.get("title") or "paper"),
+                "paper_id": paper_id,
+                "research_question_id": rq_id,
+                "intent_id": intent_id,
+                "grounding": "m1_single_paper_review",
+            },
+            origin_links=list(shelf.get("origin_links") or []),
+        ).model_dump(mode="json")
+        case_id = ledger.create_case("research", f"Paper knowledge candidate: {str(shelf.get('title') or '')[:72]}")
+        req = ledger.record(
+            case_id,
+            "decision_request",
+            "m1",
+            ["researcher"],
+            "knowledge_card",
+            {
+                "title": f"논문 지식카드 후보 승인: {card['title']}",
+                "card": card,
+                "paper_id": paper_id,
+                "intent_id": intent_id,
+                "rq_id": rq_id,
+                "research_question": rq_text,
+                "review_note": review_note,
+                "next_action": "승인 시 연구질문에 연결된 지식카드로 등록합니다.",
+            },
+            subject_id=card["card_id"],
+        )
+        request_ids.append(req)
+        cards.append(card)
     return {
         "paper_id": paper_id,
         "summary": summary,
@@ -195,6 +227,9 @@ def apply_paper_review_response(ledger: Ledger, task: Mapping[str, Any], respons
         paper_id=paper_id,
         candidate=candidate,
         response=response,
+        # Historical durable tasks may still contain the pre-1-page response
+        # contract. Keep them recoverable without weakening new inline rounds.
+        allow_legacy_summary=True,
     )
     task_id = str(task.get("phenomenon_id") or "")
     if task_id and str(task.get("status") or "") == "ready":

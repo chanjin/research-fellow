@@ -295,6 +295,18 @@ def build_attention_queue(
     """
     items: list[AttentionItem] = []
 
+    # Materialize suspended workflow projections once. A current workflow
+    # checkpoint is the authoritative human boundary for its literature round;
+    # legacy durable paper_first_review tasks from that same round stay in the
+    # ledger for audit/recovery but must not reappear as competing Attention.
+    waiting_workflow_items = [
+        item
+        for result in list(waiting_workflows)
+        if (item := attention_from_waiting_workflow(result, ledger)) is not None
+    ]
+    active_round_ids = {item.round_id for item in waiting_workflow_items if item.round_id}
+    completed_literature_intents = _completed_literature_intent_ids(ledger)
+
     for request in pending_researcher_decision_requests(ledger):
         # Attention is a read model: enrich knowledge-card decisions with the
         # paper x research-question interpretation without copying it into the
@@ -310,6 +322,7 @@ def build_attention_queue(
             paper = ledger.shelf_paper(paper_id) if paper_id else None
             payload["review_summary"] = str((analysis or {}).get("summary") or "")
             payload["review_paper_title"] = str((paper or {}).get("title") or "")
+            payload["publication_year"] = str((paper or {}).get("publication_year") or payload.get("publication_year") or "")
             request_view["payload"] = payload
         source_id = str(request_view.get("phenomenon_id") or request_view.get("request_id") or "")
         intent_id = str(payload.get("intent_id") or "").strip()
@@ -357,6 +370,8 @@ def build_attention_queue(
             continue
         payload = dict(task.get("payload") or {})
         intent_id = str(payload.get("intent_id") or "").strip()
+        if intent_id and (intent_id in active_round_ids or intent_id in completed_literature_intents):
+            continue
         rq_id, rq_title, round_no = _rq_for_intent(ledger, intent_id)
         paper = dict(payload.get("paper") or {})
         paper_title = str(paper.get("title") or payload.get("title") or "Paper").strip()
@@ -371,20 +386,10 @@ def build_attention_queue(
             rq_id=rq_id,
         ))
 
-    for result in waiting_workflows:
-        item = attention_from_waiting_workflow(result, ledger)
-        if item is not None:
-            items.append(item)
+    items.extend(waiting_workflow_items)
 
-    # A suspended workflow checkpoint is the authoritative current boundary for
-    # a literature round. Once such a checkpoint exists, historical run/failure
-    # projections from the same Intent must not keep showing an older Input.
-    active_round_ids = {
-        item.round_id for item in items
-        if item.source_type == "workflow_interaction" and item.round_id
-    }
-
-    completed_literature_intents = _completed_literature_intent_ids(ledger)
+    # The sets above are reused below to suppress historical run/failure
+    # projections from an active or already-completed literature round.
     for index, exception in enumerate(exceptions):
         intent_id = str(exception.get("intent_id") or "").strip()
         if intent_id and intent_id in active_round_ids:

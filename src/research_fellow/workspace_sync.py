@@ -32,6 +32,7 @@ SYNC_TABLES = (
     "paper_analyses",
     "paper_research_analyses",
     "paper_question_analyses",
+    "paper_full_texts",
     "paper_card_links",
     "paper_reading_questions",
     "paper_reading_reviews",
@@ -654,7 +655,7 @@ class AllWorkspacesSync:
         local_db = self.data_dir / str(profile.db_filename)
         server_workspace = self.server_root / "workspaces" / key
         server_db = server_workspace / str(profile.server_db_filename)
-        local_assets = self.data_dir / "workspaces" / key / "paper_shelf"
+        local_assets = self.data_dir / "paper_pdfs" / key
         server_assets = server_workspace / "assets" / "paper_shelf"
         return local_db, server_db, local_assets, server_assets
 

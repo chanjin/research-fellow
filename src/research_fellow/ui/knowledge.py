@@ -33,7 +33,10 @@ def _render_knowledge_state(st: Any, snapshot: Mapping[str, Any], *, english: bo
             st.markdown(f"**{_short(card.get('title', ''), 140)}**")
             st.caption(" · ".join(labels))
             if card.get("claim"):
-                st.write(_short(card.get("claim", ""), 240))
+                st.write(_short(card.get("claim", ""), 520))
+            source_meta = " · ".join(x for x in [str(card.get("source_name") or "").strip(), str(card.get("publication_year") or "").strip()[:4]] if x)
+            if source_meta:
+                st.caption(("Source · " if english else "출처 · ") + source_meta)
             st.caption(
                 ("supporting evidence: " if english else "추가 근거: ")
                 + str(int(card.get("supporting_evidence_count") or 0))

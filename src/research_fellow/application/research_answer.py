@@ -29,10 +29,133 @@ def relevant_cards_for_rq(cards: list[dict[str, Any]], rq_id: str) -> list[dict[
 
 
 def latest_research_answer(ledger: Ledger, rq_id: str) -> dict[str, Any] | None:
-    for item in ledger.phenomena(type_="advice_report"):
-        if item.get("subject_type") == "research_question_response" and str(item.get("subject_id") or "") == rq_id:
-            return item
-    return None
+    items = [
+        item for item in ledger.phenomena(type_="advice_report")
+        if item.get("subject_type") == "research_question_response" and str(item.get("subject_id") or "") == rq_id
+    ]
+    if not items:
+        return None
+    return max(
+        items,
+        key=lambda item: (
+            int((item.get("payload") or {}).get("answer_version") or 0),
+            str(item.get("created_at") or ""),
+        ),
+    )
+
+
+def latest_research_answer_approval(ledger: Ledger, rq_id: str) -> dict[str, Any] | None:
+    items = [
+        item for item in ledger.phenomena(type_="advisory_exchange")
+        if item.get("subject_type") == "research_answer_approval" and str(item.get("subject_id") or "") == rq_id
+    ]
+    if not items:
+        return None
+    return max(
+        items,
+        key=lambda item: (
+            int((item.get("payload") or {}).get("answer_version") or 0),
+            str(item.get("created_at") or ""),
+        ),
+    )
+
+
+def research_answer_is_approved(ledger: Ledger, rq_id: str) -> bool:
+    latest = latest_research_answer(ledger, rq_id)
+    approval = latest_research_answer_approval(ledger, rq_id)
+    if latest is None or approval is None:
+        return False
+    return str((approval.get("payload") or {}).get("answer_id") or "") == str(latest.get("phenomenon_id") or "")
+
+
+def save_research_answer_revision(ledger: Ledger, rq_id: str, markdown_text: str) -> dict[str, Any]:
+    """Persist a researcher-edited Markdown answer as the next answer version."""
+    text = str(markdown_text or "").strip()
+    if not text:
+        raise ValueError("답변 문서는 비어 있을 수 없습니다.")
+    latest = latest_research_answer(ledger, rq_id)
+    if latest is None:
+        raise ValueError("수정할 연구질문 답변 Draft가 없습니다.")
+    payload = dict(latest.get("payload") or {})
+    if text == str(payload.get("report") or "").strip():
+        return {"status": "unchanged", "answer_id": str(latest.get("phenomenon_id") or ""), "answer_version": int(payload.get("answer_version") or 1)}
+    version = int(payload.get("answer_version") or 1) + 1
+    previous_id = str(latest.get("phenomenon_id") or "")
+    revised_payload = {
+        **payload,
+        "title": f"Research Question 답변 v{version}",
+        "report": text,
+        "answer_mode": "researcher_revision",
+        "answer_version": version,
+        "previous_answer_id": previous_id,
+    }
+    answer_id = ledger.record(
+        str(latest.get("case_id") or ledger.create_case("research", f"Research answer revision: {rq_id}")),
+        "advice_report", "researcher", ["m2"], "research_question_response", revised_payload,
+        subject_id=rq_id, status="completed",
+    )
+    ledger.add_research_question_change(rq_id, "answer_draft_revised", f"연구자가 답변 Draft를 수정하여 v{version}으로 저장했습니다.")
+    return {"status": "saved", "answer_id": answer_id, "answer_version": version}
+
+
+def approve_research_answer_draft(
+    ledger: Ledger,
+    rq_id: str,
+    *,
+    markdown_text: str,
+    next_question: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """Approve the latest answer and optionally refine the RQ for the next round."""
+    saved = save_research_answer_revision(ledger, rq_id, markdown_text)
+    latest = latest_research_answer(ledger, rq_id)
+    if latest is None:
+        raise ValueError("승인할 연구질문 답변 Draft가 없습니다.")
+    rq = ledger.research_question(rq_id) or {}
+    current_question = str(rq.get("question") or "").strip()
+    refined = str(next_question or "").strip()
+    if refined and refined != current_question:
+        ledger.refine_research_question(
+            rq_id, refined,
+            change_reason="승인된 Research Answer를 바탕으로 다음 문헌 라운드의 연구질문을 보완함",
+        )
+        current_question = refined
+    payload = dict(latest.get("payload") or {})
+    prior = latest_research_answer_approval(ledger, rq_id)
+    if prior is not None and str((prior.get("payload") or {}).get("answer_id") or "") == str(latest.get("phenomenon_id") or ""):
+        return {
+            "status": "already_approved",
+            "answer_id": str(latest.get("phenomenon_id") or ""),
+            "answer_version": int(payload.get("answer_version") or 1),
+            "question": current_question,
+        }
+    approved_intents = ledger.research_question_intents(rq_id)
+    approved_intent_id = str((approved_intents[0] if approved_intents else {}).get("intent_id") or "")
+    approval_id = ledger.record(
+        str(latest.get("case_id") or ledger.create_case("research", f"Research answer approval: {rq_id}")),
+        "advisory_exchange", "researcher", ["m2"], "research_answer_approval",
+        {
+            "rq_id": rq_id,
+            "answer_id": str(latest.get("phenomenon_id") or ""),
+            "answer_version": int(payload.get("answer_version") or 1),
+            "approved_question": current_question,
+            "approved_intent_id": approved_intent_id,
+            "note": str(note or "").strip(),
+        },
+        subject_id=rq_id, status="completed",
+    )
+    ledger.add_research_question_change(
+        rq_id, "answer_draft_approved",
+        f"연구자가 Research Answer v{int(payload.get('answer_version') or 1)}을 승인했습니다. 다음 문헌 라운드 진입이 가능합니다.",
+    )
+    return {
+        **saved,
+        "status": "approved",
+        "approval_id": approval_id,
+        "answer_id": str(latest.get("phenomenon_id") or ""),
+        "answer_version": int(payload.get("answer_version") or 1),
+        "question": current_question,
+    }
 
 
 def evidence_fingerprint(bundle: dict[str, Any]) -> str:

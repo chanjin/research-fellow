@@ -160,6 +160,7 @@ def render_research_workspace(
     request_additional_literature: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     request_initial_answer: Callable[[str], Mapping[str, Any]] | None = None,
     request_answer_update: Callable[[str], Mapping[str, Any]] | None = None,
+    review_answer_draft: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     english: bool = True,
 ) -> None:
     st.subheader("Research" if english else "연구")
@@ -332,6 +333,33 @@ def render_research_workspace(
             st.markdown(("**Current:** " if english else "**현재 상태:** ") + state_summary)
             st.caption(" · ".join(progress_bits))
 
+            # Research-question versions are durable researcher inputs.  Show the
+            # latest one explicitly instead of letting a refined next-round RQ
+            # disappear into the card title / internal version history.
+            rq_version = int(item.get("question_version") or 1)
+            st.markdown("**Inputs**")
+            with st.container(border=True):
+                input_label = (
+                    f"Research Question v{rq_version}" if english else f"연구질문 v{rq_version}"
+                )
+                if rq_version > 1:
+                    input_label += " · Next-round input" if english else " · 다음 라운드 입력"
+                st.caption(input_label)
+                st.write(str(item.get("question") or ""))
+                change_reason = str(item.get("question_change_reason") or "").strip()
+                if change_reason and rq_version > 1:
+                    st.caption(("Why it changed: " if english else "변경 사유: ") + change_reason)
+
+            question_versions = [dict(x) for x in (item.get("question_versions") or [])]
+            if len(question_versions) > 1:
+                with st.expander("Research-question history" if english else "이전 연구질문 보기", expanded=False):
+                    for version_item in reversed(question_versions[:-1]):
+                        version_no = int(version_item.get("version_no") or 1)
+                        st.markdown(f"**v{version_no}** · {str(version_item.get('question') or '')}")
+                        reason = str(version_item.get("change_reason") or "").strip()
+                        if reason:
+                            st.caption(reason)
+
             attention_count = int(item.get("attention_item_count") or 0)
             if attention_count:
                 category_bits = []
@@ -365,10 +393,16 @@ def render_research_workspace(
             action_left, action_mid, action_right = st.columns(3)
             followup_open_key = f"rq-followup-direction-open-{rq_id}"
             if request_additional_literature is not None:
+                followup_ready = bool(item.get("additional_literature_ready"))
                 if action_left.button(
                     "Additional literature" if english else "추가 문헌 조사",
                     key=f"rq-additional-literature-{rq_id}",
                     use_container_width=True,
+                    disabled=not followup_ready,
+                    help=(
+                        "Enabled after the current literature round is complete and the latest Research Answer draft is researcher-approved." if english else
+                        "현재 문헌 라운드의 논문 해석·Knowledge Card 결정을 마치고 최신 Research Answer Draft를 승인한 뒤 활성화됩니다."
+                    ),
                 ):
                     st.session_state[followup_open_key] = True
                     st.rerun()
@@ -425,6 +459,127 @@ def render_research_workspace(
                     except ValueError as error:
                         st.error(str(error))
 
+            if item.get("answer_draft") and review_answer_draft is not None:
+                st.divider()
+                version = int(item.get("answer_version") or 1)
+                approved = bool(item.get("answer_draft_approved"))
+                status_text = ("Approved" if english else "승인됨") if approved else ("Review required" if english else "승인 필요")
+                st.markdown((f"### Research Answer v{version} · {status_text}" if english else f"### 연구질문 답변 v{version} · {status_text}"))
+                if approved:
+                    st.success(
+                        "The latest draft is approved. You can start the next literature round." if english else
+                        "최신 Draft가 승인되었습니다. 다음 문헌 라운드를 시작할 수 있습니다."
+                    )
+                else:
+                    st.warning(
+                        "Review and approve the latest draft before starting Round 2." if english else
+                        "Round 2로 넘어가기 전에 최신 Draft를 검토하고 승인하세요."
+                    )
+                with st.expander(
+                    (f"View latest Draft v{version}" if english else f"최신 Draft v{version} 보기"),
+                    expanded=False,
+                ):
+                    st.markdown(str(item.get("answer_draft") or ""))
+
+                    from research_fellow.application.research_answer_export import answer_markdown_bytes, answer_html_bytes, answer_pdf_bytes
+                    export_title = str(item.get("question") or f"Research Answer v{version}")
+                    base_name = f"research-answer-{rq_id}-v{version}"
+                    export_cols = st.columns(3)
+                    export_cols[0].download_button(
+                        "Markdown" if english else "Markdown 내보내기",
+                        data=answer_markdown_bytes(str(item.get("answer_draft") or "")),
+                        file_name=f"{base_name}.md", mime="text/markdown; charset=utf-8",
+                        key=f"rq-answer-export-md-{rq_id}-{version}", use_container_width=True,
+                    )
+                    export_cols[1].download_button(
+                        "HTML" if english else "HTML 내보내기",
+                        data=answer_html_bytes(str(item.get("answer_draft") or ""), title=export_title),
+                        file_name=f"{base_name}.html", mime="text/html; charset=utf-8",
+                        key=f"rq-answer-export-html-{rq_id}-{version}", use_container_width=True,
+                    )
+                    try:
+                        pdf_data = answer_pdf_bytes(str(item.get("answer_draft") or ""), title=export_title)
+                    except Exception as error:
+                        export_cols[2].caption(("PDF export error: " if english else "PDF 생성 오류: ") + str(error))
+                    else:
+                        export_cols[2].download_button(
+                            "PDF" if english else "PDF 내보내기", data=pdf_data,
+                            file_name=f"{base_name}.pdf", mime="application/pdf",
+                            key=f"rq-answer-export-pdf-{rq_id}-{version}", use_container_width=True,
+                        )
+
+                previous_answers = list(item.get("previous_answer_versions") or [])
+                if previous_answers:
+                    with st.expander(
+                        (f"Previous draft versions ({len(previous_answers)})" if english else f"이전 Draft 버전 ({len(previous_answers)})"),
+                        expanded=False,
+                    ):
+                        for previous in previous_answers:
+                            previous_version = int(previous.get("answer_version") or 1)
+                            approval_suffix = (" · approved" if english else " · 승인됨") if previous.get("approved") else ""
+                            created_at = str(previous.get("created_at") or "").strip()
+                            meta = f"v{previous_version}{approval_suffix}"
+                            if created_at:
+                                meta += f" · {created_at}"
+                            st.markdown(f"**{meta}**")
+                            st.markdown(str(previous.get("report") or ""))
+                            if previous is not previous_answers[-1]:
+                                st.divider()
+
+                reopen_key = f"rq-answer-reopen-{rq_id}-{version}"
+                show_review_editor = not approved
+                if approved:
+                    if st.button(
+                        "Edit approved answer" if english else "승인본 수정하기",
+                        key=f"rq-answer-reopen-button-{rq_id}-{version}",
+                        type="secondary",
+                    ):
+                        st.session_state[reopen_key] = True
+                    show_review_editor = bool(st.session_state.get(reopen_key))
+                    if show_review_editor:
+                        st.info(
+                            "Saving an edit creates a new draft version that must be approved again." if english else
+                            "수정 내용을 저장하면 새 Draft 버전이 생성되며 다시 승인이 필요합니다."
+                        )
+
+                if show_review_editor:
+                    with st.expander(
+                        "Edit / approve draft" if english else "Draft 수정 · 승인",
+                        expanded=True,
+                    ):
+                        draft_review = render_interaction(
+                            st,
+                            "review_research_answer_draft",
+                            {
+                                "research_answer_review_context": {
+                                    "rq_id": rq_id,
+                                    "question": str(item.get("question") or ""),
+                                    "markdown": str(item.get("answer_draft") or ""),
+                                    "answer_version": version,
+                                    "approved": approved,
+                                }
+                            },
+                            key=f"rq-answer-review-{rq_id}-{version}",
+                        )
+                        if draft_review.submitted:
+                            try:
+                                resolution = dict(draft_review.values.get("research_answer_review_resolution") or {})
+                                outcome = dict(review_answer_draft(rq_id, resolution))
+                                action = str(resolution.get("action") or "")
+                                st.session_state.pop(reopen_key, None)
+                                if action == "approve":
+                                    st.session_state["research-action-flash"] = (
+                                        "Research Answer approved. The next literature round is now available." if english else
+                                        "Research Answer Draft를 승인했습니다. 이제 다음 문헌 라운드를 시작할 수 있습니다."
+                                    )
+                                else:
+                                    st.session_state["research-action-flash"] = (
+                                        "Edited Markdown draft saved." if english else "수정한 Markdown Draft를 저장했습니다."
+                                    )
+                                st.rerun()
+                            except ValueError as error:
+                                st.error(str(error))
+
             if request_additional_literature is not None and st.session_state.get(followup_open_key):
                 st.divider()
                 st.caption(
@@ -435,9 +590,6 @@ def render_research_workspace(
                 current_titles = [str(x) for x in item.get("direct_evidence_titles") or [] if str(x).strip()]
                 if current_titles:
                     st.caption(("Already collected for this RQ: " if english else "현재 RQ에서 이미 확보한 근거: ") + " · ".join(_short(x, 75) for x in current_titles[:6]))
-                if item.get("answer_draft"):
-                    st.markdown("**Current answer context**" if english else "**현재 연구결과 초안**")
-                    st.write(_short(str(item.get("answer_draft") or ""), 1200))
                 st.info(
                     "Submitting this form is the researcher approval boundary. Only after approval is a new M1 literature round created."
                     if english else
@@ -520,12 +672,8 @@ def render_research_workspace(
 
                 if item.get("answer_draft"):
                     version = int(item.get("answer_version") or 1)
-                    st.markdown((f"**Research answer v{version}**" if english else f"**연구질문 답변 v{version}**"))
-                    if item.get("answer_first_document"):
-                        st.markdown("**Direct-evidence summary**" if english else "**직접 근거 요약**")
-                        st.write(str(item.get("answer_first_document") or ""))
-                    st.markdown("**Final answer draft**" if english else "**최종 답변 초안**")
-                    st.write(str(item.get("answer_draft") or ""))
+                    approval_label = (("approved" if english else "승인됨") if item.get("answer_draft_approved") else ("pending" if english else "승인 필요"))
+                    st.caption((f"Research answer v{version} · Approval: {approval_label}" if english else f"연구질문 답변 v{version} · 승인 상태: {approval_label}"))
                     if item.get("answer_update_available"):
                         st.info(
                             "New literature or knowledge is available after this answer. You can update it." if english else

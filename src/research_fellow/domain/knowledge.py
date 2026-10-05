@@ -44,6 +44,9 @@ class KnowledgeCard(BaseModel):
     context: str = ""
     implication: str = ""
     source_excerpt: str = Field(default="", max_length=3200)
+    # Verbatim sentences from the source paper supporting this claim.
+    # Optional/defaulted for backward compatibility with existing approved cards.
+    source_quotes: list[str] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
     # These fields make approved cards retrievable as knowledge records rather
     # than as unstructured notes. Defaults preserve every existing JSONL card.

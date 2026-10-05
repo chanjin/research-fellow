@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 from research_fellow.application.dsl.interaction import interaction_contract
 from research_fellow.application.dsl.interaction_binding import interaction_binding
+from research_fellow.application.literature_discovery_sources import google_scholar_url
 @dataclass(frozen=True)
 class InteractionRenderResult:
     interaction_id: str
@@ -23,6 +24,47 @@ def _item_label(item: Any, field: str) -> str:
     if value is not None:
         return str(value)
     return str(item)
+
+
+def _citation_label(item: Mapping[str, Any]) -> str:
+    count = item.get("citation_count")
+    if count in (None, ""):
+        return ""
+    try:
+        rendered = f"{int(float(count)):,}"
+    except (TypeError, ValueError):
+        rendered = str(count).strip()
+    if not rendered:
+        return ""
+    source = str(item.get("citation_source") or "").strip()
+    return f"Citations {rendered}" + (f" · {source}" if source else "")
+
+
+def _paper_access_links(item: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Return deduplicated researcher-facing access links for a discovery candidate."""
+    abstract_url = str(item.get("abstract_url") or item.get("source_url") or item.get("url") or "").strip()
+    full_text_url = str(item.get("full_text_url") or "").strip()
+    pdf_url = str(item.get("pdf_url") or "").strip()
+    landing_url = str(item.get("landing_url") or "").strip()
+    specs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, url: str) -> None:
+        normalized = str(url or "").strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        specs.append((label, normalized))
+
+    add("초록 / 서지", abstract_url)
+    # When full_text_url is the same direct PDF, render one PDF button rather than
+    # two aliases for the same resource.
+    if full_text_url and full_text_url != pdf_url:
+        add("원문", full_text_url)
+    add("PDF", pdf_url or (full_text_url if full_text_url.lower().endswith(".pdf") else ""))
+    add("논문 페이지", landing_url)
+    add("Google Scholar", google_scholar_url(dict(item)))
+    return specs
 def _render_multi_select(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, key: str, profile: str) -> InteractionRenderResult:
     contract = interaction_contract(interaction_id); binding = interaction_binding(interaction_id, profile); renderer = binding.renderer
     input_name = contract.required_inputs[0]; output_name = contract.outputs[0]
@@ -42,15 +84,12 @@ def _render_multi_select(st: Any, interaction_id: str, inputs: Mapping[str, Any]
                 values = [value for value in values if value]
                 if values:
                     st.caption(" · ".join(values))
-                link = str(item.get("url") or item.get("source_url") or "").strip()
-                pdf_link = str(item.get("pdf_url") or "").strip()
-                links = []
-                if link:
-                    links.append(f"[원문]({link})")
-                if pdf_link and pdf_link != link:
-                    links.append(f"[PDF]({pdf_link})")
+                citation = _citation_label(item)
+                if citation:
+                    st.caption(citation)
+                links = _paper_access_links(item)
                 if links:
-                    st.markdown(" · ".join(links))
+                    st.markdown(" · ".join(f"[{label}]({url})" for label, url in links))
                 if index < len(items):
                     st.divider()
         selected_keys = st.multiselect("서재함에 보존할 항목", list(option_by_key), format_func=lambda value: _item_label(option_by_key[value], str(renderer["item_label"])), key=f"interaction-{key}-selection")
@@ -64,6 +103,43 @@ def _render_multi_select(st: Any, interaction_id: str, inputs: Mapping[str, Any]
         st.info(str(renderer["empty_label"]))
     return InteractionRenderResult(interaction_id, submitted, {output_name: selected})
 
+
+
+def _paper_review_prompt_stats(prompt: str) -> dict[str, int | bool]:
+    """Return compact UI stats without changing the prompt payload."""
+    text = str(prompt or "")
+    start_marker = "--- PAPER FULL TEXT START ---"
+    end_marker = "--- PAPER FULL TEXT END ---"
+    full_text_chars = 0
+    cursor = 0
+    while True:
+        start = text.find(start_marker, cursor)
+        if start < 0:
+            break
+        content_start = start + len(start_marker)
+        end = text.find(end_marker, content_start)
+        if end < 0:
+            break
+        full_text_chars += len(text[content_start:end].strip())
+        cursor = end + len(end_marker)
+    return {
+        "prompt_chars": len(text),
+        "full_text_chars": full_text_chars,
+        "has_full_text": full_text_chars > 0,
+    }
+
+
+def _render_paper_review_prompt_for_copy(st: Any, prompt: str, *, key: str) -> None:
+    """Keep very long review prompts out of the main UI while preserving one-click copy."""
+    stats = _paper_review_prompt_stats(prompt)
+    source_status = "원문 포함" if stats["has_full_text"] else "원문 없음"
+    st.caption(
+        f"{source_status} · 원문 블록 {int(stats['full_text_chars']):,}자 · "
+        f"전체 프롬프트 {int(stats['prompt_chars']):,}자"
+    )
+    with st.expander("논문 해석 프롬프트 · 펼쳐서 복사", expanded=False):
+        st.caption("오른쪽 위 복사 버튼을 누르면 전체 프롬프트가 그대로 복사됩니다.")
+        st.code(prompt, language=None)
 
 
 def _render_sequential_paper_review(
@@ -114,6 +190,60 @@ def _render_sequential_paper_review(
         return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
 
     item = items[index]
+    # While a paper review is active, pin the exact candidate that produced the
+    # prompt. The workflow candidate list can be re-projected/reordered on a
+    # Streamlit rerun, so `items[index]` is not a stable identity.
+    active_candidate = active.get('candidate') if isinstance(active.get('candidate'), Mapping) else None
+    if int(active.get('index', -1)) == index and active_candidate:
+        item = dict(active_candidate)
+
+    # Durable projection: reconstruct per-paper progress from the paper shelf and
+    # RQ-specific analysis instead of treating Streamlit session_state as the
+    # business source of truth.  A rerun/browser refresh therefore skips papers
+    # already reviewed for this RQ and can resume a previously registered paper.
+    durable_state: dict[str, Any] = {}
+    if callable(item_action):
+        try:
+            projected = item_action(dict(item), 'review_state')
+            if isinstance(projected, Mapping):
+                durable_state = dict(projected)
+        except Exception:
+            durable_state = {}
+    fresh_review_result_visible = (
+        int(active.get('index', -1)) == index
+        and isinstance(active.get('review_result'), Mapping)
+        and bool(active.get('review_result'))
+    )
+    if durable_state.get('reviewed') and not fresh_review_result_visible:
+        paper_id = str(durable_state.get('paper_id') or '')
+        already_selected = any(str(x.get('paper_id') or '') == paper_id for x in selected if isinstance(x, Mapping))
+        if not already_selected:
+            chosen = dict(item)
+            chosen['paper_id'] = paper_id
+            chosen['paper_summary'] = str(durable_state.get('summary') or '')
+            chosen['knowledge_request_ids'] = list(durable_state.get('knowledge_request_ids') or [])
+            chosen['knowledge_candidates'] = list(durable_state.get('knowledge_cards') or [])
+            selected.append(chosen)
+            st.session_state[selected_key] = selected
+        reviewed.append({'source_id': str(item.get('source_id') or ''), 'decision': 'reuse_existing_review'})
+        st.session_state[reviewed_key] = reviewed
+        st.session_state[index_key] = index + 1
+        st.session_state.pop(active_key, None)
+        st.rerun()
+
+    if not active and durable_state.get('paper_id') and durable_state.get('linked_to_rq'):
+        active = {
+            'index': index,
+            'candidate': dict(item),
+            'paper_id': str(durable_state.get('paper_id') or ''),
+            'prompt': str(durable_state.get('review_prompt') or ''),
+            'full_text_url': str(item.get('full_text_url') or ''),
+            'full_text_extraction_note': str(durable_state.get('full_text_extraction_note') or ''),
+            'full_text_acquisition_error': '' if durable_state.get('full_text_ready') else '저장된 원문 텍스트가 없습니다.',
+            'local_pdf_name': str(durable_state.get('full_text_source_name') or '') if str(durable_state.get('full_text_source_type') or '') == 'uploaded_pdf' else '',
+        }
+        st.session_state[active_key] = active
+
     title = str(item.get('title') or 'Untitled paper')
     st.caption(f"논문 {index + 1} / {len(items)}")
     st.markdown(f"### {title}")
@@ -138,15 +268,20 @@ def _render_sequential_paper_review(
     abstract_url = str(item.get('abstract_url') or item.get('source_url') or item.get('url') or '').strip()
     full_text_url = str(item.get('full_text_url') or '').strip()
     pdf_url = str(item.get('pdf_url') or '').strip()
-    link_cols = st.columns(3)
-    if abstract_url:
-        link_cols[0].link_button('초록 / 서지', abstract_url, use_container_width=True)
-    if full_text_url:
-        link_cols[1].link_button('원문 URL', full_text_url, use_container_width=True)
-    if pdf_url:
-        link_cols[2].link_button('PDF', pdf_url, use_container_width=True)
-    if not any((abstract_url, full_text_url, pdf_url)):
-        st.warning('검증된 논문 URL이 없습니다.')
+    citation = _citation_label(item)
+    if citation:
+        st.caption(citation)
+    caution = str(item.get('caution') or '').strip()
+    if caution:
+        st.caption(f"주의 · {caution}")
+    access_links = _paper_access_links(item)
+    verified_links = [(label, url) for label, url in access_links if label != 'Google Scholar']
+    if not verified_links:
+        st.warning('검증된 논문 URL이 없습니다. Google Scholar에서 제목으로 찾아보세요.')
+    if access_links:
+        link_cols = st.columns(len(access_links))
+        for col, (label, url) in zip(link_cols, access_links):
+            col.link_button(label, url, use_container_width=True)
 
     edited_full_text = st.text_input(
         '원문 URL 직접 보정',
@@ -160,6 +295,34 @@ def _render_sequential_paper_review(
     if active and int(active.get('index', -1)) == index:
         paper_id = str(active.get('paper_id') or '')
         st.success('서재함에 연결되었습니다. 이제 이 연구질문 관점에서 논문을 해석합니다.')
+        extraction_note = str(active.get('full_text_extraction_note') or '').strip()
+        acquisition_error = str(active.get('full_text_acquisition_error') or '').strip()
+        if extraction_note:
+            st.caption(f'Full-text source · {extraction_note}')
+        if acquisition_error and not active.get('prompt'):
+            st.warning(
+                '원문 텍스트를 자동으로 확보하지 못했습니다. 원문 URL을 보정해 다시 추출하거나 로컬 PDF를 연결해 주세요.\n\n'
+                + acquisition_error
+            )
+            if st.button('원문 URL에서 텍스트 다시 추출', key=f"interaction-{key}-paper-refresh-fulltext-{index}"):
+                candidate = dict(item)
+                candidate['paper_id'] = paper_id
+                candidate['full_text_url'] = edited_full_text
+                try:
+                    refreshed = item_action(candidate, 'refresh_full_text') if callable(item_action) else {}
+                except Exception as error:
+                    st.error(f"원문 텍스트 추출에 실패했습니다: {error}")
+                else:
+                    active['full_text_url'] = str((refreshed or {}).get('full_text_url') or edited_full_text)
+                    pinned = dict(active.get('candidate') or item)
+                    pinned['full_text_url'] = active['full_text_url']
+                    pinned['paper_id'] = paper_id
+                    active['candidate'] = pinned
+                    active['full_text_extraction_note'] = str((refreshed or {}).get('full_text_extraction_note') or '')
+                    active['full_text_acquisition_error'] = ''
+                    active['prompt'] = str((refreshed or {}).get('review_prompt') or '')
+                    st.session_state[active_key] = active
+                    st.success('원문 텍스트를 다시 추출하고 논문 해석 프롬프트를 갱신했습니다.')
         local_pdf = st.file_uploader(
             '로컬 PDF를 원문으로 연결',
             type=['pdf'],
@@ -177,11 +340,16 @@ def _render_sequential_paper_review(
                 st.error(f"로컬 PDF 연결에 실패했습니다: {error}")
             else:
                 active['local_pdf_name'] = local_pdf.name
+                pinned = dict(active.get('candidate') or item)
+                pinned['paper_id'] = paper_id
+                active['candidate'] = pinned
                 active['local_pdf_path'] = str((attached or {}).get('pdf_path') or '')
                 active['full_text_url'] = str((attached or {}).get('full_text_url') or active.get('full_text_url') or '')
                 active['prompt'] = str((attached or {}).get('review_prompt') or active.get('prompt') or '')
+                active['full_text_extraction_note'] = str((attached or {}).get('full_text_extraction_note') or '')
+                active['full_text_acquisition_error'] = ''
                 st.session_state[active_key] = active
-                st.rerun()
+                st.success('PDF를 저장하고 원문 텍스트를 추출했습니다. 아래의 갱신된 프롬프트를 사용하세요.')
         if active.get('local_pdf_name'):
             st.caption(f"Full-text source · local PDF · {active.get('local_pdf_name')}")
             local_path = str(active.get('local_pdf_path') or '')
@@ -198,20 +366,30 @@ def _render_sequential_paper_review(
                     )
         prompt = str(active.get('prompt') or '').strip()
         if prompt:
-            st.caption('외부 LLM에 아래 Prompt를 전달하고 결과 JSON을 붙여넣으세요.')
-            st.code(prompt, language=None)
+            st.caption('외부 LLM에 프롬프트를 그대로 붙여넣고 결과 JSON을 아래에 붙여넣으세요.')
+            _render_paper_review_prompt_for_copy(st, prompt, key=f"interaction-{key}-paper-review-prompt-{index}")
+        review_ready = bool(prompt)
         response = st.text_area(
             'LLM 응답 붙여넣기',
             value=str(active.get('response') or ''),
             height=260,
             key=f"interaction-{key}-paper-review-response-{index}",
+            disabled=not review_ready,
         )
         if not active.get('review_result'):
-            if st.button('논문 해석 · Knowledge Card 후보 생성', type='primary', key=f"interaction-{key}-paper-apply-review-{index}"):
+            if st.button(
+                '논문 해석 · Knowledge Card 후보 생성',
+                type='primary',
+                key=f"interaction-{key}-paper-apply-review-{index}",
+                disabled=not review_ready,
+            ):
                 if not response.strip():
                     st.error('LLM 응답을 붙여넣어 주세요.')
                 else:
-                    enriched = dict(item)
+                    # Apply the pasted response to the exact candidate that
+                    # generated the prompt, never to a re-projected item that now
+                    # happens to occupy the same list index.
+                    enriched = dict(active.get('candidate') or item)
                     enriched['paper_id'] = paper_id
                     enriched['full_text_url'] = str(active.get('full_text_url') or edited_full_text)
                     enriched['review_response'] = response
@@ -230,17 +408,30 @@ def _render_sequential_paper_review(
             if paper_summary:
                 st.markdown('#### Summary')
                 st.write(paper_summary)
+            reviewed_result = dict(result.get('reviewed') or {})
+            review_note = str(reviewed_result.get('review_note') or '').strip()
+            if review_note:
+                st.markdown('#### Review note')
+                st.write(review_note)
             cards = list(result.get('knowledge_cards') or [])
+            source_title = str((active.get('candidate') or item).get('title') or '').strip()
+            source_year = str((active.get('candidate') or item).get('publication_year') or (active.get('candidate') or item).get('published') or '').strip()[:4]
+            source_meta = ' · '.join(x for x in [source_title, source_year] if x)
+            if source_meta:
+                st.caption('출처 논문 · ' + source_meta)
             st.markdown(f"#### Knowledge Card 후보 · {len(cards)}건")
             if not cards:
                 st.caption('생성된 Knowledge Card 후보가 없습니다.')
             for card_index, card in enumerate(cards, start=1):
                 with st.container(border=True):
-                    st.markdown(f"**{card_index}. {card.get('title') or 'Untitled'}**")
+                    card_title = str(card.get('title') or '').strip()
+                    if not card_title:
+                        card_title = str(card.get('claim') or '').strip()[:72] or 'Untitled'
+                    st.markdown(f"**{card_index}. {card_title}**")
                     if card.get('claim'):
                         st.markdown(f"**Claim**  \n{card.get('claim')}")
-                    if card.get('evidence_excerpt'):
-                        st.markdown(f"**Evidence**  \n{card.get('evidence_excerpt')}")
+                    if card.get('evidence_excerpt') or card.get('source_excerpt') or card.get('source_quotes'):
+                        _render_knowledge_evidence(st, card.get('evidence_excerpt') or card.get('source_excerpt'), card.get('source_quotes'))
                     if card.get('limits'):
                         st.markdown(f"**Limits**  \n{card.get('limits')}")
                     labels = list(card.get('labels') or [])
@@ -248,7 +439,7 @@ def _render_sequential_paper_review(
                         st.caption('Labels · ' + ' · '.join(str(x) for x in labels))
             st.caption('이 후보들은 읽기 전용입니다. 승인·보류·거절은 Attention > Decisions에서 진행합니다.')
             if st.button('이 논문 검토 완료 · 다음', type='primary', key=f"interaction-{key}-paper-reviewed-next-{index}"):
-                chosen = dict(item)
+                chosen = dict(active.get('candidate') or item)
                 chosen['paper_id'] = paper_id
                 chosen['full_text_url'] = str(active.get('full_text_url') or edited_full_text)
                 chosen['paper_summary'] = paper_summary
@@ -281,7 +472,15 @@ def _render_sequential_paper_review(
             st.error('서재함 논문 ID를 확인하지 못했습니다.')
             return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
         prompt = str((persisted or {}).get('review_prompt') or '') if isinstance(persisted, Mapping) else ''
-        st.session_state[active_key] = {'index': index, 'paper_id': paper_id, 'prompt': prompt, 'full_text_url': edited_full_text}
+        st.session_state[active_key] = {
+            'index': index,
+            'candidate': dict(updated),
+            'paper_id': paper_id,
+            'prompt': prompt,
+            'full_text_url': edited_full_text,
+            'full_text_extraction_note': str((persisted or {}).get('full_text_extraction_note') or ''),
+            'full_text_acquisition_error': str((persisted or {}).get('full_text_acquisition_error') or ''),
+        }
         st.rerun()
     if skip:
         reviewed.append({'source_id': str(item.get('source_id') or ''), 'decision': 'exclude'})
@@ -316,6 +515,45 @@ def _render_confirm(st: Any, interaction_id: str, inputs: Mapping[str, Any], *, 
 
 
 
+def _split_knowledge_evidence(value: object) -> tuple[str, list[str]]:
+    text = str(value or "").strip()
+    if not text:
+        return "", []
+    quote_marker = "원문 근거 문장\n"
+    summary_marker = "\n\n근거 요약\n"
+    if text.startswith(quote_marker) and summary_marker in text:
+        quote_block, summary = text[len(quote_marker):].split(summary_marker, 1)
+        quotes: list[str] = []
+        for line in quote_block.splitlines():
+            item = line.strip()
+            if item.startswith("-"):
+                item = item[1:].strip()
+            if item and item not in quotes:
+                quotes.append(item)
+        return summary.strip(), quotes[:3]
+    return text, []
+
+
+def _render_knowledge_evidence(st: Any, value: object, source_quotes: object = None) -> None:
+    evidence, legacy_quotes = _split_knowledge_evidence(value)
+    quotes: list[str] = []
+    for quote in source_quotes or []:
+        text = str(quote or "").strip()
+        if text and text not in quotes:
+            quotes.append(text)
+        if len(quotes) >= 3:
+            break
+    if not quotes:
+        quotes = legacy_quotes
+    if evidence:
+        st.markdown("**Evidence**")
+        st.write(evidence)
+    if quotes:
+        st.markdown("**Source quotes**")
+        for quote in quotes:
+            st.markdown(f"> {quote}")
+
+
 def _render_knowledge_card_decision(
     st: Any,
     interaction_id: str,
@@ -333,10 +571,13 @@ def _render_knowledge_card_decision(
     if rq:
         st.caption(f"Research Question · {rq}")
 
-    title = str(card.get("title") or payload.get("title") or "지식카드 후보").strip()
-    st.markdown(f"### {title}")
-
     claim = str(card.get("claim") or "").strip()
+    title = str(card.get("title") or "").strip()
+    if not title:
+        title = claim[:72].strip() or str(payload.get("title") or "지식카드 후보").strip()
+    st.markdown("**Title**")
+    st.write(title)
+
     if claim:
         st.markdown("**Claim**")
         st.write(claim)
@@ -351,10 +592,10 @@ def _render_knowledge_card_decision(
         st.markdown("**Implication**")
         st.write(implication)
 
-    evidence = str(card.get("evidence_excerpt") or card.get("source_excerpt") or "").strip()
-    if evidence:
-        st.markdown("**Evidence**")
-        st.write(evidence)
+    evidence = card.get("evidence_excerpt") or card.get("source_excerpt")
+    source_quotes = card.get("source_quotes")
+    if evidence or source_quotes:
+        _render_knowledge_evidence(st, evidence, source_quotes)
 
     conditions = str(card.get("conditions") or "").strip()
     if conditions:
@@ -372,8 +613,9 @@ def _render_knowledge_card_decision(
 
     provenance = card.get("provenance") if isinstance(card.get("provenance"), Mapping) else {}
     source_name = str(provenance.get("source_name") or "").strip()
-    if source_name:
-        st.caption(f"Source · {source_name}")
+    source_year = str(provenance.get("publication_year") or payload.get("publication_year") or "").strip()[:4]
+    if source_name or source_year:
+        st.caption("Source · " + " · ".join(x for x in [source_name, source_year] if x))
 
     note = st.text_area("연구자 의견 (선택)", key=f"interaction-{key}-comment", height=80)
     c1, c2, c3 = st.columns(3)
@@ -453,6 +695,48 @@ def _render_review_form(st: Any, interaction_id: str, inputs: Mapping[str, Any],
     renderer = binding.renderer
     variant = str(renderer.get("variant") or "")
     output_name = contract.outputs[0]
+    if variant == "research_answer_draft":
+        context = dict(inputs.get("research_answer_review_context") or {})
+        markdown_text = str(context.get("markdown") or "")
+        current_question = str(context.get("question") or "")
+        approved = bool(context.get("approved"))
+        with st.form(f"interaction-{key}"):
+            st.markdown(f"**{renderer['title']}**")
+            if renderer.get("help"):
+                st.caption(str(renderer["help"]))
+            if approved:
+                st.success("현재 저장된 최신 Draft는 연구자 승인 상태입니다. 내용을 다시 수정해 저장하면 재승인이 필요합니다.")
+            else:
+                st.info("Draft를 검토·수정한 뒤 승인하세요. 승인 후에만 다음 문헌 라운드를 시작할 수 있습니다.")
+            edited = st.text_area(
+                "Markdown Draft", value=markdown_text, height=520,
+                key=f"interaction-{key}-markdown",
+                help="LLM 출력 형식이 원하는 형태가 아니면 Markdown을 직접 수정하세요.",
+            )
+            next_question = st.text_area(
+                "다음 라운드 연구질문", value=current_question, height=110,
+                key=f"interaction-{key}-next-question",
+                help="Round 2에서 질문을 더 구체화하거나 범위를 조정하려면 수정하세요. 승인 시 연구질문 버전으로 저장됩니다.",
+            )
+            note = st.text_input(
+                "승인 메모 (선택)", value="", key=f"interaction-{key}-note",
+            )
+            c1, c2 = st.columns(2)
+            saved = c1.form_submit_button("수정 저장", use_container_width=True)
+            approved_now = c2.form_submit_button(
+                str(renderer.get("submit_label") or "Draft 승인"), type="primary", use_container_width=True
+            )
+        action = "approve" if approved_now else "save" if saved else ""
+        if action and not edited.strip():
+            st.info("답변 Draft는 비어 있을 수 없습니다.")
+            action = ""
+        resolution = {
+            "action": action,
+            "markdown": edited.strip(),
+            "next_question": next_question.strip(),
+            "note": note.strip(),
+        }
+        return InteractionRenderResult(interaction_id, bool(action), {output_name: resolution})
     if variant == "ontology_change":
         review = dict(inputs.get("ontology_change_review") or {})
         types = [dict(x) for x in (inputs.get("ontology_types") or [])]
@@ -681,8 +965,8 @@ def _render_external_llm(st: Any, interaction_id: str, inputs: Mapping[str, Any]
                 refreshed_prompt = str(attached.get("review_prompt") or "").strip()
                 if refreshed_prompt:
                     st.session_state[prompt_state_key] = refreshed_prompt
+                    prompt = refreshed_prompt
                 st.success("PDF를 원문으로 연결하고 1-Page Review prompt를 갱신했습니다.")
-                st.rerun()
         local_name = str(st.session_state.get(pdf_name_key) or "").strip()
         local_path = str(st.session_state.get(pdf_path_key) or "").strip()
         if local_name:
@@ -705,10 +989,12 @@ def _render_external_llm(st: Any, interaction_id: str, inputs: Mapping[str, Any]
             st.caption(str(renderer["help"]))
         if stage:
             st.caption(f"Stage: `{stage}` · local auto-call disabled by execution policy")
-        st.caption(str(renderer.get("prompt_label") or "Prompt") + " · 오른쪽 위 복사 버튼으로 전체 프롬프트를 복사할 수 있습니다.")
-        # st.code intentionally replaces a disabled text area: Streamlit renders a
-        # native copy-to-clipboard control while preserving the exact prompt text.
-        st.code(prompt, language=None)
+        if stage == "single_paper_first_review":
+            st.caption("외부 LLM에 프롬프트를 그대로 붙여넣고 결과를 아래에 붙여넣으세요.")
+            _render_paper_review_prompt_for_copy(st, prompt, key=f"interaction-{key}-paper-review-prompt")
+        else:
+            st.caption(str(renderer.get("prompt_label") or "Prompt") + " · 오른쪽 위 복사 버튼으로 전체 프롬프트를 복사할 수 있습니다.")
+            st.code(prompt, language=None)
         response = st.text_area(str(renderer.get("response_label") or "Response"), value="", height=300, key=f"interaction-{key}-response", placeholder="외부 LLM의 전체 응답을 붙여 넣으세요.")
         submitted = st.form_submit_button(str(renderer.get("submit_label") or "Validate and continue"), type="primary")
     if submitted and not response.strip():

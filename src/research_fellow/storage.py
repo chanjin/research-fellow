@@ -264,6 +264,18 @@ class Ledger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_paper_question_analyses_paper
                     ON paper_question_analyses(paper_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS paper_full_texts (
+                    paper_id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL DEFAULT '',
+                    source_type TEXT NOT NULL DEFAULT '',
+                    source_url TEXT NOT NULL DEFAULT '',
+                    source_name TEXT NOT NULL DEFAULT '',
+                    extraction_note TEXT NOT NULL DEFAULT '',
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    extracted_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(paper_id) REFERENCES paper_shelf(paper_id)
+                );
                 CREATE TABLE IF NOT EXISTS paper_card_links (
                     paper_id TEXT NOT NULL,
                     card_id TEXT NOT NULL,
@@ -2684,6 +2696,7 @@ class Ledger:
                 "DELETE FROM paper_reading_questions WHERE paper_id=?", (paper_id,)
             ).rowcount
             conn.execute("DELETE FROM paper_abstracts WHERE paper_id=?", (paper_id,))
+            conn.execute("DELETE FROM paper_full_texts WHERE paper_id=?", (paper_id,))
             deleted["question_analyses"] = conn.execute(
                 "DELETE FROM paper_question_analyses WHERE paper_id=?", (paper_id,)
             ).rowcount
@@ -2767,6 +2780,38 @@ class Ledger:
             )
             self._record_paper_event(conn, paper_id, "question_analysis_generated", {
                 "research_question_id": rq_id, "intent_id": str(intent_id or ""),
+            })
+
+    def paper_full_text(self, paper_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM paper_full_texts WHERE paper_id=?", (paper_id,)).fetchone()
+        return dict(row) if row else None
+
+    def save_paper_full_text(
+        self, paper_id: str, *, content: str, source_type: str = "", source_url: str = "",
+        source_name: str = "", extraction_note: str = "",
+    ) -> None:
+        import hashlib
+        text = str(content or "").strip()
+        if not text:
+            raise ValueError("빈 논문 원문 텍스트는 저장할 수 없습니다.")
+        timestamp = now()
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO paper_full_texts
+                   (paper_id, content, source_type, source_url, source_name, extraction_note, content_hash, extracted_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(paper_id) DO UPDATE SET
+                     content=excluded.content, source_type=excluded.source_type, source_url=excluded.source_url,
+                     source_name=excluded.source_name, extraction_note=excluded.extraction_note, content_hash=excluded.content_hash,
+                     extracted_at=excluded.extracted_at, updated_at=excluded.updated_at""",
+                (paper_id, text, str(source_type or ""), str(source_url or ""), str(source_name or ""),
+                 str(extraction_note or ""), digest, timestamp, timestamp),
+            )
+            self._record_paper_event(conn, paper_id, "full_text_saved", {
+                "source_type": str(source_type or ""), "source_url": str(source_url or ""),
+                "source_name": str(source_name or ""), "content_hash": digest, "chars": len(text),
             })
 
     def paper_card_ids(self, paper_id: str) -> list[str]:

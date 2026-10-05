@@ -1,6 +1,9 @@
 """End-to-end execution of M1 auto literature review through the AJD workflow DSL."""
 from __future__ import annotations
 
+import json
+import re
+
 from pathlib import Path
 import hashlib
 import json
@@ -45,9 +48,6 @@ def selected_paper_review_prompt(profile: dict[str, Any], papers: list[dict[str,
             "title": paper.get("title", ""),
             "authors": paper.get("authors", []),
             "year": paper.get("published") or paper.get("publication_year") or "",
-            "abstract_url": paper.get("abstract_url") or paper.get("url") or paper.get("source_url") or "",
-            "full_text_url": paper.get("full_text_url") or "",
-            "pdf_url": paper.get("pdf_url") or "",
             "local_pdf_filename": paper.get("local_pdf_filename") or "",
             "discovery_summary": paper.get("summary") or "",
             "why_relevant": paper.get("why_relevant") or "",
@@ -64,6 +64,11 @@ def selected_paper_review_prompt(profile: dict[str, Any], papers: list[dict[str,
                 f"--- PAPER FULL TEXT START ---\n{header}\n\n{full_text}\n--- PAPER FULL TEXT END ---"
             )
     full_text_context = "\n\n".join(full_text_sections).strip()
+    if not full_text_context:
+        raise ValueError(
+            "Paper Review에는 추출된 원문 텍스트가 필요합니다. "
+            "원문 HTML/PDF를 먼저 추출하거나 로컬 PDF를 연결해 주세요."
+        )
     return apply_review_language_policy(
         "You are a senior researcher in computer science/AI with rigorous analytical ability. "
         "You are assisting a researcher with the first review of papers selected for one research question.\n\n"
@@ -73,11 +78,11 @@ def selected_paper_review_prompt(profile: dict[str, Any], papers: list[dict[str,
         + ((f"PAPER FULL TEXT\n{full_text_context}\n\n") if full_text_context else "")
         + "TASK\n"
         "For each selected paper, prepare a source-grounded first review. "
-        "When a PAPER FULL TEXT block is supplied below, treat that extracted text as the primary source and do not rely on a URL to infer the paper content. "
-        "When no extracted full text is supplied, open the verified full_text_url if accessible. "
-        "Use abstract_url only for metadata/abstract context; do not treat an abstract page as full text.\n"
-        "Do not invent claims, mechanisms, limitations, or numbers that are not supported by the paper. "
-        "If full text is not accessible, state that limitation and base the review only on verifiable abstract/metadata.\n"
+        "Use the supplied PAPER FULL TEXT block as the paper-content source of truth. "
+        "External paper URLs are intentionally not supplied to this review step. Do not use external web access or model prior knowledge to fill gaps in the supplied text. "
+        "Use the supplied metadata only to identify the paper, never as a substitute for full text.\n"
+        "Do not invent claims, mechanisms, limitations, numbers, or missing sections that are not supported by the supplied PAPER FULL TEXT. "
+        "If a detail cannot be verified from the supplied text, write '논문에서 확인되지 않음'.\n"
         "Create an Executive 1-Page Summary that can be scanned within one A4 page. Exclude generic background, rhetorical modifiers, and filler. "
         "Compress around technical facts, causal relationships, concrete mechanisms, and quantitative results. "
         "The summary is NOT a generic paper summary. It is a research-question-conditioned interpretation. Every section must prioritize what this paper contributes to answering the RESEARCH QUESTION above, while faithfully distinguishing the paper's own claims from implications for the researcher's question.\n"
@@ -85,6 +90,7 @@ def selected_paper_review_prompt(profile: dict[str, Any], papers: list[dict[str,
         "Write all researcher-facing prose in Korean. Keep source_id, short taxonomy/type values, paper/model/method names, DOI/arXiv IDs, and URLs in English/original form.\n"
         "For unavailable or unsupported information, explicitly write '논문에서 확인되지 않음' rather than guessing.\n"
         "For every candidate knowledge claim, propose a concise title in Korean. The title should be a short, review-friendly noun phrase or proposition label that captures the knowledge, not a truncated copy of the claim.\n"
+        "Write each candidate knowledge claim as a self-contained 2-3 sentence knowledge unit that can be understood without reopening the source paper. The claim must name the relevant subject/context, state the substantive relationship, mechanism, or finding, and include the most important boundary or interpretation needed to avoid ambiguity. Do not use dangling references such as this paper, this model, the above result, or it unless the referent is explicitly named in the same claim. Keep evidence details and verbatim quotations in evidence/source_quotes rather than bloating the claim.\n"
         "For every candidate knowledge claim, also extract up to three verbatim sentences from the accessible paper full text that directly support or qualify that claim. Put them in source_quotes. Preserve the original language and wording, but remove double-quotation mark characters (straight or curly) from source_quotes before returning JSON so pasted output remains parse-safe. Do not paraphrase inside source_quotes, and never invent a quote. If full text is unavailable or no sentence can be verified, return an empty source_quotes array.\n\n"
         "EXECUTIVE SUMMARY CONTENT\n"
         "1. Bottom Line: one or two sentences answering: 'What does this paper tell us about the RESEARCH QUESTION?' State whether the evidence is direct or indirect.\n"
@@ -186,7 +192,45 @@ def _render_executive_one_page_summary(title: str, executive: dict[str, Any], re
     return "\n".join(lines).strip()
 
 
-def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]], research_question: str = "") -> list[dict[str, Any]]:
+def _normalize_review_source_id(value: Any) -> str:
+    """Normalize DOI/arXiv identifiers for tolerant review-response matching."""
+    raw = str(value or "").strip().casefold()
+    if not raw:
+        return ""
+    # Strip common DOI wrappers while keeping the DOI payload itself.
+    for prefix in (
+        "https://doi.org/", "http://doi.org/",
+        "https://dx.doi.org/", "http://dx.doi.org/",
+        "doi:",
+    ):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            break
+    # Strip common arXiv wrappers and PDF suffixes.
+    for prefix in (
+        "https://arxiv.org/abs/", "http://arxiv.org/abs/",
+        "https://arxiv.org/pdf/", "http://arxiv.org/pdf/",
+        "arxiv:",
+    ):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            break
+    raw = raw.split("?", 1)[0].split("#", 1)[0].strip().rstrip("/")
+    if raw.endswith(".pdf"):
+        raw = raw[:-4]
+    # arXiv version suffixes (v1, v2, ...) do not identify a different paper.
+    if re.fullmatch(r"(?:\d{4}\.\d{4,5}|[a-z-]+/\d{7})(?:v\d+)?", raw):
+        raw = re.sub(r"v\d+$", "", raw)
+    return raw
+
+
+def _parse_selected_paper_review(
+    text: str,
+    selected: list[dict[str, Any]],
+    research_question: str = "",
+    *,
+    allow_legacy_summary: bool = False,
+) -> list[dict[str, Any]]:
     raw = text.strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
@@ -199,13 +243,20 @@ def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]], rese
     rows = payload.get("papers") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise ValueError("선택 논문 리뷰 응답에 papers 배열이 없습니다.")
-    by_id = {str(item.get("source_id") or ""): dict(item) for item in selected}
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in selected:
+        normalized_id = _normalize_review_source_id(item.get("source_id"))
+        if normalized_id:
+            by_id[normalized_id] = dict(item)
     reviewed: list[dict[str, Any]] = []
+    received_source_ids: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         source_id = str(row.get("source_id") or "")
-        base = by_id.get(source_id)
+        if source_id:
+            received_source_ids.append(source_id)
+        base = by_id.get(_normalize_review_source_id(source_id))
         if base is None:
             continue
         claims = []
@@ -231,24 +282,46 @@ def _parse_selected_paper_review(text: str, selected: list[dict[str, Any]], rese
                 })
         executive = row.get("executive_summary")
         if isinstance(executive, dict):
-            summary = _render_executive_one_page_summary(str(base.get("title") or "Untitled paper"), executive, research_question=research_question)
-        else:
-            # Legacy external responses used a single paper_summary string.
+            summary = _render_executive_one_page_summary(
+                str(base.get("title") or "Untitled paper"),
+                executive,
+                research_question=research_question,
+            )
+        elif allow_legacy_summary:
+            # Transitional compatibility for historical durable paper_first_review
+            # tasks. New inline literature rounds must use executive_summary.
             summary = str(row.get("paper_summary") or "").strip()
+        else:
+            raise ValueError(
+                "현재 논문 리뷰 응답에는 executive_summary가 필요합니다. "
+                "과거 paper_summary 형식은 새 문헌조사 라운드에서 사용할 수 없습니다."
+            )
         if not summary:
             continue
         review_note = str(row.get("review_note") or "").strip()
+        # Claims are an intermediate representation used to create Knowledge Card
+        # candidates.  Do not duplicate them in the durable Paper Review body;
+        # their source quotes travel with the KC evidence instead.
+        review_raw = summary
+        if review_note:
+            review_raw += "\n\n**Review note:** " + review_note
         reviewed.append({
             **base,
             "paper_summary": summary,
             "executive_summary": dict(executive) if isinstance(executive, dict) else {},
             "review_note": review_note,
-            "full_text_review": summary + ("\n\n**Review note:** " + review_note if review_note else ""),
+            "full_text_review": review_raw,
             "full_text_status": "completed",
             "full_text_similarity": int(base.get("relevance_score") or 0),
             "knowledge_candidates": claims,
         })
     if not reviewed:
+        expected_ids = [str(item.get("source_id") or "") for item in selected if str(item.get("source_id") or "")]
+        if received_source_ids and expected_ids:
+            raise ValueError(
+                "선택 논문 리뷰의 source_id를 현재 논문과 매칭하지 못했습니다. "
+                f"응답: {received_source_ids}; 선택 논문: {expected_ids}"
+            )
         raise ValueError("선택 논문 리뷰에서 유효한 결과를 찾지 못했습니다.")
     return reviewed
 
@@ -634,6 +707,91 @@ def _knowledge_candidate_title(claim: dict[str, Any], claim_text: str) -> str:
     return claim_text[:72]
 
 
+def _normalized_candidate_quotes(value: object) -> list[str]:
+    quotes: list[str] = []
+    for item in value or []:
+        text = str(item or "").strip()
+        if text and text not in quotes:
+            quotes.append(text)
+        if len(quotes) >= 3:
+            break
+    return quotes
+
+
+def _knowledge_claim_signature(claim: dict[str, Any]) -> tuple[str, str, str, str, tuple[str, ...], str, str, str]:
+    """Content identity for a parsed Paper Review claim.
+
+    A pending Knowledge Card decision may be reused only when it represents the
+    exact current review asset.  In particular, a historical candidate without
+    source_quotes must not mask a newly parsed, grounded candidate.
+    """
+    claim_text = str(claim.get("claim") or "").strip()
+    return (
+        _knowledge_candidate_title(claim, claim_text),
+        claim_text,
+        str(claim.get("evidence") or "").strip()[:3200],
+        str(claim.get("limits") or "").strip(),
+        tuple(_normalized_candidate_quotes(claim.get("source_quotes"))),
+        "",  # Paper Review claims do not author KC context.
+        "",  # Paper Review claims do not author KC implication.
+        "",  # Paper Review claims do not author KC conditions.
+    )
+
+
+def _knowledge_card_signature(card: dict[str, Any]) -> tuple[str, str, str, str, tuple[str, ...], str, str, str]:
+    return (
+        str(card.get("title") or "").strip()[:120],
+        str(card.get("claim") or "").strip(),
+        str(card.get("source_excerpt") or card.get("evidence_excerpt") or "").strip()[:3200],
+        str(card.get("limits") or "").strip(),
+        tuple(_normalized_candidate_quotes(card.get("source_quotes"))),
+        str(card.get("context") or "").strip(),
+        str(card.get("implication") or "").strip(),
+        str(card.get("conditions") or "").strip(),
+    )
+
+
+def _reconcile_pending_knowledge_requests(
+    ledger: Ledger, *, intent_id: str, paper_id: str, claims: list[dict[str, Any]]
+) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+    """Match only current proposed KC requests to the latest parsed claims.
+
+    Historical approved/rejected/deferred requests never block a fresh review.
+    Proposed requests whose content no longer matches the latest Paper Review are
+    retained in the ledger for audit but marked ``superseded`` so Attention will
+    not surface stale cards.
+    """
+    prior: list[dict[str, Any]] = []
+    for row in ledger.phenomena(type_="decision_request", status="proposed"):
+        if str(row.get("subject_type") or "") != "knowledge_card":
+            continue
+        payload = dict(row.get("payload") or {})
+        if str(payload.get("intent_id") or "") == intent_id and str(payload.get("paper_id") or "") == paper_id:
+            prior.append(row)
+
+    matched: dict[int, dict[str, Any]] = {}
+    used_request_ids: set[str] = set()
+    for index, claim in enumerate(claims):
+        signature = _knowledge_claim_signature(claim)
+        for row in prior:
+            request_id = str(row.get("phenomenon_id") or "")
+            if not request_id or request_id in used_request_ids:
+                continue
+            payload = dict(row.get("payload") or {})
+            card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+            if _knowledge_card_signature(dict(card)) == signature:
+                matched[index] = row
+                used_request_ids.add(request_id)
+                break
+
+    stale = [row for row in prior if str(row.get("phenomenon_id") or "") not in used_request_ids]
+    for row in stale:
+        request_id = str(row.get("phenomenon_id") or "")
+        if request_id:
+            ledger.set_status(request_id, "superseded")
+    return matched, stale
+
+
 def _stage_literature_knowledge_candidates(context: dict[str, Any]) -> None:
     """Aggregate inline Review assets, with a legacy-safe write fallback.
 
@@ -689,48 +847,44 @@ def _stage_literature_knowledge_candidates(context: dict[str, Any]) -> None:
         if paper_id and (ledger.paper_question_analysis(paper_id, rq_id) if rq_id else ledger.paper_analysis(paper_id)):
             analysis_ids.append(paper_id)
 
-        existing = []
-        for row in ledger.phenomena(type_="decision_request"):
-            if str(row.get("subject_type") or "") != "knowledge_card":
+        claims = [dict(x) for x in (reviewed.get("knowledge_candidates") or []) if isinstance(x, dict)]
+        matched, _stale = _reconcile_pending_knowledge_requests(
+            ledger, intent_id=intent_id, paper_id=paper_id, claims=claims
+        )
+        for claim_index, claim in enumerate(claims):
+            claim_text = str(claim.get("claim") or "").strip()
+            evidence = str(claim.get("evidence") or "").strip()
+            quotes = _normalized_candidate_quotes(claim.get("source_quotes"))
+            if len(claim_text) < 8 or len(evidence) < 8:
                 continue
-            payload = dict(row.get("payload") or {})
-            if str(payload.get("intent_id") or "") == intent_id and str(payload.get("paper_id") or "") == paper_id:
-                existing.append(row)
-        if not existing:
-            for claim in reviewed.get("knowledge_candidates") or []:
-                claim_text = str(claim.get("claim") or "").strip()
-                evidence = str(claim.get("evidence") or "").strip()
-                quotes = [str(x).strip() for x in (claim.get("source_quotes") or []) if str(x).strip()][:3]
-                evidence_detail = evidence
-                if quotes:
-                    evidence_detail = "원문 근거 문장\n" + "\n".join(f"- {quote}" for quote in quotes) + "\n\n근거 요약\n" + evidence
-                if len(claim_text) < 8 or len(evidence) < 8:
-                    continue
-                card = KnowledgeCard(
-                    card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}",
-                    title=_knowledge_candidate_title(claim, claim_text), source_kind="external_paper", claim=claim_text,
-                    context="", implication="", source_excerpt=evidence_detail[:3200],
-                    labels=list(profile.get("labels") or []), evidence_level="provisional", status="verified",
-                    evidence_excerpt=evidence_detail[:1600], conditions="", limits=str(claim.get("limits") or ""),
-                    provenance={"source_name": str(shelf.get("title") or "paper"), "paper_id": paper_id, "research_question_id": rq_id, "intent_id": intent_id, "grounding": "m1_first_literature_round"},
-                    origin_links=list(shelf.get("origin_links") or []),
-                ).model_dump(mode="json")
-                case_id = ledger.create_case("research", f"Literature knowledge candidate: {str(shelf.get('title') or '')[:72]}")
-                rid = ledger.record(
-                    case_id, "decision_request", "m1", ["researcher"], "knowledge_card",
-                    {
-                        "title": f"문헌조사 지식카드 후보 승인: {card['title']}",
-                        "card": card, "paper_id": paper_id, "intent_id": intent_id, "rq_id": rq_id,
-                        "research_question": rq_text,
-                        "review_note": review_note,
-                        "literature_round": "first",
-                        "next_action": "승인 시 지식카드로 등록합니다.",
-                    },
-                    subject_id=card["card_id"],
-                )
-                request_ids.append(rid)
-        else:
-            request_ids.extend(str(row.get("phenomenon_id") or "") for row in existing)
+            prior = matched.get(claim_index)
+            if prior is not None:
+                request_ids.append(str(prior.get("phenomenon_id") or ""))
+                continue
+            card = KnowledgeCard(
+                card_id=f"kc-candidate-{uuid.uuid4().hex[:12]}",
+                title=_knowledge_candidate_title(claim, claim_text), source_kind="external_paper", claim=claim_text,
+                context="", implication="", source_excerpt=evidence[:3200], source_quotes=quotes,
+                labels=list(profile.get("labels") or []), evidence_level="provisional", status="verified",
+                evidence_excerpt=evidence[:1600], conditions="", limits=str(claim.get("limits") or ""),
+                provenance={"source_name": str(shelf.get("title") or "paper"), "publication_year": str(shelf.get("publication_year") or ""), "paper_id": paper_id, "research_question_id": rq_id, "intent_id": intent_id, "grounding": "m1_first_literature_round"},
+                origin_links=list(shelf.get("origin_links") or []),
+            ).model_dump(mode="json")
+            case_id = ledger.create_case("research", f"Literature knowledge candidate: {str(shelf.get('title') or '')[:72]}")
+            rid = ledger.record(
+                case_id, "decision_request", "m1", ["researcher"], "knowledge_card",
+                {
+                    "title": f"문헌조사 지식카드 후보 승인: {card['title']}",
+                    "card": card, "paper_id": paper_id, "intent_id": intent_id, "rq_id": rq_id,
+                    "publication_year": str(shelf.get("publication_year") or ""),
+                    "research_question": rq_text,
+                    "review_note": review_note,
+                    "literature_round": "first",
+                    "next_action": "승인 시 지식카드로 등록합니다.",
+                },
+                subject_id=card["card_id"],
+            )
+            request_ids.append(rid)
 
     context["paper_analysis_ids"] = list(dict.fromkeys(analysis_ids))
     context["knowledge_request_ids"] = list(dict.fromkeys(x for x in request_ids if x))

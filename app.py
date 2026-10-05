@@ -267,13 +267,16 @@ from research_fellow.application.research_intake import (
 )
 from research_fellow.application.research_question_progression import start_research_question_progression
 from research_fellow.application.research_actions import request_additional_literature, request_initial_answer, request_answer_update
-from research_fellow.application.research_answer import latest_research_answer
+from research_fellow.application.research_answer import latest_research_answer, save_research_answer_revision, approve_research_answer_draft
 from research_fellow.application.persistent_research_runtime import (
     PersistentResearchBindings, advance_persistent_research,
 )
 from research_fellow.application.knowledge_workspace import knowledge_workspace_snapshot
 from research_fellow.application.paper_library import update_paper_researcher_metadata, attach_paper_local_pdf
-from research_fellow.application.literature_candidate_review import preserve_literature_candidate, apply_candidate_review_response, attach_candidate_local_pdf
+from research_fellow.application.literature_candidate_review import (
+    preserve_literature_candidate, apply_candidate_review_response, attach_candidate_local_pdf, candidate_review_state,
+    refresh_candidate_remote_full_text,
+)
 from research_fellow.application.system_workspace import system_workspace_snapshot
 from research_fellow.application.relations import (
     RELATION_TYPES, create_relation_candidate, lineage_dot, lineage_overview_prompt,
@@ -1193,11 +1196,14 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             return attach_candidate_local_pdf(
                 ledger, intent_id=str(task_payload.get("intent_id") or intent_id), paper_id=paper_id,
                 candidate=paper_candidate, filename=str(candidate.get("filename") or "paper.pdf"),
-                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_shelf",
+                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY,
+                workspace_keyword=WORKSPACE_KEY,
             )
 
         if interaction_id != "review_literature_candidates":
             return {}
+        if decision == "review_state":
+            return candidate_review_state(ledger, candidate, intent_id=intent_id)
         if decision == "preserve":
             return preserve_literature_candidate(
                 ledger, candidate, intent_id=intent_id, create_review_task=False,
@@ -1214,7 +1220,16 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             return attach_candidate_local_pdf(
                 ledger, intent_id=intent_id, paper_id=str(candidate.get("paper_id") or ""),
                 candidate=candidate, filename=str(candidate.get("filename") or "paper.pdf"),
-                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_shelf",
+                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY,
+                workspace_keyword=WORKSPACE_KEY,
+            )
+        if decision == "refresh_full_text":
+            return refresh_candidate_remote_full_text(
+                ledger,
+                intent_id=intent_id,
+                paper_id=str(candidate.get("paper_id") or ""),
+                candidate=candidate,
+                full_text_url=str(candidate.get("full_text_url") or ""),
             )
         return {"decision": decision}
 
@@ -1354,6 +1369,20 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         )
         return {**created, "execution": continuation}
 
+    def _review_answer_draft(rq_id: str, resolution: Mapping[str, Any]) -> Mapping[str, Any]:
+        data = dict(resolution or {})
+        action = str(data.get("action") or "").strip()
+        markdown_text = str(data.get("markdown") or "")
+        if action == "save":
+            return save_research_answer_revision(ledger, rq_id, markdown_text)
+        if action == "approve":
+            return approve_research_answer_draft(
+                ledger, rq_id, markdown_text=markdown_text,
+                next_question=str(data.get("next_question") or ""),
+                note=str(data.get("note") or ""),
+            )
+        raise ValueError("지원하지 않는 Research Answer 검토 작업입니다.")
+
     def _update_paper_metadata(paper_id: str, labels: list[str] | str, note: str, full_text_url: str | None = None) -> Mapping[str, Any]:
         return update_paper_researcher_metadata(
             ledger, paper_id, labels=labels, researcher_note=note, full_text_url=full_text_url,
@@ -1367,7 +1396,8 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
 
     def _attach_paper_pdf(paper_id: str, filename: str, content: bytes) -> Mapping[str, Any]:
         return attach_paper_local_pdf(
-            ledger, paper_id, filename=filename, content=content, storage_root=DATA / "paper_shelf",
+            ledger, paper_id, filename=filename, content=content,
+            storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY, workspace_keyword=WORKSPACE_KEY,
         )
 
     def _enqueue_ontology_work() -> Mapping[str, Any]:
@@ -1431,6 +1461,7 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         research_request_additional_literature=_request_additional_literature,
         research_request_initial_answer=_request_initial_answer,
         research_request_answer_update=_request_answer_update,
+        research_review_answer_draft=_review_answer_draft,
         attention_interaction_inputs=_attention_inputs,
         attention_submit_response=_attention_submit,
         attention_candidate_action=_attention_candidate_action,
@@ -9463,21 +9494,30 @@ def main() -> None:
             ))
     except Exception as exc:
         st.sidebar.warning(ui_text(f"시작 시 서버 데이터 복원 확인 실패: {exc}", f"Startup server hydration check failed: {exc}"))
-    with st.sidebar.expander(ui_text("워크스페이스 추가·아카이브", "Add or archive workspaces"), expanded=False):
+    with st.sidebar.expander(ui_text("워크스페이스 이동·관리", "Transfer or manage workspaces"), expanded=False):
         st.caption(ui_text(
-            "사용 중인 워크스페이스를 확인하고 새 공간을 만들거나 ZIP으로 아카이브할 수 있습니다.",
-            "Review active workspaces, create a new one, or archive a custom workspace as ZIP.",
+            "집·학교 등 다른 PC로 현재 워크스페이스를 옮길 때 ZIP으로 내보내고 다시 불러올 수 있습니다.",
+            "Export the active workspace as a ZIP and reload it on another computer.",
         ))
-        st.markdown(ui_text("**현재 워크스페이스**", "**Active workspaces**"))
-        for key, profile in WORKSPACE_PROFILES.items():
-            kind = ui_text("기본·보호됨", "built-in · protected") if key in BUILTIN_WORKSPACE_KEYS else ui_text("사용자 생성", "custom")
-            st.caption(f"• {profile.label} · `{key}` · {kind}")
+        st.markdown(ui_text("**현재 워크스페이스 이동**", "**Transfer active workspace**"))
+        st.caption(f"{WORKSPACE_PROFILE.label} · `{WORKSPACE_KEY}`")
+        if st.button(
+            ui_text("현재 Workspace ZIP 준비", "Prepare active Workspace ZIP"),
+            key="prepare-active-workspace-transfer",
+            use_container_width=True,
+        ):
+            try:
+                transfer_bytes = build_workspace_archive(WORKSPACE_PROFILE, DATA)
+                st.session_state["workspace-archive-download-bytes"] = transfer_bytes
+                st.session_state["workspace-archive-download-name"] = f"research-fellow-{WORKSPACE_KEY}-transfer.zip"
+            except (ValueError, OSError) as error:
+                st.error(str(error))
         archived_bytes = st.session_state.get("workspace-archive-download-bytes")
         archived_name = str(st.session_state.get("workspace-archive-download-name") or "workspace.zip")
         if archived_bytes:
-            st.success(ui_text("아카이브가 준비되었습니다. 아래 ZIP을 내려받아 보관하세요.", "The archive is ready. Download and keep the ZIP below."))
+            st.success(ui_text("Workspace Transfer ZIP이 준비되었습니다. 다른 PC에서 그대로 불러올 수 있습니다.", "The Workspace Transfer ZIP is ready and can be loaded on another computer."))
             st.download_button(
-                ui_text("워크스페이스 ZIP 내려받기", "Download workspace ZIP"),
+                ui_text("Workspace ZIP 내려받기", "Download Workspace ZIP"),
                 data=archived_bytes, file_name=archived_name, mime="application/zip",
                 key="download-archived-workspace", use_container_width=True,
             )
@@ -9506,13 +9546,13 @@ def main() -> None:
             except ValueError as error:
                 st.error(str(error))
         st.divider()
-        st.markdown(ui_text("**ZIP에서 다시 불러오기**", "**Reload from ZIP**"))
+        st.markdown(ui_text("**Workspace ZIP 가져오기**", "**Import Workspace ZIP**"))
         restore_upload = st.file_uploader(
-            ui_text("워크스페이스 아카이브 ZIP", "Workspace archive ZIP"),
+            ui_text("Workspace Transfer ZIP", "Workspace Transfer ZIP"),
             type=["zip"], key="restore-workspace-archive-upload",
         )
         if st.button(
-            ui_text("ZIP 워크스페이스 불러오기", "Reload workspace from ZIP"),
+            ui_text("Workspace ZIP 불러오기", "Import Workspace ZIP"),
             disabled=restore_upload is None, key="restore-workspace-archive",
             use_container_width=True,
         ):
@@ -9521,8 +9561,8 @@ def main() -> None:
                     restore_upload.getvalue(), config_path=WORKSPACE_CONFIG, data_dir=DATA,
                 )
                 st.session_state["workspace-restore-message"] = ui_text(
-                    f"{restored_profile.label}을 불러왔습니다. " + ("DB도 복원했습니다." if database_restored else "기존 로컬 DB에 다시 연결했습니다."),
-                    f"Reloaded {restored_profile.label}. " + ("The database was restored." if database_restored else "Reconnected the existing local database."),
+                    f"{restored_profile.label}을 새 워크스페이스로 불러왔습니다. " + ("연구 데이터와 원문 자산을 복원했습니다." if database_restored else "워크스페이스를 등록했습니다."),
+                    f"Imported {restored_profile.label} as a new workspace. " + ("Research data and source assets were restored." if database_restored else "The workspace was registered."),
                 )
                 st.query_params["workspace"] = restored_profile.key
                 st.rerun()

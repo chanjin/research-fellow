@@ -9,7 +9,8 @@ Exploration context:
 
 TASK
 - Find approximately 12 real academic papers that help answer or frame this research question.
-- Search broadly across arXiv, Semantic Scholar, Crossref, Google Scholar, publisher pages, and official paper pages as useful discovery aids.
+- Search broadly across arXiv, Semantic Scholar, Crossref, OpenAlex, Google Scholar, publisher pages, institutional repositories, author pages, and official paper pages as useful discovery aids.
+- Prefer an arXiv record when the same paper has a verified arXiv version, especially for AI/CS papers, but do NOT exclude a relevant paper merely because it is not on arXiv.
 - Preserve the full research context; do not reduce the task to isolated keywords.
 {% if "CURRENT RESEARCH ANSWER — PRIMARY FOLLOW-UP CONTEXT" in profile.context %}
 - This is a FOLLOW-UP literature round. Treat the CURRENT RESEARCH ANSWER in the context as the primary state to improve, not as a conclusion to confirm.
@@ -20,11 +21,15 @@ TASK
 {% endif %}
 - Prioritize directly relevant recent work, then include a small number of foundational or adjacent papers when they materially help interpret the topic.
 - Verify that every paper exists. Never invent titles, authors, publication years, DOI/arXiv IDs, URLs, or findings.
-- Return the bibliographic/abstract page and the full-text location separately.
-- `abstract_url` is the stable metadata/abstract page (for example an arXiv /abs/ page, DOI landing page, publisher abstract page, or official paper page).
-- `full_text_url` is the verified full-text or direct/open PDF/HTML URL when available. Do not guess it; leave it empty when you cannot verify access.
-- Keep the two URLs distinct even when the abstract page links onward to the full text.
-- `abstract_or_summary` must be factual and written in Korean. If the abstract itself is not available, explicitly write a short Korean summary and do not present it as a quotation.
+- Return bibliographic/abstract access and full-text access separately.
+- `abstract_url` is the best verified page for bibliographic metadata and an abstract. Prefer an arXiv /abs/ page when a matching arXiv version exists; otherwise use a reliable publisher/DOI page or a scholarly metadata page such as Semantic Scholar, OpenAlex, or Crossref when it exposes the abstract.
+- `abstract_or_summary` should use a verified abstract whenever one is openly available from any reliable scholarly source; do not require arXiv. Write the content in Korean. If no abstract can be verified, provide only a short Korean discovery summary and make clear that it is a summary, not a quoted abstract.
+- `full_text_url` should point to a verified machine-readable full text. Prefer actual open HTML full text when available. If HTML full text is unavailable but a direct public PDF is available, it is acceptable for `full_text_url` to be the same URL as `pdf_url`.
+- `pdf_url` is a verified direct public PDF URL when available. Do not invent or infer a PDF URL from a landing page.
+- `landing_url` is a verified human-facing paper/repository/publisher page that is useful for manually locating or downloading the paper when no direct open full text can be verified. Leave it empty if unnecessary or unverified.
+- Never invent URLs. If access cannot be verified, return an empty string for that URL field.
+- `citation_count` is optional. Include it only when a count is readily verifiable from a recognizable scholarly source such as OpenAlex or Semantic Scholar. Put that provider name in `citation_source`. Do not estimate citation counts.
+- Google Scholar may be used as a discovery aid, but do not fabricate a Google Scholar citation count or Scholar URL when it cannot be directly verified.
 - `quick_take` should state in Korean what the paper appears to contribute.
 - `why_relevant` should explain in Korean why the researcher should read it for this Intent.
 - `caution` should note indirect relevance, verification limits, or important scope limitations in Korean.
@@ -42,8 +47,12 @@ If any field contains LaTeX, escape every backslash for JSON.
       "publication_year": "2025",
       "abstract_url": "https://...",
       "full_text_url": "https://... or empty string",
+      "pdf_url": "https://...pdf or empty string",
+      "landing_url": "https://... or empty string",
       "source_id": "arXiv ID or DOI when available; otherwise empty string",
       "abstract_or_summary": "...",
+      "citation_count": 123,
+      "citation_source": "OpenAlex, Semantic Scholar, or empty string",
       "relevance_score": 90,
       "quick_take": "...",
       "why_relevant": "...",

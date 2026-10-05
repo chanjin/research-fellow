@@ -42,6 +42,17 @@ def _stable_interaction_key(item: Mapping[str, Any]) -> str:
 
 
 
+
+
+def _knowledge_review_note(item: Mapping[str, Any]) -> str:
+    if str(item.get("category") or "") != "decisions" or str(item.get("source_type") or "") != "decision_request":
+        return ""
+    request = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    if str(request.get("subject_type") or "") != "knowledge_card":
+        return ""
+    payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+    return str(payload.get("review_note") or "").strip()
+
 def _knowledge_review_header(item: Mapping[str, Any]) -> tuple[str, str, str, str]:
     if str(item.get("category") or "") != "decisions" or str(item.get("source_type") or "") != "decision_request":
         return "", "", "", ""
@@ -340,7 +351,11 @@ def _render_single_knowledge_decision_queue(
     if rq_text:
         st.caption(("Research Question · " if english else "연구질문 · ") + rq_text + (f" · {round_label}" if round_label else ""))
     if paper_title:
-        st.markdown(("**Source paper · **" if english else "**출처 논문 · **") + paper_title)
+        request = active.get("payload") if isinstance(active.get("payload"), Mapping) else {}
+        request_payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+        publication_year = str(request_payload.get("publication_year") or "").strip()[:4]
+        source_label = paper_title + ((" · " + publication_year) if publication_year else "")
+        st.markdown(("**Source paper · **" if english else "**출처 논문 · **") + source_label)
 
     if review_summary:
         with st.expander("Paper interpretation" if english else "논문 해석 결과 보기", expanded=False):
@@ -367,6 +382,10 @@ def _render_single_knowledge_decision_queue(
                         except OSError:
                             pass
             st.markdown(_compact_summary_markdown(review_summary))
+            review_note = _knowledge_review_note(active)
+            if review_note:
+                st.caption("Review note" if english else "리뷰 메모")
+                st.write(review_note)
 
     st.divider()
     _render_attention_item_body(
@@ -704,6 +723,10 @@ def render_attention_queue(
                                     except OSError:
                                         pass
                         st.markdown(_compact_summary_markdown(review_summary))
+                        review_note = _knowledge_review_note(item)
+                        if review_note:
+                            st.caption("리뷰 메모")
+                            st.write(review_note)
                         shown_review_keys.add(review_key)
                         st.divider()
                     elif idx:

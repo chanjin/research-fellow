@@ -11,7 +11,7 @@ from typing import Any
 
 from research_fellow.storage import Ledger
 from research_fellow.application.research_evidence import rq_evidence_bundle
-from research_fellow.application.research_answer import evidence_fingerprint, latest_research_answer
+from research_fellow.application.research_answer import evidence_fingerprint, latest_research_answer, latest_research_answer_approval, research_answer_is_approved
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,8 @@ class ResearchQuestionView:
     answer_first_document: str = ""
     answer_version: int = 0
     answer_update_available: bool = False
+    answer_draft_approved: bool = False
+    answer_approved_at: str = ""
     answer_work_in_progress: bool = False
     answer_work_stage: str = ""
     answer_work_status: str = ""
@@ -61,6 +63,11 @@ class ResearchQuestionView:
     paper_review_pending: int = 0
     paper_review_completed: int = 0
     lifecycle_phase: str = ""
+    additional_literature_ready: bool = False
+    question_version: int = 1
+    question_change_reason: str = ""
+    question_versions: tuple[dict[str, Any], ...] = ()
+    previous_answer_versions: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -214,6 +221,40 @@ def _active_questions(
         paper_review_pending = sum(1 for x in paper_tasks if x.get("status") == "ready")
         paper_review_completed = sum(1 for x in paper_tasks if x.get("status") == "completed")
         round_state = _rq_research_round_state(ledger, rq_id, intents)
+        answer_reports = [
+            report for report in ledger.phenomena(type_="advice_report")
+            if report.get("subject_type") == "research_question_response"
+            and str(report.get("subject_id") or "") == rq_id
+        ]
+        latest_answer_report = latest_research_answer(ledger, rq_id)
+        latest_answer_id = str((latest_answer_report or {}).get("phenomenon_id") or "")
+        approved_answer_ids = {
+            str((event.get("payload") or {}).get("answer_id") or "")
+            for event in ledger.phenomena(type_="advisory_exchange")
+            if event.get("subject_type") == "research_answer_approval"
+            and str(event.get("subject_id") or "") == rq_id
+        }
+        previous_answer_versions = []
+        for report in sorted(
+            answer_reports,
+            key=lambda entry: (
+                int((entry.get("payload") or {}).get("answer_version") or 0),
+                str(entry.get("created_at") or ""),
+            ),
+            reverse=True,
+        ):
+            report_id = str(report.get("phenomenon_id") or "")
+            if report_id == latest_answer_id:
+                continue
+            payload = dict(report.get("payload") or {})
+            previous_answer_versions.append({
+                "answer_id": report_id,
+                "answer_version": int(payload.get("answer_version") or 1),
+                "report": str(payload.get("report") or ""),
+                "created_at": str(report.get("created_at") or ""),
+                "answer_mode": str(payload.get("answer_mode") or ""),
+                "approved": report_id in approved_answer_ids,
+            })
         all_runs = ledger.auto_research_runs(statuses=("running", "needs_attention", "completed", "failed"), limit=200)
         runs = [x for x in all_runs if str(x.get("intent_id") or "") in intent_ids]
         answer_runs = [
@@ -223,6 +264,15 @@ def _active_questions(
         ]
         latest_run = runs[0] if runs else None
         latest_answer_run = answer_runs[0] if answer_runs else None
+        latest_intent_id = str((intents[0] if intents else {}).get("intent_id") or "")
+        latest_literature_done = False
+        if latest_intent_id:
+            latest_literature_done = any(
+                report.get("subject_type") == "auto_literature_report"
+                and report.get("status") == "completed"
+                and str((report.get("payload") or {}).get("intent_id") or "") == latest_intent_id
+                for report in ledger.phenomena(type_="advice_report")
+            )
         answer_run_status = str((latest_answer_run or {}).get("status") or "")
         answer_run_stage = str((latest_answer_run or {}).get("current_stage") or "")
         answer_work_in_progress = bool(
@@ -258,6 +308,21 @@ def _active_questions(
         answer_update_ready = bool(
             round_state["answer_draft"]
             and (not round_state.get("answer_evidence_fingerprint") or round_state.get("answer_evidence_fingerprint") != current_evidence_fingerprint)
+        )
+        answer_approval = latest_research_answer_approval(ledger, rq_id)
+        answer_draft_approved = research_answer_is_approved(ledger, rq_id)
+        approval_payload = dict((answer_approval or {}).get("payload") or {})
+        approved_intent_id = str(approval_payload.get("approved_intent_id") or "")
+        latest_intent_created_at = str((intents[0] if intents else {}).get("created_at") or "")
+        approval_created_at = str((answer_approval or {}).get("created_at") or "")
+        approval_covers_latest_round = bool(
+            answer_draft_approved
+            and latest_intent_id
+            and (
+                approved_intent_id == latest_intent_id
+                if approved_intent_id
+                else bool(approval_created_at and latest_intent_created_at and approval_created_at >= latest_intent_created_at)
+            )
         )
         direct_titles = tuple(
             [str(x.get("title") or "") for x in evidence_bundle.get("direct", {}).get("papers", [])[:4]]
@@ -387,6 +452,13 @@ def _active_questions(
         else:
             lifecycle_phase = "starting"
 
+        versions = [dict(x) for x in (thread.get("versions") or [])]
+        latest_version = versions[-1] if versions else {
+            "version_no": 1,
+            "question": str(row.get("question") or ""),
+            "change_reason": "초기 질문",
+            "created_at": str(row.get("created_at") or row.get("updated_at") or ""),
+        }
         source_payload = dict(thread.get("source_payload") or {}) if isinstance(thread.get("source_payload"), dict) else {}
         researcher_comment = str(source_payload.get("researcher_comment") or source_payload.get("request_context") or row.get("research_context") or "").strip()
         attention_counts = {"inputs": 0, "reviews": 0, "decisions": 0, "exceptions": 0}
@@ -418,6 +490,8 @@ def _active_questions(
             answer_first_document=str(round_state.get("answer_first_document") or ""),
             answer_version=int(round_state.get("answer_version") or 0),
             answer_update_available=answer_update_ready,
+            answer_draft_approved=answer_draft_approved,
+            answer_approved_at=str((answer_approval or {}).get("created_at") or "") if answer_draft_approved else "",
             answer_work_in_progress=answer_work_in_progress,
             answer_work_stage=answer_work_stage,
             answer_work_status=answer_work_status,
@@ -441,6 +515,17 @@ def _active_questions(
             paper_review_pending=paper_review_pending,
             paper_review_completed=paper_review_completed,
             lifecycle_phase=lifecycle_phase,
+            additional_literature_ready=bool(
+                intents
+                and bool(round_state.get("answer_draft"))
+                and approval_covers_latest_round
+                and int(round_state["pending_knowledge"]) == 0
+                and str((latest_run or {}).get("status") or "") not in {"running", "needs_attention"}
+            ),
+            question_version=int(latest_version.get("version_no") or 1),
+            question_change_reason=str(latest_version.get("change_reason") or ""),
+            question_versions=tuple(versions),
+            previous_answer_versions=tuple(previous_answer_versions),
         ))
     return result
 

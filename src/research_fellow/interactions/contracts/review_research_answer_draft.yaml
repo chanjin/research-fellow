@@ -1,0 +1,22 @@
+interaction: ajd-interaction/v0.1
+id: review_research_answer_draft
+actor: researcher
+purpose: >
+  생성된 Research Answer Markdown Draft를 연구자가 직접 수정하고 승인하며,
+  다음 문헌 라운드에서 사용할 연구질문을 필요하면 보완한다.
+mode: review
+uses:
+  required:
+    - research_answer_review_context
+  optional: []
+produces:
+  - research_answer_review_resolution
+data:
+  research_answer_review_context:
+    type: ResearchAnswerReviewContext
+  research_answer_review_resolution:
+    type: ResearchAnswerReviewResolution
+completion:
+  requires_response: true
+boundary:
+  phenomenon: researcher_research_answer_review

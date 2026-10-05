@@ -27,6 +27,7 @@ def render_operating_desk(
     research_request_additional_literature: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     research_request_initial_answer: Callable[[str], Mapping[str, Any]] | None = None,
     research_request_answer_update: Callable[[str], Mapping[str, Any]] | None = None,
+    research_review_answer_draft: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     attention_interaction_inputs: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     attention_submit_response: Callable[[Mapping[str, Any], Mapping[str, Any]], Any] | None = None,
     attention_candidate_action: Callable[[Mapping[str, Any], Mapping[str, Any], str], Any] | None = None,
@@ -109,6 +110,7 @@ def render_operating_desk(
             request_additional_literature=research_request_additional_literature,
             request_initial_answer=research_request_initial_answer,
             request_answer_update=research_request_answer_update,
+            review_answer_draft=research_review_answer_draft,
         )
     elif selected_view == "attention":
         render_attention_queue(

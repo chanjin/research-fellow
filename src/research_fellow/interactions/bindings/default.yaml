@@ -174,30 +174,18 @@ interactions:
     type: review_form
     variant: research_answer_draft
     title: 연구질문 답변 Draft 검토
-    help: Markdown을 직접 수정해 저장할 수 있습니다. 최신 Draft를 승인하면 다음 문헌 라운드가 열리며, 필요하면 다음 라운드에서 사용할 연구질문도 함께 보완할 수 있습니다.
-    submit_label: Draft 승인 · 다음 라운드 준비
+    help: Markdown을 직접 수정해 저장할 수 있습니다. 최신 Draft를 승인하면 다음 문헌 라운드가 열립니다.
+    submit_label: Draft 승인
 - id: request_followup_literature_direction
   renderer:
     type: text_input
-    title: 추가 문헌 조사 방향
-    help: 현재 연구질문과 기존 확보 근거를 바탕으로, 이번 추가 탐색에서 무엇을 더 확인할지 지정합니다. 기존 논문을 단순 반복 검색하지 않고 이 방향을 우선합니다.
+    title: 연구질문 수정
+    help: 승인된 연구질문을 다음 라운드에 맞게 수정합니다.
     fields:
     - name: direction
-      label: 추가로 조사할 방향
+      label: 연구질문 수정
       widget: text_area
       required: true
-      height: 120
-      placeholder: '예: Agent Harness와 장기 실행 안정성 관련 최근 연구를 중심으로 조사'
-    - name: specific_questions
-      label: 이번 조사에서 특히 확인할 내용 (선택)
-      widget: text_area
-      required: false
-      height: 110
-      placeholder: '예: 기존 agent loop의 한계, 2025~2026년 최신 접근, 산업 적용 사례'
-    - name: expected_evidence
-      label: 기대하는 근거 형태 (선택)
-      widget: text_area
-      required: false
-      height: 90
-      placeholder: '예: 비교 실험, 장기 실행 실패 사례, 실제 시스템 평가 결과'
-    submit_label: 추가 문헌 조사 시작
+      height: 130
+      placeholder: '예: 기존 AI maturity model은 Agentic AI의 자율성과 workflow orchestration을 어떻게 평가하는가?'
+    submit_label: 다음 라운드 시작

@@ -33,10 +33,7 @@ def _render_knowledge_state(st: Any, snapshot: Mapping[str, Any], *, english: bo
             st.markdown(f"**{_short(card.get('title', ''), 140)}**")
             st.caption(" · ".join(labels))
             if card.get("claim"):
-                st.write(_short(card.get("claim", ""), 520))
-            source_meta = " · ".join(x for x in [str(card.get("source_name") or "").strip(), str(card.get("publication_year") or "").strip()[:4]] if x)
-            if source_meta:
-                st.caption(("Source · " if english else "출처 · ") + source_meta)
+                st.write(_short(card.get("claim", ""), 240))
             st.caption(
                 ("supporting evidence: " if english else "추가 근거: ")
                 + str(int(card.get("supporting_evidence_count") or 0))
@@ -547,10 +544,20 @@ def _render_structure_and_gaps(
             try:
                 result = dict(enqueue_ontology_work() or {})
                 created = len(result.get("created_task_ids") or [])
-                st.success(
-                    (f"Created {created} external-LLM curation task(s)." if english else f"외부 LLM Ontology 큐레이션 작업 {created}건을 Attention > Inputs에 준비했습니다.")
-                )
-                st.rerun()
+                if created:
+                    st.success(
+                        (
+                            f"Created {created} external-LLM Ontology task(s). Open Attention > Inputs to copy the prompt and paste the LLM response."
+                            if english else
+                            f"외부 LLM Ontology 작업 {created}건을 준비했습니다. Attention > Inputs에서 프롬프트를 복사하고 LLM 응답을 붙여넣으세요."
+                        )
+                    )
+                else:
+                    st.info(
+                        "An Ontology proposal task is already pending in Attention > Inputs."
+                        if english else
+                        "이미 처리 대기 중인 Ontology 제안 작업이 있습니다. Attention > Inputs에서 계속 진행하세요."
+                    )
             except Exception as exc:
                 st.error(str(exc))
 

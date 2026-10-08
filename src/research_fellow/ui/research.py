@@ -23,6 +23,9 @@ def _render_new_work(
     *,
     english: bool,
     submit_research_question: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
+    prepare_from_local_papers: Callable[[Mapping[str, Any], list[tuple[str, bytes]]], Mapping[str, Any]] | None,
+    start_from_local_papers: Callable[[Mapping[str, Any], list[tuple[str, bytes]], str], Mapping[str, Any]] | None,
+    extract_local_paper_metadata: Callable[[str, bytes], Mapping[str, Any]] | None,
     prepare_external_advisory: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
     submit_external_advisory: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None,
 ) -> None:
@@ -43,7 +46,7 @@ def _render_new_work(
 
     active_key = "research-intake-active"
     pending_key = "research-intake-external-pending"
-    left, right = st.columns(2)
+    left, middle, right = st.columns(3)
     if left.button(
         "+ Research Question" if english else "+ 연구질문 제시",
         use_container_width=True,
@@ -51,6 +54,14 @@ def _render_new_work(
         key="research-intake-open-question",
     ):
         st.session_state[active_key] = "research_question"
+        st.session_state.pop(pending_key, None)
+    if middle.button(
+        "+ Start from Local Paper" if english else "+ 로컬 논문에서 시작",
+        use_container_width=True,
+        type="primary" if st.session_state.get(active_key) == "local_paper" else "secondary",
+        key="research-intake-open-local-paper",
+    ):
+        st.session_state[active_key] = "local_paper"
         st.session_state.pop(pending_key, None)
     if right.button(
         "+ External Advisory Request" if english else "+ 외부 자문 요청",
@@ -96,6 +107,92 @@ def _render_new_work(
                 st.rerun()
             except ValueError as error:
                 st.error(str(error))
+        return
+
+    if active == "local_paper":
+        st.caption(
+            "Upload one or more seed papers. Their full text is used to refine the question/context before the first related-literature search."
+            if english else
+            "하나 이상의 seed 논문 PDF를 올립니다. 원문을 바탕으로 연구질문과 맥락을 보강한 뒤 관련 문헌 탐색을 시작합니다."
+        )
+        uploaded_files = st.file_uploader(
+            "Seed paper PDFs" if english else "Seed 논문 PDF",
+            type=["pdf"], accept_multiple_files=True, key="research-intake-local-paper-files"
+        )
+        question = st.text_area(
+            "Initial Research Question" if english else "초기 연구질문",
+            height=90, key="research-intake-local-paper-question"
+        )
+        context = st.text_area(
+            "Research Context" if english else "연구 맥락",
+            height=90, key="research-intake-local-paper-context"
+        )
+        files = [(str(getattr(f, "name", "paper.pdf")), bytes(f.getvalue())) for f in (uploaded_files or [])]
+        if files and extract_local_paper_metadata is not None:
+            with st.expander((f"Seed papers ({len(files)})" if english else f"Seed 논문 ({len(files)})"), expanded=False):
+                for filename, payload in files:
+                    try:
+                        meta = dict(extract_local_paper_metadata(filename, payload))
+                        label = str(meta.get("title") or filename)
+                        details = " · ".join(x for x in [str(meta.get("publication_year") or ""), ", ".join(meta.get("authors") or [])] if x)
+                        st.markdown(f"**{label}**" + (f"  \n{details}" if details else ""))
+                    except ValueError as error:
+                        st.warning(f"{filename}: {error}")
+
+        pending_local_key = "research-intake-local-papers-pending"
+        pending_local = st.session_state.get(pending_local_key)
+        if not isinstance(pending_local, Mapping):
+            if st.button(
+                "Prepare RQ Refinement Prompt" if english else "연구질문 보강 프롬프트 생성",
+                type="primary", use_container_width=True, key="research-intake-local-paper-prepare",
+                disabled=(not files or not str(question or "").strip() or prepare_from_local_papers is None),
+            ):
+                try:
+                    prepared = dict(prepare_from_local_papers({"question": question, "context": context}, files))
+                    prepared["files"] = files
+                    st.session_state[pending_local_key] = prepared
+                    st.rerun()
+                except ValueError as error:
+                    st.error(str(error))
+            return
+
+        st.markdown("#### " + ("Refine Question with Seed Papers" if english else "Seed 논문으로 연구질문 보강"))
+        st.caption(
+            "Copy the prompt to your LLM, then paste the JSON response below. The confirmed question/context will become the Research input and start the first related-literature round."
+            if english else
+            "프롬프트를 외부 LLM에 전달하고 JSON 응답을 붙여넣으세요. 확정된 질문/맥락이 Research Input이 되고 첫 관련 문헌탐색을 시작합니다."
+        )
+        with st.expander("LLM Prompt" if english else "LLM 프롬프트", expanded=False):
+            st.code(str(pending_local.get("prompt") or ""), language=None)
+        response = st.text_area(
+            "LLM JSON response" if english else "LLM JSON 응답", height=260,
+            key="research-intake-local-paper-refinement-response",
+        )
+        left_action, right_action = st.columns([2, 1])
+        if left_action.button(
+            "Confirm RQ · Start Literature Search" if english else "연구질문 확정 · 문헌탐색 시작",
+            type="primary", use_container_width=True, key="research-intake-local-paper-finalize",
+            disabled=(not str(response or "").strip() or start_from_local_papers is None),
+        ):
+            try:
+                created = start_from_local_papers(
+                    {"question": pending_local.get("initial_question", question), "context": pending_local.get("initial_context", context)},
+                    list(pending_local.get("files") or files), response,
+                )
+                st.session_state.pop(pending_local_key, None)
+                st.session_state.pop(active_key, None)
+                refined = dict(created.get("refined") or {})
+                st.session_state["research-intake-flash"] = (
+                    f"Research question refined from {len(created.get('seed_papers') or [])} seed papers and the first related-literature search was started."
+                    if english else
+                    f"Seed 논문 {len(created.get('seed_papers') or [])}편으로 연구질문/맥락을 보강하고 첫 관련 문헌탐색을 시작했습니다. {refined.get('refinement_note') or ''}"
+                )
+                st.rerun()
+            except (ValueError, RuntimeError) as error:
+                st.error(str(error))
+        if right_action.button("Back" if english else "이전", use_container_width=True, key="research-intake-local-paper-back"):
+            st.session_state.pop(pending_local_key, None)
+            st.rerun()
         return
 
     pending = st.session_state.get(pending_key)
@@ -155,6 +252,11 @@ def render_research_workspace(
     snapshot: Mapping[str, Any],
     *,
     submit_research_question: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    prepare_from_local_papers: Callable[[Mapping[str, Any], list[tuple[str, bytes]]], Mapping[str, Any]] | None = None,
+    start_from_local_papers: Callable[[Mapping[str, Any], list[tuple[str, bytes]], str], Mapping[str, Any]] | None = None,
+    extract_local_paper_metadata: Callable[[str, bytes], Mapping[str, Any]] | None = None,
+    add_local_paper_to_rq: Callable[[str, Mapping[str, Any], str, bytes], Mapping[str, Any]] | None = None,
+    submit_local_paper_review: Callable[[Mapping[str, Any], str], Mapping[str, Any]] | None = None,
     prepare_external_advisory: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     submit_external_advisory: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     request_additional_literature: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
@@ -178,6 +280,9 @@ def render_research_workspace(
         st,
         english=english,
         submit_research_question=submit_research_question,
+        prepare_from_local_papers=prepare_from_local_papers,
+        start_from_local_papers=start_from_local_papers,
+        extract_local_paper_metadata=extract_local_paper_metadata,
         prepare_external_advisory=prepare_external_advisory,
         submit_external_advisory=submit_external_advisory,
     )
@@ -329,28 +434,24 @@ def render_research_workspace(
             progress_bits.append("Answer -" if english else "답변 -")
 
         with st.container(border=True):
-            st.markdown(f"#### {item.get('question', '')}")
+            rq_version = int(item.get("question_version") or 1)
+            title_suffix = f" · v{rq_version}" if rq_version > 1 else ""
+            st.markdown(f"#### {item.get('question', '')}{title_suffix}")
             st.markdown(("**Current:** " if english else "**현재 상태:** ") + state_summary)
             st.caption(" · ".join(progress_bits))
+            next_action_visible = str(item.get("next_agent_action") or "").strip()
+            if next_action_visible:
+                st.info(("Next: " if english else "다음 할 일: ") + next_action_visible)
 
-            # Research-question versions are durable researcher inputs.  Show the
-            # latest one explicitly instead of letting a refined next-round RQ
-            # disappear into the card title / internal version history.
-            rq_version = int(item.get("question_version") or 1)
-            st.markdown("**Inputs**")
-            with st.container(border=True):
-                input_label = (
-                    f"Research Question v{rq_version}" if english else f"연구질문 v{rq_version}"
-                )
-                if rq_version > 1:
-                    input_label += " · Next-round input" if english else " · 다음 라운드 입력"
-                st.caption(input_label)
-                st.write(str(item.get("question") or ""))
-                change_reason = str(item.get("question_change_reason") or "").strip()
-                if change_reason and rq_version > 1:
-                    st.caption(("Why it changed: " if english else "변경 사유: ") + change_reason)
-
+            # A revised question is already the current research question. Do not
+            # repeat it as another next-round Input card. Keep the version history
+            # available only as a reference.
             question_versions = [dict(x) for x in (item.get("question_versions") or [])]
+            if rq_version <= 1:
+                st.markdown("**Inputs**")
+                with st.container(border=True):
+                    st.caption("Research Question" if english else "연구질문")
+                    st.write(str(item.get("question") or ""))
             if len(question_versions) > 1:
                 with st.expander("Research-question history" if english else "이전 연구질문 보기", expanded=False):
                     for version_item in reversed(question_versions[:-1]):
@@ -392,10 +493,15 @@ def render_research_workspace(
 
             action_left, action_mid, action_right = st.columns(3)
             followup_open_key = f"rq-followup-direction-open-{rq_id}"
-            if request_additional_literature is not None:
-                followup_ready = bool(item.get("additional_literature_ready"))
+            if request_additional_literature is not None and rq_version <= 1:
+                followup_ready = bool(
+                    item.get("answer_draft_approved")
+                    and int(item.get("pending_knowledge_reviews") or 0) == 0
+                    and not item.get("answer_work_in_progress")
+                    and int(item.get("paper_review_pending") or 0) == 0
+                )
                 if action_left.button(
-                    "Additional literature" if english else "추가 문헌 조사",
+                    "Revise Research Question" if english else "연구질문 수정",
                     key=f"rq-additional-literature-{rq_id}",
                     use_container_width=True,
                     disabled=not followup_ready,
@@ -461,6 +567,8 @@ def render_research_workspace(
 
             if item.get("answer_draft") and review_answer_draft is not None:
                 st.divider()
+                if rq_version > 1:
+                    st.caption("이전 라운드 결과 · 참고")
                 version = int(item.get("answer_version") or 1)
                 approved = bool(item.get("answer_draft_approved"))
                 status_text = ("Approved" if english else "승인됨") if approved else ("Review required" if english else "승인 필요")
@@ -476,11 +584,10 @@ def render_research_workspace(
                         "Round 2로 넘어가기 전에 최신 Draft를 검토하고 승인하세요."
                     )
                 with st.expander(
-                    (f"View latest Draft v{version}" if english else f"최신 Draft v{version} 보기"),
+                    f"Latest Research Answer v{version}" if english else f"최신 연구질문 답변 v{version} 보기",
                     expanded=False,
                 ):
                     st.markdown(str(item.get("answer_draft") or ""))
-
                     from research_fellow.application.research_answer_export import answer_markdown_bytes, answer_html_bytes, answer_pdf_bytes
                     export_title = str(item.get("question") or f"Research Answer v{version}")
                     base_name = f"research-answer-{rq_id}-v{version}"
@@ -507,24 +614,6 @@ def render_research_workspace(
                             file_name=f"{base_name}.pdf", mime="application/pdf",
                             key=f"rq-answer-export-pdf-{rq_id}-{version}", use_container_width=True,
                         )
-
-                previous_answers = list(item.get("previous_answer_versions") or [])
-                if previous_answers:
-                    with st.expander(
-                        (f"Previous draft versions ({len(previous_answers)})" if english else f"이전 Draft 버전 ({len(previous_answers)})"),
-                        expanded=False,
-                    ):
-                        for previous in previous_answers:
-                            previous_version = int(previous.get("answer_version") or 1)
-                            approval_suffix = (" · approved" if english else " · 승인됨") if previous.get("approved") else ""
-                            created_at = str(previous.get("created_at") or "").strip()
-                            meta = f"v{previous_version}{approval_suffix}"
-                            if created_at:
-                                meta += f" · {created_at}"
-                            st.markdown(f"**{meta}**")
-                            st.markdown(str(previous.get("report") or ""))
-                            if previous is not previous_answers[-1]:
-                                st.divider()
 
                 reopen_key = f"rq-answer-reopen-{rq_id}-{version}"
                 show_review_editor = not approved
@@ -583,17 +672,14 @@ def render_research_workspace(
             if request_additional_literature is not None and st.session_state.get(followup_open_key):
                 st.divider()
                 st.caption(
-                    "Specify what this follow-up round should investigate beyond the evidence already collected for this question."
+                    "Define the deeper research question for Round 2."
                     if english else
-                    "이번 추가 문헌 라운드에서 기존 근거를 넘어 무엇을 더 확인할지 방향을 지정하세요."
+                    "2차 문헌탐색에서 더 깊이 확인할 연구질문을 입력하세요."
                 )
-                current_titles = [str(x) for x in item.get("direct_evidence_titles") or [] if str(x).strip()]
-                if current_titles:
-                    st.caption(("Already collected for this RQ: " if english else "현재 RQ에서 이미 확보한 근거: ") + " · ".join(_short(x, 75) for x in current_titles[:6]))
                 st.info(
-                    "Submitting this form is the researcher approval boundary. Only after approval is a new M1 literature round created."
+                    "Submitting the deep research question starts Round 2 literature discovery."
                     if english else
-                    "이 입력의 제출이 연구자 승인 경계입니다. 승인 후에만 새 M1 문헌조사 라운드가 생성됩니다."
+                    "심화 연구질문을 제출하면 2차 문헌탐색 라운드가 시작됩니다."
                 )
                 followup_result = render_interaction(
                     st,
@@ -618,13 +704,122 @@ def render_research_workspace(
                         st.session_state.pop(followup_open_key, None)
                         direction = str(outcome.get("direction") or "").strip()
                         st.session_state["research-action-flash"] = (
-                            f"Additional literature exploration started: {direction}. Next: continue it in Attention when work appears." if english else
-                            f"추가 문헌 조사 방향을 반영해 새 탐색 라운드를 시작했습니다: {direction}. 다음 작업: Attention에 새 작업이 생성되면 이어서 처리하세요."
+                            f"Round 2 literature exploration started: {direction}." if english else
+                            f"심화 연구질문을 반영해 2차 문헌탐색을 시작했습니다: {direction}."
                         )
                         st.session_state["attention-focus-rq"] = rq_id
                         st.rerun()
                     except ValueError as error:
                         st.error(str(error))
+
+            if add_local_paper_to_rq is not None:
+                with st.expander("+ Add Local PDF Paper" if english else "+ PDF 논문 추가", expanded=False):
+                    st.caption(
+                        "Attach a local paper directly to this research question and review it without running literature discovery."
+                        if english else
+                        "이 연구질문에 로컬 논문을 직접 추가하고 문헌 탐색 없이 바로 리뷰합니다."
+                    )
+                    local_pdf = st.file_uploader(
+                        "Paper PDF" if english else "논문 PDF", type=["pdf"],
+                        key=f"rq-local-paper-file-{rq_id}"
+                    )
+                    extracted_meta: Mapping[str, Any] = {}
+                    pdf_fingerprint = "none"
+                    if local_pdf is not None:
+                        local_bytes = bytes(local_pdf.getvalue())
+                        import hashlib
+                        pdf_fingerprint = hashlib.sha256(local_bytes).hexdigest()[:10]
+                        if extract_local_paper_metadata is not None:
+                            try:
+                                extracted_meta = dict(extract_local_paper_metadata(str(getattr(local_pdf, "name", "paper.pdf")), local_bytes))
+                            except ValueError as error:
+                                st.warning(str(error))
+                    default_local_title = str(extracted_meta.get("title") or (str(getattr(local_pdf, "name", "")).rsplit(".", 1)[0] if local_pdf is not None else ""))
+                    default_local_year = str(extracted_meta.get("publication_year") or "")
+                    default_local_authors = ", ".join(str(x) for x in (extracted_meta.get("authors") or []))
+                    if local_pdf is not None:
+                        st.caption("PDF metadata extracted automatically; edit if needed." if english else "PDF 메타데이터를 자동 추출했습니다. 필요하면 수정하세요.")
+                    local_title = st.text_input(
+                        "Paper title" if english else "논문 제목", value=default_local_title,
+                        key=f"rq-local-paper-title-{rq_id}-{pdf_fingerprint}"
+                    )
+                    local_meta_left, local_meta_right = st.columns(2)
+                    local_year = local_meta_left.text_input("Year" if english else "발행 연도", value=default_local_year, key=f"rq-local-paper-year-{rq_id}-{pdf_fingerprint}")
+                    local_authors = local_meta_right.text_input("Authors" if english else "저자", value=default_local_authors, key=f"rq-local-paper-authors-{rq_id}-{pdf_fingerprint}")
+                    result_key = f"rq-local-paper-result-{rq_id}"
+                    recent_local = st.session_state.get(result_key)
+                    if isinstance(recent_local, Mapping):
+                        meta = dict(recent_local.get("metadata") or {})
+                        round_note = ("Added to the current unfinished literature round." if recent_local.get("reused_current_round") else "Added as a manual paper-review context.") if english else ("현재 완료되지 않은 문헌조사 라운드에 추가했습니다." if recent_local.get("reused_current_round") else "독립 논문 리뷰 맥락으로 추가했습니다.")
+                        st.success(f"{round_note} {meta.get('title') or ''}")
+                        if recent_local.get("full_text_extraction_note"):
+                            st.caption(str(recent_local.get("full_text_extraction_note")))
+                        prompt = str(recent_local.get("review_prompt") or "")
+                        if prompt:
+                            with st.expander("Paper Review prompt" if english else "논문 리뷰 프롬프트", expanded=True):
+                                st.code(prompt, language=None)
+                                st.caption("Copy this prompt to the external LLM, then paste the response below." if english else "이 프롬프트를 외부 LLM에 복사한 뒤, 응답을 아래에 붙여넣으세요.")
+                        if submit_local_paper_review is not None:
+                            review_response = st.text_area(
+                                "Paper Review response" if english else "논문 리뷰 응답 붙여넣기",
+                                key=f"rq-local-paper-review-response-{rq_id}",
+                                height=240,
+                                placeholder="Paste the JSON response from the external LLM." if english else "외부 LLM의 JSON 응답을 붙여넣으세요.",
+                            )
+                            if st.button(
+                                "Apply Review" if english else "리뷰 결과 반영",
+                                key=f"rq-local-paper-review-apply-{rq_id}",
+                                use_container_width=True,
+                                disabled=not str(review_response or "").strip(),
+                            ):
+                                try:
+                                    applied = dict(submit_local_paper_review(recent_local, review_response))
+                                    st.session_state[f"rq-local-paper-applied-{rq_id}"] = applied
+                                    request_ids = [str(x) for x in (applied.get("knowledge_request_ids") or []) if str(x)]
+                                    st.session_state["research-action-flash"] = (
+                                        (f"Paper Review saved. Moving to Knowledge Card Decision ({len(request_ids)} candidate(s))." if request_ids else "Paper Review saved.")
+                                        if english else
+                                        (f"논문 리뷰를 저장했습니다. 지식카드 Decision {len(request_ids)}건으로 이동합니다." if request_ids else "논문 리뷰를 저장했습니다.")
+                                    )
+                                    # The canonical review write path already created Knowledge Card
+                                    # decision_request phenomena.  Move directly to the owning RQ's
+                                    # Decision queue instead of leaving the researcher on the review form.
+                                    if request_ids:
+                                        st.session_state["attention-focus-rq"] = rq_id
+                                        st.session_state["operating-desk-navigate"] = "attention"
+                                        st.session_state.pop(result_key, None)
+                                        st.session_state.pop(f"rq-local-paper-review-response-{rq_id}", None)
+                                    st.rerun()
+                                except ValueError as error:
+                                    st.error(str(error))
+                        applied = st.session_state.get(f"rq-local-paper-applied-{rq_id}")
+                        if isinstance(applied, Mapping):
+                            summary = str(applied.get("summary") or "").strip()
+                            if summary:
+                                with st.expander("Review result" if english else "논문 리뷰 결과", expanded=True):
+                                    st.markdown(summary)
+                            cards = list(applied.get("knowledge_cards") or [])
+                            if cards:
+                                st.caption((f"Knowledge Card candidates: {len(cards)}" if english else f"지식카드 후보 {len(cards)}건이 생성되었습니다."))
+                    if st.button(
+                        "Add and Review" if english else "추가하고 리뷰", type="primary",
+                        key=f"rq-local-paper-submit-{rq_id}", use_container_width=True,
+                        disabled=local_pdf is None,
+                    ):
+                        try:
+                            outcome = dict(add_local_paper_to_rq(
+                                rq_id,
+                                {"title": local_title, "publication_year": local_year, "authors": local_authors},
+                                str(getattr(local_pdf, "name", "paper.pdf")), bytes(local_pdf.getvalue()),
+                            ))
+                            st.session_state[result_key] = outcome
+                            st.session_state["research-action-flash"] = (
+                                "Local paper added to the current review work. The Paper Review prompt is ready below." if english else
+                                "로컬 논문을 현재 리뷰 작업에 추가했습니다. 아래에 논문 리뷰 프롬프트를 준비했습니다."
+                            )
+                            st.rerun()
+                        except ValueError as error:
+                            st.error(str(error))
 
             with st.expander("Progress details" if english else "세부 진행상황", expanded=False):
                 st.caption(f"{lifecycle_label} · {status_label}")

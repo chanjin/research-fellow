@@ -21,6 +21,7 @@ from research_fellow.infrastructure.workflow_checkpoint import JsonFileCheckpoin
 from research_fellow.memory import KnowledgeMemory, RelationMemory
 from research_fellow.storage import Ledger
 from research_fellow.application.paper_review_tasks import apply_paper_review_response
+from research_fellow.application.ontology_workflow import apply_ontology_task_response
 from research_fellow.application.literature_candidate_review import candidate_library_context
 
 
@@ -62,15 +63,31 @@ def interaction_inputs_for_attention_item(item: Mapping[str, Any], ledger: Ledge
     if source_type == "research_task" and interaction_id == "provide_external_llm_result":
         task = dict(payload)
         task_payload = dict(task.get("payload") or {})
-        if str(task.get("subject_type") or "") != "paper_first_review":
+        subject_type = str(task.get("subject_type") or "")
+        if subject_type == "paper_first_review":
+            stage = "single_paper_first_review"
+            prompt_source = "durable_paper_review_task"
+            item_key = str(task_payload.get("paper_id") or task.get("subject_id") or "")
+            expected = str(task_payload.get("expected_output") or "JSON papers[] with executive_summary, source-grounded claims, and review_note")
+        elif subject_type in {
+            "ontology_type_suggestion",
+            "ontology_relation_suggestion",
+            "ontology_facet_suggestion",
+            "knowledge_relation_suggestion",
+        }:
+            stage = subject_type
+            prompt_source = "durable_ontology_task"
+            item_key = str(task.get("subject_id") or task.get("phenomenon_id") or "")
+            expected = str(task_payload.get("expected_output") or "JSON ontology proposal")
+        else:
             return None
         return {"external_llm_task": {
             "task_id": str(task.get("phenomenon_id") or ""),
-            "stage": "single_paper_first_review",
-            "item_key": str(task_payload.get("paper_id") or task.get("subject_id") or ""),
+            "stage": stage,
+            "item_key": item_key,
             "prompt": str(task_payload.get("prompt") or ""),
-            "prompt_source": "durable_paper_review_task",
-            "expected_output": str(task_payload.get("expected_output") or "JSON papers[] with executive_summary, source-grounded claims, and review_note"),
+            "prompt_source": prompt_source,
+            "expected_output": expected,
         }}
 
     if source_type == "workflow_interaction":
@@ -260,10 +277,24 @@ def apply_attention_response(
         response = str(values.get("external_llm_response") or "").strip()
         if not response:
             raise ValueError("외부 LLM 응답이 비어 있습니다.")
-        try:
-            outcome = apply_paper_review_response(ledger, task, response)
-        except Exception as error:
-            raise ValueError(f"논문 원문 리뷰 응답을 반영하지 못했습니다: {error}") from error
+        subject_type = str(task.get("subject_type") or "")
+        if subject_type == "paper_first_review":
+            try:
+                outcome = apply_paper_review_response(ledger, task, response)
+            except Exception as error:
+                raise ValueError(f"논문 원문 리뷰 응답을 반영하지 못했습니다: {error}") from error
+        elif subject_type in {
+            "ontology_type_suggestion",
+            "ontology_relation_suggestion",
+            "ontology_facet_suggestion",
+            "knowledge_relation_suggestion",
+        }:
+            try:
+                outcome = apply_ontology_task_response(ledger, memory, task, response)
+            except Exception as error:
+                raise ValueError(f"Ontology 제안 응답을 반영하지 못했습니다: {error}") from error
+        else:
+            raise ValueError(f"지원하지 않는 research_task입니다: {subject_type}")
         return AttentionResolutionResult(str(item.get("attention_id") or ""), interaction_id, "completed", dict(outcome))
 
     if source_type == "workflow_interaction":

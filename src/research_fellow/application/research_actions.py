@@ -4,7 +4,7 @@ from typing import Any, Iterable, Mapping
 
 from research_fellow.application.advising_rq_intents import create_auto_exploration_intent_for_rq
 from research_fellow.application.advising_state import recent_knowledge_updates
-from research_fellow.application.research_answer import latest_research_answer, research_answer_is_approved, request_initial_research_answer, request_research_answer_update
+from research_fellow.application.research_answer import latest_research_answer, request_initial_research_answer, request_research_answer_update
 from research_fellow.application.research_evidence import rq_evidence_bundle
 from research_fellow.storage import Ledger
 
@@ -128,97 +128,65 @@ def request_additional_literature(
     rq_id: str,
     direction: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Create a follow-up M1 round only after explicit researcher approval.
+    """Revise the research question and start a fresh literature round.
 
-    New knowledge does not call an LLM or create Attention by itself.  At this
-    boundary the researcher supplies/approves the exploration direction, and the
-    resulting M1 intent receives the accumulated RQ evidence and latest answer.
+    The function name is retained for application/UI compatibility, but the
+    boundary is now a Research Question revision rather than an accumulated
+    follow-up search. The revised question is versioned first, then dispatched
+    through the same fresh M1 literature-discovery path used by a new RQ.
     """
     rq = ledger.research_question(rq_id)
     if not rq:
         raise ValueError("Unknown research question")
-    if latest_research_answer(ledger, rq_id) is None:
-        raise ValueError("추가 문헌 조사 전에 현재 연구질문에 대한 Research Answer Draft를 먼저 작성하세요.")
-    if not research_answer_is_approved(ledger, rq_id):
-        raise ValueError("추가 문헌 조사 전에 최신 Research Answer Draft를 연구자가 승인해야 합니다.")
-    direction_text = str(direction.get("direction") or "").strip()
-    if not direction_text:
-        raise ValueError("추가 문헌 조사 방향을 입력하세요.")
-    specific_questions = str(direction.get("specific_questions") or "").strip()
-    expected_evidence = str(direction.get("expected_evidence") or "").strip()
 
-    current = followup_literature_context(ledger, memory_cards, rq_id)
-    evidence_summary = dict(current.get("current_evidence_summary") or {})
-    base_context = str(rq.get("research_context") or "").strip()
-    followup_context = "\n".join(
-        part for part in [
-            base_context,
-            "FOLLOW-UP LITERATURE ROUND — RESEARCHER APPROVED",
-            f"Researcher-approved exploration: {direction_text}",
-            f"Specific questions to verify: {specific_questions}" if specific_questions else "",
-            _evidence_context_text(evidence_summary),
-            "Use the accumulated knowledge and answer draft as the starting state. Do not repeat already collected papers unless needed for verification; prioritize literature that challenges, extends, or fills concrete gaps in the current research answer.",
-        ] if part
+    revised_question = str(direction.get("direction") or "").strip()
+    if not revised_question:
+        raise ValueError("연구질문을 입력하세요.")
+    current_question = str(rq.get("question") or "").strip()
+    if revised_question == current_question:
+        raise ValueError("기존 연구질문과 다른 심화 연구질문을 입력하세요.")
+
+    change_reason = "승인된 연구답변을 바탕으로 다음 라운드를 위해 연구질문을 구체화했습니다."
+    if not ledger.refine_research_question(rq_id, revised_question, change_reason):
+        raise ValueError("연구질문을 수정하지 못했습니다.")
+
+    refreshed = ledger.research_question(rq_id) or {**rq, "question": revised_question}
+    exploration_need = (
+        "수정된 연구질문 자체와 연구자가 제공한 기존 연구 맥락을 기준으로 외부 문헌에서 "
+        "기초 근거, 반대 근거, 적용 조건, 관련 방법과 사례를 탐색한다."
     )
-    exploration_need = expected_evidence or (
-        f"추가 탐색 방향 '{direction_text}'에 대해 현재 RQ의 기존 근거와 답변 초안을 보완·반박·확장하는 출처 기반 근거"
-    )
-    forced = {
-        **rq,
-        "_force_followup": True,
-        "_followup_direction": direction_text,
-        "_followup_specific_questions": specific_questions,
-        "research_context": followup_context,
+    fresh = {
+        **refreshed,
+        "_fresh_intake": True,
+        "research_context": str(refreshed.get("research_context") or "").strip(),
         "exploration_need": exploration_need,
+        "rationale": str(refreshed.get("rationale") or "").strip(),
+        "gap_or_tension": str(refreshed.get("gap_or_tension") or "").strip(),
     }
     dispatched = create_auto_exploration_intent_for_rq(
         ledger,
-        forced,
+        fresh,
         score=4,
         selection_reason=(
-            f"연구자가 축적된 지식과 현재 연구결과를 확인한 뒤 추가 문헌 조사 방향을 승인했습니다: {direction_text}"
+            "연구자가 기존 연구답변을 검토한 뒤 연구질문을 수정했으며, "
+            "수정된 질문에 대해 새로운 첫 문헌탐색을 시작합니다."
         ),
     )
     intent = dispatched["intent"]
-
-    # Existing review tables mark only the knowledge updates actually consumed
-    # by this researcher-approved M2→M1 handoff. No new workflow state is added.
-    pending_ids = {str(x) for x in evidence_summary.get("pending_knowledge_update_ids") or [] if str(x)}
-    if pending_ids:
-        relevant_updates = []
-        for item in recent_knowledge_updates(ledger, limit=500):
-            item_ids = {str(x) for x in (item.get("pending_update_ids") or [item.get("phenomenon_id")]) if str(x)}
-            if item_ids & pending_ids:
-                relevant_updates.append(item)
-        review_id = ledger.create_research_state_review("manual", relevant_updates)
-        ledger.link_research_question_review(review_id, rq_id, "followup_literature_approved")
-        ledger.complete_research_state_review(
-            review_id,
-            generated_rq_count=0,
-            selected_rq_count=1,
-            summary=f"연구자가 누적 지식 {len(relevant_updates)}건을 반영한 추가 문헌 탐색을 승인했습니다.",
-        )
-
     ledger.add_research_question_change(
         rq_id,
-        "additional_literature_requested",
-        (
-            f"연구자가 누적 지식과 현재 연구결과를 확인한 뒤 M1 탐색 Intent {intent.intent_id}를 승인했습니다. "
-            f"방향: {direction_text}"
-        ),
+        "revised_question_literature_started",
+        f"연구질문이 수정되어 새로운 초기 문헌탐색 라운드 Intent {intent.intent_id}를 시작했습니다: {revised_question}",
     )
     return {
         "status": "ready",
         "rq_id": rq_id,
         "intent_id": intent.intent_id,
         "title": intent.title,
-        "direction": direction_text,
-        "specific_questions": specific_questions,
-        "expected_evidence": exploration_need,
-        "current_evidence_summary": evidence_summary,
+        "direction": revised_question,
         "reused": bool(dispatched.get("reused")),
+        "round_mode": "fresh_intake",
     }
-
 
 def request_initial_answer(ledger: Ledger, memory_cards: list[dict[str, Any]], rq_id: str) -> dict[str, Any]:
     return request_initial_research_answer(ledger, memory_cards, rq_id)

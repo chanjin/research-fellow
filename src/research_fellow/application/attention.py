@@ -119,7 +119,10 @@ def _rq_for_intent(ledger: Ledger, intent_id: str) -> tuple[str, str, int]:
     title = str(rq.get("question") or rq.get("title") or "").strip()
     round_no = 0
     if rq_id:
-        intents = list(reversed(ledger.research_question_intents(rq_id)))
+        intents = [
+            row for row in reversed(ledger.research_question_intents(rq_id))
+            if not str(row.get("intent_id") or "").startswith("intent-local-")
+        ]
         for idx, row in enumerate(intents, start=1):
             if str(row.get("intent_id") or "") == intent_id:
                 round_no = idx
@@ -322,7 +325,6 @@ def build_attention_queue(
             paper = ledger.shelf_paper(paper_id) if paper_id else None
             payload["review_summary"] = str((analysis or {}).get("summary") or "")
             payload["review_paper_title"] = str((paper or {}).get("title") or "")
-            payload["publication_year"] = str((paper or {}).get("publication_year") or payload.get("publication_year") or "")
             request_view["payload"] = payload
         source_id = str(request_view.get("phenomenon_id") or request_view.get("request_id") or "")
         intent_id = str(payload.get("intent_id") or "").strip()
@@ -366,25 +368,46 @@ def build_attention_queue(
         ))
 
     for task in ledger.phenomena(type_="research_task", status="ready"):
-        if str(task.get("subject_type") or "") != "paper_first_review":
-            continue
+        subject_type = str(task.get("subject_type") or "")
         payload = dict(task.get("payload") or {})
-        intent_id = str(payload.get("intent_id") or "").strip()
-        if intent_id and (intent_id in active_round_ids or intent_id in completed_literature_intents):
+        if subject_type == "paper_first_review":
+            intent_id = str(payload.get("intent_id") or "").strip()
+            # Legacy local-PDF intake used synthetic intent-local-* review tasks.
+            # Local PDF review now lives inline on the Research card, so these
+            # historical tasks must not reappear as a fake literature round.
+            if intent_id.startswith("intent-local-"):
+                continue
+            if intent_id and (intent_id in active_round_ids or intent_id in completed_literature_intents):
+                continue
+            rq_id, rq_title, round_no = _rq_for_intent(ledger, intent_id)
+            paper = dict(payload.get("paper") or {})
+            paper_title = str(paper.get("title") or payload.get("title") or "Paper").strip()
+            items.append(_attention_item(
+                category="inputs", interaction_id="provide_external_llm_result",
+                source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
+                title=rq_title or paper_title, summary=f"논문별 원문 리뷰 · {paper_title}",
+                priority="medium", created_at=str(task.get("created_at") or ""), payload=task,
+                subject_title=rq_title, round_id=intent_id,
+                round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
+                phase_label=f"논문 원문 리뷰 · {paper_title[:60]}",
+                rq_id=rq_id,
+            ))
             continue
-        rq_id, rq_title, round_no = _rq_for_intent(ledger, intent_id)
-        paper = dict(payload.get("paper") or {})
-        paper_title = str(paper.get("title") or payload.get("title") or "Paper").strip()
-        items.append(_attention_item(
-            category="inputs", interaction_id="provide_external_llm_result",
-            source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
-            title=rq_title or paper_title, summary=f"논문별 원문 리뷰 · {paper_title}",
-            priority="medium", created_at=str(task.get("created_at") or ""), payload=task,
-            subject_title=rq_title, round_id=intent_id,
-            round_label=(f"문헌조사 #{round_no}" if round_no else ("문헌조사" if intent_id else "")),
-            phase_label=f"논문 원문 리뷰 · {paper_title[:60]}",
-            rq_id=rq_id,
-        ))
+
+        if subject_type in {
+            "ontology_type_suggestion",
+            "ontology_relation_suggestion",
+            "ontology_facet_suggestion",
+            "knowledge_relation_suggestion",
+        }:
+            task_title = str(payload.get("title") or task.get("subject_id") or "Ontology proposal").strip()
+            items.append(_attention_item(
+                category="inputs", interaction_id="provide_external_llm_result",
+                source_type="research_task", source_id=str(task.get("phenomenon_id") or ""),
+                title=task_title, summary="Ontology proposal · copy prompt → external LLM → paste response",
+                priority="medium", created_at=str(task.get("created_at") or ""), payload=task,
+                phase_label="Ontology 제안",
+            ))
 
     items.extend(waiting_workflow_items)
 

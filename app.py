@@ -267,12 +267,14 @@ from research_fellow.application.research_intake import (
 )
 from research_fellow.application.research_question_progression import start_research_question_progression
 from research_fellow.application.research_actions import request_additional_literature, request_initial_answer, request_answer_update
-from research_fellow.application.research_answer import latest_research_answer, save_research_answer_revision, approve_research_answer_draft
+from research_fellow.application.research_answer import latest_research_answer
 from research_fellow.application.persistent_research_runtime import (
     PersistentResearchBindings, advance_persistent_research,
 )
 from research_fellow.application.knowledge_workspace import knowledge_workspace_snapshot
 from research_fellow.application.paper_library import update_paper_researcher_metadata, attach_paper_local_pdf
+from research_fellow.application.local_paper_intake import add_local_pdf_to_research_question, start_research_question_from_local_pdf, extract_local_pdf_metadata, prepare_research_question_from_local_papers, parse_research_question_from_local_papers_response
+from research_fellow.application.local_paper_intake import apply_local_pdf_review_response
 from research_fellow.application.literature_candidate_review import (
     preserve_literature_candidate, apply_candidate_review_response, attach_candidate_local_pdf, candidate_review_state,
     refresh_candidate_remote_full_text,
@@ -1322,6 +1324,79 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         )
         return {**created, "progression": {**progression, "execution": continuation}}
 
+    def _extract_local_paper_metadata(filename: str, content: bytes) -> Mapping[str, Any]:
+        return extract_local_pdf_metadata(filename=filename, content=content)
+
+    def _prepare_research_from_local_papers(payload: Mapping[str, Any], files: list[tuple[str, bytes]]) -> Mapping[str, Any]:
+        return prepare_research_question_from_local_papers(
+            initial_question=str(payload.get("question") or ""),
+            context=str(payload.get("context") or ""),
+            files=files,
+        )
+
+    def _start_research_from_local_papers(payload: Mapping[str, Any], files: list[tuple[str, bytes]], response: str) -> Mapping[str, Any]:
+        refined = parse_research_question_from_local_papers_response(response)
+        search_focus = list(refined.get("search_focus") or [])
+        refined_context = str(refined.get("context") or "").strip()
+        if search_focus:
+            refined_context = (refined_context + "\n\nNext literature search focus:\n- " + "\n- ".join(search_focus)).strip()
+        seed_meta = [extract_local_pdf_metadata(filename=name, content=content) for name, content in files]
+        created = ledger.create_research_question_thread(
+            question=str(refined["question"]),
+            source_type="local_papers",
+            rationale="연구자가 제공한 여러 seed 논문의 원문을 바탕으로 초기 질문과 맥락을 보강해 정의한 연구질문입니다.",
+            research_context=refined_context,
+            source_payload={
+                "researcher_comment": str(payload.get("context") or "").strip(),
+                "initial_question": str(payload.get("question") or "").strip(),
+                "refinement_note": str(refined.get("refinement_note") or "").strip(),
+                "search_focus": search_focus,
+                "seed_papers": [
+                    {"title": str(m.get("title") or ""), "authors": list(m.get("authors") or []), "publication_year": str(m.get("publication_year") or "")}
+                    for m in seed_meta
+                ],
+            },
+            status="interested",
+        )
+        rq_id = str(created.get("rq_id") or "")
+        ledger.add_research_question_change(
+            rq_id, "local_seed_refinement",
+            str(refined.get("refinement_note") or "로컬 seed 논문을 바탕으로 연구질문과 맥락을 보강했습니다."),
+        )
+        progression = start_research_question_progression(ledger, memory, created)
+        intent_ids = [
+            str(item.get("intent_id") or "")
+            for item in progression.get("dispatched_intents") or []
+            if str(item.get("intent_id") or "")
+        ]
+        seed_papers = []
+        for filename, content in files:
+            meta = extract_local_pdf_metadata(filename=filename, content=content)
+            seed_papers.append(add_local_pdf_to_research_question(
+                ledger, rq_id=rq_id, title=str(meta.get("title") or ""),
+                publication_year=str(meta.get("publication_year") or ""),
+                authors=list(meta.get("authors") or []), filename=filename, content=content,
+                storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY, workspace_keyword=WORKSPACE_KEY,
+            ))
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(), intent_ids=intent_ids,
+            max_m1_items=max(1, len(intent_ids)), consume_knowledge_updates=False,
+        )
+        return {**created, "refined": refined, "seed_papers": seed_papers, "progression": {**progression, "execution": continuation}}
+
+    def _add_local_paper_to_rq(rq_id: str, payload: Mapping[str, Any], filename: str, content: bytes) -> Mapping[str, Any]:
+        return add_local_pdf_to_research_question(
+            ledger,
+            rq_id=rq_id,
+            title=str(payload.get("title") or ""),
+            publication_year=str(payload.get("publication_year") or ""),
+            authors=str(payload.get("authors") or ""),
+            filename=filename,
+            content=content,
+            storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY,
+            workspace_keyword=WORKSPACE_KEY,
+        )
+
     def _prepare_external_advisory(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return prepare_external_advisory_interpretation(
             payload, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
@@ -1369,19 +1444,8 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         )
         return {**created, "execution": continuation}
 
-    def _review_answer_draft(rq_id: str, resolution: Mapping[str, Any]) -> Mapping[str, Any]:
-        data = dict(resolution or {})
-        action = str(data.get("action") or "").strip()
-        markdown_text = str(data.get("markdown") or "")
-        if action == "save":
-            return save_research_answer_revision(ledger, rq_id, markdown_text)
-        if action == "approve":
-            return approve_research_answer_draft(
-                ledger, rq_id, markdown_text=markdown_text,
-                next_question=str(data.get("next_question") or ""),
-                note=str(data.get("note") or ""),
-            )
-        raise ValueError("지원하지 않는 Research Answer 검토 작업입니다.")
+    def _submit_local_paper_review(review_context: Mapping[str, Any], response: str) -> Mapping[str, Any]:
+        return apply_local_pdf_review_response(ledger, review_context=review_context, response=response)
 
     def _update_paper_metadata(paper_id: str, labels: list[str] | str, note: str, full_text_url: str | None = None) -> Mapping[str, Any]:
         return update_paper_researcher_metadata(
@@ -1456,12 +1520,16 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         system=system,
         developer_mode=developer_mode,
         research_submit_question=_submit_research_question,
+        research_prepare_from_local_papers=_prepare_research_from_local_papers,
+        research_start_from_local_papers=_start_research_from_local_papers,
+        research_extract_local_paper_metadata=_extract_local_paper_metadata,
+        research_add_local_paper_to_rq=_add_local_paper_to_rq,
+        research_submit_local_paper_review=_submit_local_paper_review,
         research_prepare_external_advisory=_prepare_external_advisory,
         research_submit_external_advisory=_submit_external_advisory,
         research_request_additional_literature=_request_additional_literature,
         research_request_initial_answer=_request_initial_answer,
         research_request_answer_update=_request_answer_update,
-        research_review_answer_draft=_review_answer_draft,
         attention_interaction_inputs=_attention_inputs,
         attention_submit_response=_attention_submit,
         attention_candidate_action=_attention_candidate_action,
@@ -9494,30 +9562,21 @@ def main() -> None:
             ))
     except Exception as exc:
         st.sidebar.warning(ui_text(f"시작 시 서버 데이터 복원 확인 실패: {exc}", f"Startup server hydration check failed: {exc}"))
-    with st.sidebar.expander(ui_text("워크스페이스 이동·관리", "Transfer or manage workspaces"), expanded=False):
+    with st.sidebar.expander(ui_text("워크스페이스 추가·아카이브", "Add or archive workspaces"), expanded=False):
         st.caption(ui_text(
-            "집·학교 등 다른 PC로 현재 워크스페이스를 옮길 때 ZIP으로 내보내고 다시 불러올 수 있습니다.",
-            "Export the active workspace as a ZIP and reload it on another computer.",
+            "사용 중인 워크스페이스를 확인하고 새 공간을 만들거나 ZIP으로 아카이브할 수 있습니다.",
+            "Review active workspaces, create a new one, or archive a custom workspace as ZIP.",
         ))
-        st.markdown(ui_text("**현재 워크스페이스 이동**", "**Transfer active workspace**"))
-        st.caption(f"{WORKSPACE_PROFILE.label} · `{WORKSPACE_KEY}`")
-        if st.button(
-            ui_text("현재 Workspace ZIP 준비", "Prepare active Workspace ZIP"),
-            key="prepare-active-workspace-transfer",
-            use_container_width=True,
-        ):
-            try:
-                transfer_bytes = build_workspace_archive(WORKSPACE_PROFILE, DATA)
-                st.session_state["workspace-archive-download-bytes"] = transfer_bytes
-                st.session_state["workspace-archive-download-name"] = f"research-fellow-{WORKSPACE_KEY}-transfer.zip"
-            except (ValueError, OSError) as error:
-                st.error(str(error))
+        st.markdown(ui_text("**현재 워크스페이스**", "**Active workspaces**"))
+        for key, profile in WORKSPACE_PROFILES.items():
+            kind = ui_text("기본·보호됨", "built-in · protected") if key in BUILTIN_WORKSPACE_KEYS else ui_text("사용자 생성", "custom")
+            st.caption(f"• {profile.label} · `{key}` · {kind}")
         archived_bytes = st.session_state.get("workspace-archive-download-bytes")
         archived_name = str(st.session_state.get("workspace-archive-download-name") or "workspace.zip")
         if archived_bytes:
-            st.success(ui_text("Workspace Transfer ZIP이 준비되었습니다. 다른 PC에서 그대로 불러올 수 있습니다.", "The Workspace Transfer ZIP is ready and can be loaded on another computer."))
+            st.success(ui_text("아카이브가 준비되었습니다. 아래 ZIP을 내려받아 보관하세요.", "The archive is ready. Download and keep the ZIP below."))
             st.download_button(
-                ui_text("Workspace ZIP 내려받기", "Download Workspace ZIP"),
+                ui_text("워크스페이스 ZIP 내려받기", "Download workspace ZIP"),
                 data=archived_bytes, file_name=archived_name, mime="application/zip",
                 key="download-archived-workspace", use_container_width=True,
             )
@@ -9546,13 +9605,13 @@ def main() -> None:
             except ValueError as error:
                 st.error(str(error))
         st.divider()
-        st.markdown(ui_text("**Workspace ZIP 가져오기**", "**Import Workspace ZIP**"))
+        st.markdown(ui_text("**ZIP에서 다시 불러오기**", "**Reload from ZIP**"))
         restore_upload = st.file_uploader(
-            ui_text("Workspace Transfer ZIP", "Workspace Transfer ZIP"),
+            ui_text("워크스페이스 아카이브 ZIP", "Workspace archive ZIP"),
             type=["zip"], key="restore-workspace-archive-upload",
         )
         if st.button(
-            ui_text("Workspace ZIP 불러오기", "Import Workspace ZIP"),
+            ui_text("ZIP 워크스페이스 불러오기", "Reload workspace from ZIP"),
             disabled=restore_upload is None, key="restore-workspace-archive",
             use_container_width=True,
         ):
@@ -9561,8 +9620,8 @@ def main() -> None:
                     restore_upload.getvalue(), config_path=WORKSPACE_CONFIG, data_dir=DATA,
                 )
                 st.session_state["workspace-restore-message"] = ui_text(
-                    f"{restored_profile.label}을 새 워크스페이스로 불러왔습니다. " + ("연구 데이터와 원문 자산을 복원했습니다." if database_restored else "워크스페이스를 등록했습니다."),
-                    f"Imported {restored_profile.label} as a new workspace. " + ("Research data and source assets were restored." if database_restored else "The workspace was registered."),
+                    f"{restored_profile.label}을 불러왔습니다. " + ("DB도 복원했습니다." if database_restored else "기존 로컬 DB에 다시 연결했습니다."),
+                    f"Reloaded {restored_profile.label}. " + ("The database was restored." if database_restored else "Reconnected the existing local database."),
                 )
                 st.query_params["workspace"] = restored_profile.key
                 st.rerun()

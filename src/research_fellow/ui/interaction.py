@@ -178,6 +178,16 @@ def _render_sequential_paper_review(
     if not items:
         return InteractionRenderResult(interaction_id, True, {output_name: []})
 
+    # Rebuild ordering from durable review/deferral events, not a session-only list.
+    if callable(item_action):
+        def _is_deferred(candidate):
+            try:
+                state = item_action(dict(candidate), 'review_state')
+                return bool(state.get('deferred')) if isinstance(state, Mapping) else False
+            except Exception:
+                return False
+        items.sort(key=_is_deferred)
+
     if index >= len(items):
         st.success(f"후보 {len(items)}편 검토 완료 · 서재함 연결 {len(selected)}편")
         st.caption("보존한 논문의 RQ 관점 요약과 Knowledge Card 후보 생성까지 완료되었습니다. Knowledge Card 승인은 Decisions에서 계속합니다.")
@@ -190,12 +200,7 @@ def _render_sequential_paper_review(
         return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
 
     item = items[index]
-    # While a paper review is active, pin the exact candidate that produced the
-    # prompt. The workflow candidate list can be re-projected/reordered on a
-    # Streamlit rerun, so `items[index]` is not a stable identity.
-    active_candidate = active.get('candidate') if isinstance(active.get('candidate'), Mapping) else None
-    if int(active.get('index', -1)) == index and active_candidate:
-        item = dict(active_candidate)
+    # A deferred paper can be revisited only after normal candidates are handled.
 
     # Durable projection: reconstruct per-paper progress from the paper shelf and
     # RQ-specific analysis instead of treating Streamlit session_state as the
@@ -234,7 +239,6 @@ def _render_sequential_paper_review(
     if not active and durable_state.get('paper_id') and durable_state.get('linked_to_rq'):
         active = {
             'index': index,
-            'candidate': dict(item),
             'paper_id': str(durable_state.get('paper_id') or ''),
             'prompt': str(durable_state.get('review_prompt') or ''),
             'full_text_url': str(item.get('full_text_url') or ''),
@@ -314,15 +318,31 @@ def _render_sequential_paper_review(
                     st.error(f"원문 텍스트 추출에 실패했습니다: {error}")
                 else:
                     active['full_text_url'] = str((refreshed or {}).get('full_text_url') or edited_full_text)
-                    pinned = dict(active.get('candidate') or item)
-                    pinned['full_text_url'] = active['full_text_url']
-                    pinned['paper_id'] = paper_id
-                    active['candidate'] = pinned
                     active['full_text_extraction_note'] = str((refreshed or {}).get('full_text_extraction_note') or '')
                     active['full_text_acquisition_error'] = ''
                     active['prompt'] = str((refreshed or {}).get('review_prompt') or '')
                     st.session_state[active_key] = active
-                    st.success('원문 텍스트를 다시 추출하고 논문 해석 프롬프트를 갱신했습니다.')
+                    st.rerun()
+        # The paper may already be preserved in the shelf even when remote
+        # full-text acquisition failed. Deferral is a review-queue decision,
+        # not a shelf deletion or a successful paper review.
+        if not active.get('review_result'):
+            if st.button('원문 확보 보류 · 맨 뒤로', key=f"interaction-{key}-active-defer-{index}"):
+                candidate = dict(active.get('candidate') or item)
+                candidate['paper_id'] = paper_id
+                try:
+                    if not callable(item_action):
+                        raise RuntimeError('논문 보류 작업을 사용할 수 없습니다.')
+                    item_action(candidate, 'defer_review')
+                except Exception as error:
+                    st.error(f'보류 상태를 저장하지 못했습니다: {error}')
+                else:
+                    # The queue is rebuilt from durable deferral events on rerun.
+                    # Clearing active is essential: otherwise the failed full-text
+                    # acquisition remains pinned over the next paper.
+                    st.session_state.pop(active_key, None)
+                    st.session_state[index_key] = 0
+                    st.rerun()
         local_pdf = st.file_uploader(
             '로컬 PDF를 원문으로 연결',
             type=['pdf'],
@@ -340,16 +360,13 @@ def _render_sequential_paper_review(
                 st.error(f"로컬 PDF 연결에 실패했습니다: {error}")
             else:
                 active['local_pdf_name'] = local_pdf.name
-                pinned = dict(active.get('candidate') or item)
-                pinned['paper_id'] = paper_id
-                active['candidate'] = pinned
                 active['local_pdf_path'] = str((attached or {}).get('pdf_path') or '')
                 active['full_text_url'] = str((attached or {}).get('full_text_url') or active.get('full_text_url') or '')
                 active['prompt'] = str((attached or {}).get('review_prompt') or active.get('prompt') or '')
                 active['full_text_extraction_note'] = str((attached or {}).get('full_text_extraction_note') or '')
                 active['full_text_acquisition_error'] = ''
                 st.session_state[active_key] = active
-                st.success('PDF를 저장하고 원문 텍스트를 추출했습니다. 아래의 갱신된 프롬프트를 사용하세요.')
+                st.rerun()
         if active.get('local_pdf_name'):
             st.caption(f"Full-text source · local PDF · {active.get('local_pdf_name')}")
             local_path = str(active.get('local_pdf_path') or '')
@@ -386,10 +403,7 @@ def _render_sequential_paper_review(
                 if not response.strip():
                     st.error('LLM 응답을 붙여넣어 주세요.')
                 else:
-                    # Apply the pasted response to the exact candidate that
-                    # generated the prompt, never to a re-projected item that now
-                    # happens to occupy the same list index.
-                    enriched = dict(active.get('candidate') or item)
+                    enriched = dict(item)
                     enriched['paper_id'] = paper_id
                     enriched['full_text_url'] = str(active.get('full_text_url') or edited_full_text)
                     enriched['review_response'] = response
@@ -414,11 +428,6 @@ def _render_sequential_paper_review(
                 st.markdown('#### Review note')
                 st.write(review_note)
             cards = list(result.get('knowledge_cards') or [])
-            source_title = str((active.get('candidate') or item).get('title') or '').strip()
-            source_year = str((active.get('candidate') or item).get('publication_year') or (active.get('candidate') or item).get('published') or '').strip()[:4]
-            source_meta = ' · '.join(x for x in [source_title, source_year] if x)
-            if source_meta:
-                st.caption('출처 논문 · ' + source_meta)
             st.markdown(f"#### Knowledge Card 후보 · {len(cards)}건")
             if not cards:
                 st.caption('생성된 Knowledge Card 후보가 없습니다.')
@@ -439,7 +448,7 @@ def _render_sequential_paper_review(
                         st.caption('Labels · ' + ' · '.join(str(x) for x in labels))
             st.caption('이 후보들은 읽기 전용입니다. 승인·보류·거절은 Attention > Decisions에서 진행합니다.')
             if st.button('이 논문 검토 완료 · 다음', type='primary', key=f"interaction-{key}-paper-reviewed-next-{index}"):
-                chosen = dict(active.get('candidate') or item)
+                chosen = dict(item)
                 chosen['paper_id'] = paper_id
                 chosen['full_text_url'] = str(active.get('full_text_url') or edited_full_text)
                 chosen['paper_summary'] = paper_summary
@@ -454,10 +463,23 @@ def _render_sequential_paper_review(
                 st.rerun()
         return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
 
-    col_keep, col_skip = st.columns(2)
+    col_keep, col_skip, col_defer = st.columns(3)
     keep_label = '서재함 연결 · 논문 리뷰' if bool(item.get('already_in_library')) else '서재함에 보존 · 논문 리뷰'
     keep = col_keep.button(keep_label, type='primary', key=f"interaction-{key}-paper-keep-{index}")
     skip = col_skip.button('이번 라운드에서 제외 · 다음', key=f"interaction-{key}-paper-skip-{index}")
+    defer = col_defer.button('원문 확보 보류 · 맨 뒤로', key=f"interaction-{key}-paper-defer-{index}")
+    if defer:
+        try:
+            if callable(item_action):
+                item_action(dict(item), 'defer_review')
+        except Exception as error:
+            st.error(f'보류 상태를 저장하지 못했습니다: {error}')
+            return InteractionRenderResult(interaction_id, False, {output_name: list(selected)})
+        # Preserve already completed work. Move forward to the next normal paper.
+        st.session_state[index_key] = 0
+        st.session_state.pop(active_key, None)
+        st.rerun()
+
     if keep:
         updated = dict(item)
         updated['full_text_url'] = edited_full_text
@@ -474,7 +496,6 @@ def _render_sequential_paper_review(
         prompt = str((persisted or {}).get('review_prompt') or '') if isinstance(persisted, Mapping) else ''
         st.session_state[active_key] = {
             'index': index,
-            'candidate': dict(updated),
             'paper_id': paper_id,
             'prompt': prompt,
             'full_text_url': edited_full_text,
@@ -613,9 +634,8 @@ def _render_knowledge_card_decision(
 
     provenance = card.get("provenance") if isinstance(card.get("provenance"), Mapping) else {}
     source_name = str(provenance.get("source_name") or "").strip()
-    source_year = str(provenance.get("publication_year") or payload.get("publication_year") or "").strip()[:4]
-    if source_name or source_year:
-        st.caption("Source · " + " · ".join(x for x in [source_name, source_year] if x))
+    if source_name:
+        st.caption(f"Source · {source_name}")
 
     note = st.text_area("연구자 의견 (선택)", key=f"interaction-{key}-comment", height=80)
     c1, c2, c3 = st.columns(3)
@@ -695,48 +715,6 @@ def _render_review_form(st: Any, interaction_id: str, inputs: Mapping[str, Any],
     renderer = binding.renderer
     variant = str(renderer.get("variant") or "")
     output_name = contract.outputs[0]
-    if variant == "research_answer_draft":
-        context = dict(inputs.get("research_answer_review_context") or {})
-        markdown_text = str(context.get("markdown") or "")
-        current_question = str(context.get("question") or "")
-        approved = bool(context.get("approved"))
-        with st.form(f"interaction-{key}"):
-            st.markdown(f"**{renderer['title']}**")
-            if renderer.get("help"):
-                st.caption(str(renderer["help"]))
-            if approved:
-                st.success("현재 저장된 최신 Draft는 연구자 승인 상태입니다. 내용을 다시 수정해 저장하면 재승인이 필요합니다.")
-            else:
-                st.info("Draft를 검토·수정한 뒤 승인하세요. 승인 후에만 다음 문헌 라운드를 시작할 수 있습니다.")
-            edited = st.text_area(
-                "Markdown Draft", value=markdown_text, height=520,
-                key=f"interaction-{key}-markdown",
-                help="LLM 출력 형식이 원하는 형태가 아니면 Markdown을 직접 수정하세요.",
-            )
-            next_question = st.text_area(
-                "다음 라운드 연구질문", value=current_question, height=110,
-                key=f"interaction-{key}-next-question",
-                help="Round 2에서 질문을 더 구체화하거나 범위를 조정하려면 수정하세요. 승인 시 연구질문 버전으로 저장됩니다.",
-            )
-            note = st.text_input(
-                "승인 메모 (선택)", value="", key=f"interaction-{key}-note",
-            )
-            c1, c2 = st.columns(2)
-            saved = c1.form_submit_button("수정 저장", use_container_width=True)
-            approved_now = c2.form_submit_button(
-                str(renderer.get("submit_label") or "Draft 승인"), type="primary", use_container_width=True
-            )
-        action = "approve" if approved_now else "save" if saved else ""
-        if action and not edited.strip():
-            st.info("답변 Draft는 비어 있을 수 없습니다.")
-            action = ""
-        resolution = {
-            "action": action,
-            "markdown": edited.strip(),
-            "next_question": next_question.strip(),
-            "note": note.strip(),
-        }
-        return InteractionRenderResult(interaction_id, bool(action), {output_name: resolution})
     if variant == "ontology_change":
         review = dict(inputs.get("ontology_change_review") or {})
         types = [dict(x) for x in (inputs.get("ontology_types") or [])]
@@ -965,8 +943,8 @@ def _render_external_llm(st: Any, interaction_id: str, inputs: Mapping[str, Any]
                 refreshed_prompt = str(attached.get("review_prompt") or "").strip()
                 if refreshed_prompt:
                     st.session_state[prompt_state_key] = refreshed_prompt
-                    prompt = refreshed_prompt
                 st.success("PDF를 원문으로 연결하고 1-Page Review prompt를 갱신했습니다.")
+                st.rerun()
         local_name = str(st.session_state.get(pdf_name_key) or "").strip()
         local_path = str(st.session_state.get(pdf_path_key) or "").strip()
         if local_name:

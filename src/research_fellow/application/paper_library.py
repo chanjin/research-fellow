@@ -12,6 +12,7 @@ from io import BytesIO
 import re
 
 from research_fellow.storage import Ledger
+from research_fellow.topic_store import mirror_paper_source
 
 
 def _labels(value: list[str] | str) -> list[str]:
@@ -74,38 +75,9 @@ def _safe_filename_part(value: str, *, max_chars: int) -> str:
 
 
 def _extract_pdf_text_for_storage(content: bytes, *, max_chars: int = 150000) -> tuple[str, str]:
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(BytesIO(content))
-    except Exception as error:
-        raise ValueError(f"PDF를 열 수 없습니다: {error}") from error
-    chunks: list[str] = []
-    for index, page in enumerate(reader.pages, start=1):
-        try:
-            text = str(page.extract_text() or "").strip()
-        except Exception:
-            text = ""
-        if text:
-            chunks.append(f"[PAGE {index}]\n{text}")
-    raw = "\n\n".join(chunks).strip()
-    if not raw:
-        raise ValueError("PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF인지 확인해 주세요.")
-    heading = re.compile(r"(?im)^\s*(?:\d+(?:\.\d+)*[.)]?\s+)?(?:references|bibliography)\s*$")
-    min_offset = max(5_000, int(len(raw) * 0.35))
-    references_trimmed = False
-    for match in heading.finditer(raw):
-        if match.start() >= min_offset:
-            raw = raw[:match.start()].rstrip()
-            references_trimmed = True
-            break
-    truncated = len(raw) > max_chars
-    text = raw[:max_chars].rstrip() if truncated else raw
-    note = f"로컬 PDF {len(reader.pages)}페이지에서 텍스트 {len(text):,}자를 추출했습니다."
-    if references_trimmed:
-        note += " References/Bibliography 이후 텍스트는 제외했습니다."
-    if truncated:
-        note += f" Prompt 크기를 위해 본문 앞쪽 {max_chars:,}자까지만 포함했습니다."
-    return text, note
+    from research_fellow.infrastructure.pdf_layout_text import extract_pdf_text_layout
+
+    return extract_pdf_text_layout(content, max_chars=max_chars, source_label="로컬 PDF")
 
 
 def attach_paper_local_pdf(
@@ -152,6 +124,11 @@ def attach_paper_local_pdf(
     ledger.save_paper_full_text(
         str(paper_id), content=full_text, source_type="uploaded_pdf",
         source_name=target.name, extraction_note=extraction_note,
+    )
+    mirror_paper_source(
+        paper_id=str(paper_id), paper=paper, content=full_text,
+        source_type="uploaded_pdf", source_name=target.name,
+        extraction_note=extraction_note, pdf_path=str(target),
     )
     return {
         "paper_id": str(paper_id), "pdf_path": str(target), "filename": target.name,

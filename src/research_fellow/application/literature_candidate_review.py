@@ -17,6 +17,7 @@ import requests
 from research_fellow.origin_lineage import merge_origin_links, normalize_origin_links
 from research_fellow.infrastructure.web_reader import WebPageExtractionError, _validate_public_http_url
 from research_fellow.storage import Ledger
+from research_fellow.topic_store import mirror_paper_source
 from research_fellow.application.paper_review_tasks import (
     apply_inline_paper_review_response,
     build_rq_paper_review_prompt,
@@ -259,11 +260,55 @@ def candidate_library_context(ledger: Ledger, candidate: Mapping[str, Any]) -> d
     }
 
 
+def _review_candidate_key(candidate: Mapping[str, Any]) -> str:
+    """Stable identity for deferral, independent of list index and reruns."""
+    import re
+    import unicodedata
+    title = unicodedata.normalize("NFKC", str(candidate.get("title") or "")).casefold()
+    title = re.sub(r"[^\w]+", "", title)
+    return title or str(candidate.get("source_id") or "").strip().casefold()
+
+
+def candidate_review_deferred(ledger: Ledger, candidate: Mapping[str, Any], *, intent_id: str) -> bool:
+    rq = _research_question_for_intent(ledger, intent_id)
+    rq_id = str(rq.get("rq_id") or "")
+    if not rq_id:
+        return False
+    import json
+    key = _review_candidate_key(candidate)
+    for change in ledger.research_question_changes(rq_id, limit=10000):
+        if change.get("change_type") != "paper_review_deferred":
+            continue
+        try:
+            data = json.loads(str(change.get("summary") or ""))
+        except (ValueError, TypeError):
+            continue
+        if data.get("intent_id") == intent_id and data.get("paper_key") == key:
+            return True
+    return False
+
+
+def defer_candidate_review(ledger: Ledger, candidate: Mapping[str, Any], *, intent_id: str) -> dict[str, Any]:
+    """Record a deferral once, without treating it as a completed review."""
+    rq = _research_question_for_intent(ledger, intent_id)
+    rq_id = str(rq.get("rq_id") or "")
+    if not rq_id:
+        raise ValueError("문헌 라운드의 연구질문을 찾지 못했습니다.")
+    if not candidate_review_deferred(ledger, candidate, intent_id=intent_id):
+        import json
+        ledger.add_research_question_change(
+            rq_id, "paper_review_deferred",
+            json.dumps({"intent_id": intent_id, "paper_key": _review_candidate_key(candidate),
+                        "title": str(candidate.get("title") or "")}, ensure_ascii=False),
+        )
+    return {"deferred": True}
+
+
 def candidate_review_state(ledger: Ledger, candidate: Mapping[str, Any], *, intent_id: str) -> dict[str, Any]:
     """Project durable paper/review/full-text state back into the sequential Review UI."""
     paper = find_existing_shelf_paper(ledger, candidate)
     if not paper:
-        return {"paper": None, "reviewed": False, "full_text_ready": False}
+        return {"paper": None, "reviewed": False, "full_text_ready": False, "deferred": candidate_review_deferred(ledger, candidate, intent_id=intent_id)}
     paper_id = str(paper.get("paper_id") or "")
     rq = _research_question_for_intent(ledger, intent_id)
     rq_id = str(rq.get("rq_id") or "")
@@ -272,6 +317,7 @@ def candidate_review_state(ledger: Ledger, candidate: Mapping[str, Any], *, inte
     linked_rq_ids = {str(x.get("rq_id") or "") for x in _research_origins(ledger, paper)}
     result: dict[str, Any] = {
         "paper": paper,
+        "deferred": candidate_review_deferred(ledger, candidate, intent_id=intent_id),
         "paper_id": paper_id,
         "reviewed": bool(analysis and str(analysis.get("summary") or "").strip()),
         "analysis": analysis or {},
@@ -342,7 +388,7 @@ def preserve_literature_candidate(
         "full_text_url": full_text_url,
         "pdf_url": pdf_url,
         "source_id": str(item.get("source_id") or ""),
-        "pdf_path": "",
+        "pdf_path": str((existing_before or {}).get("pdf_path") or ""),
         "labels": list((existing_before or {}).get("labels") or []) or ["M1 discovery"],
         "shelf_status": str((existing_before or {}).get("shelf_status") or "reference"),
         "reading_status": str((existing_before or {}).get("reading_status") or "unread"),
@@ -351,10 +397,34 @@ def preserve_literature_candidate(
         "origin_links": origin_links,
         "abstract": str(item.get("summary") or item.get("abstract_or_summary") or item.get("abstract") or ""),
     })
-    task = ensure_paper_review_task(ledger, intent_id=intent_id, paper=paper, candidate=item) if create_review_task else None
     paper_id = str(paper.get("paper_id") or "")
+    rq = _research_question_for_intent(ledger, intent_id)
+    rq_id = str(rq.get("rq_id") or "")
+    existing_analysis = ledger.paper_question_analysis(paper_id, rq_id) if rq_id else None
     cached_full_text = ledger.paper_full_text(paper_id) or {}
+    if existing_analysis and str(existing_analysis.get("summary") or "").strip():
+        # A completed RQ-specific review is authoritative: no fetch, PDF extraction,
+        # prompt regeneration, or new review task is necessary.
+        return {
+            "paper": paper, "review_task": None, "review_prompt": "",
+            "full_text_ready": bool(str(cached_full_text.get("content") or "").strip()),
+            "full_text_extraction_note": str(cached_full_text.get("extraction_note") or ""),
+            "full_text_acquisition_error": "", "already_reviewed": True,
+            "already_in_library": existing_before is not None,
+            "linked_research_questions": _research_origins(ledger, paper),
+            "abstract_url": abstract_url, "full_text_url": full_text_url,
+            "pdf_url": pdf_url,
+        }
+    task = ensure_paper_review_task(ledger, intent_id=intent_id, paper=paper, candidate=item) if create_review_task else None
     if str(cached_full_text.get("content") or "").strip():
+        mirror_paper_source(
+            paper_id=paper_id, paper=paper, content=str(cached_full_text.get("content") or ""),
+            source_type=str(cached_full_text.get("source_type") or "cached"),
+            source_url=str(cached_full_text.get("source_url") or ""),
+            source_name=str(cached_full_text.get("source_name") or ""),
+            extraction_note=str(cached_full_text.get("extraction_note") or ""),
+            pdf_path=str(paper.get("pdf_path") or ""),
+        )
         prompt_item = {
             **item,
             "paper_id": paper_id,
@@ -365,12 +435,35 @@ def preserve_literature_candidate(
         }
         acquisition_error = ""
     else:
-        prompt_item, acquisition_error = _candidate_with_acquired_full_text({
-            **item,
-            "paper_id": paper_id,
-            "full_text_url": full_text_url,
-            "pdf_url": pdf_url,
-        })
+        # A shelf PDF is a reusable local source when durable text is absent.
+        pdf_path = str(paper.get("pdf_path") or "").strip()
+        local_path = Path(pdf_path).expanduser() if pdf_path else None
+        if local_path and local_path.is_file():
+            try:
+                extracted, note = _extract_local_pdf_text(local_path)
+                ledger.save_paper_full_text(
+                    paper_id, content=extracted, source_type="uploaded_pdf",
+                    source_name=local_path.name, extraction_note=note,
+                )
+                mirror_paper_source(
+                    paper_id=paper_id, paper=paper, content=extracted,
+                    source_type="uploaded_pdf", source_name=local_path.name,
+                    extraction_note=note, pdf_path=str(local_path),
+                )
+                prompt_item = {**item, "paper_id": paper_id,
+                               "full_text_content": extracted,
+                               "full_text_extraction_note": note}
+                acquisition_error = ""
+            except (OSError, ValueError) as error:
+                prompt_item, acquisition_error = _candidate_with_acquired_full_text({
+                    **item, "paper_id": paper_id, "full_text_url": full_text_url,
+                    "pdf_url": pdf_url,
+                })
+        else:
+            prompt_item, acquisition_error = _candidate_with_acquired_full_text({
+                **item, "paper_id": paper_id, "full_text_url": full_text_url,
+                "pdf_url": pdf_url,
+            })
         if not acquisition_error and str(prompt_item.get("full_text_content") or "").strip():
             source_url = str(prompt_item.get("full_text_source_url") or full_text_url or pdf_url)
             ledger.save_paper_full_text(
@@ -379,6 +472,12 @@ def preserve_literature_candidate(
                 source_type="remote_pdf" if source_url.lower().endswith(".pdf") or "/pdf/" in source_url.lower() else "remote_html",
                 source_url=source_url,
                 extraction_note=str(prompt_item.get("full_text_extraction_note") or ""),
+            )
+            mirror_paper_source(
+                paper_id=paper_id, paper=paper, content=str(prompt_item.get("full_text_content") or ""),
+                source_type="remote_pdf" if source_url.lower().endswith(".pdf") or "/pdf/" in source_url.lower() else "remote_html",
+                source_url=source_url, extraction_note=str(prompt_item.get("full_text_extraction_note") or ""),
+                pdf_path=str(paper.get("pdf_path") or ""),
             )
     review_prompt = ""
     if not acquisition_error:
@@ -434,6 +533,12 @@ def refresh_candidate_remote_full_text(
         source_type="remote_pdf" if target.lower().endswith(".pdf") or "/pdf/" in target.lower() else "remote_html",
         source_url=target,
         extraction_note=str(prompt_item.get("full_text_extraction_note") or ""),
+    )
+    mirror_paper_source(
+        paper_id=str(paper_id), paper=paper, content=str(prompt_item.get("full_text_content") or ""),
+        source_type="remote_pdf" if target.lower().endswith(".pdf") or "/pdf/" in target.lower() else "remote_html",
+        source_url=target, extraction_note=str(prompt_item.get("full_text_extraction_note") or ""),
+        pdf_path=str(paper.get("pdf_path") or ""),
     )
     review_prompt = build_rq_paper_review_prompt(
         ledger, intent_id=intent_id, candidate=prompt_item,
@@ -534,6 +639,10 @@ def attach_candidate_local_pdf(
         ledger.save_paper_full_text(
             str(paper_id), content=full_text, source_type="uploaded_pdf",
             source_name=local_name, extraction_note=extraction_note,
+        )
+        mirror_paper_source(
+            paper_id=str(paper_id), paper=paper, content=full_text, source_type="uploaded_pdf",
+            source_name=local_name, extraction_note=extraction_note, pdf_path=str(local_path),
         )
     prompt_item = {
         **dict(candidate),

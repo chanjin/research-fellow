@@ -273,8 +273,6 @@ from research_fellow.application.persistent_research_runtime import (
 )
 from research_fellow.application.knowledge_workspace import knowledge_workspace_snapshot
 from research_fellow.application.paper_library import update_paper_researcher_metadata, attach_paper_local_pdf
-from research_fellow.application.local_paper_intake import add_local_pdf_to_research_question, start_research_question_from_local_pdf, extract_local_pdf_metadata, prepare_research_question_from_local_papers, parse_research_question_from_local_papers_response
-from research_fellow.application.local_paper_intake import apply_local_pdf_review_response
 from research_fellow.application.literature_candidate_review import (
     preserve_literature_candidate, apply_candidate_review_response, attach_candidate_local_pdf, candidate_review_state,
     refresh_candidate_remote_full_text,
@@ -305,6 +303,7 @@ from research_fellow.workspace_profiles import (
 )
 from research_fellow.workspace_archive import build_workspace_archive, restore_workspace_archive
 from research_fellow.workspace_portable import restore_workspace_db_if_missing
+from research_fellow.topic_store import ensure_topic_directory
 from research_fellow.workspace_sync import AllWorkspacesSync, WorkspaceSync
 from research_fellow.local_settings import get_workspace_sync_server_root, set_workspace_sync_server_root
 from research_fellow.ui.developer import render_developer_screen
@@ -357,6 +356,10 @@ def _requested_workspace_key() -> str:
 
 WORKSPACE_PROFILE = get_workspace_profile(_requested_workspace_key(), WORKSPACE_PROFILES)
 WORKSPACE_KEY = WORKSPACE_PROFILE.key
+TOPIC_DIR = ensure_topic_directory(
+    DATA, topic_key=WORKSPACE_KEY, label=WORKSPACE_PROFILE.label, purpose=WORKSPACE_PROFILE.purpose
+)
+os.environ["RESEARCH_FELLOW_TOPIC_DIR"] = str(TOPIC_DIR)
 _default_cache = ROOT / ".cache" / WORKSPACE_PROFILE.cache_name
 _workspace_env_suffix = WORKSPACE_KEY.upper()
 _cache_override = os.environ.get(f"RESEARCH_FELLOW_CACHE_DIR_{_workspace_env_suffix}", "").strip()
@@ -1198,7 +1201,7 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             return attach_candidate_local_pdf(
                 ledger, intent_id=str(task_payload.get("intent_id") or intent_id), paper_id=paper_id,
                 candidate=paper_candidate, filename=str(candidate.get("filename") or "paper.pdf"),
-                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY,
+                content=bytes(candidate.get("content") or b""), storage_root=TOPIC_DIR / "sources" / "papers",
                 workspace_keyword=WORKSPACE_KEY,
             )
 
@@ -1206,6 +1209,9 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             return {}
         if decision == "review_state":
             return candidate_review_state(ledger, candidate, intent_id=intent_id)
+        if decision == "defer_review":
+            from research_fellow.application.literature_candidate_review import defer_candidate_review
+            return defer_candidate_review(ledger, candidate, intent_id=intent_id)
         if decision == "preserve":
             return preserve_literature_candidate(
                 ledger, candidate, intent_id=intent_id, create_review_task=False,
@@ -1222,7 +1228,7 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
             return attach_candidate_local_pdf(
                 ledger, intent_id=intent_id, paper_id=str(candidate.get("paper_id") or ""),
                 candidate=candidate, filename=str(candidate.get("filename") or "paper.pdf"),
-                content=bytes(candidate.get("content") or b""), storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY,
+                content=bytes(candidate.get("content") or b""), storage_root=TOPIC_DIR / "sources" / "papers",
                 workspace_keyword=WORKSPACE_KEY,
             )
         if decision == "refresh_full_text":
@@ -1324,79 +1330,6 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         )
         return {**created, "progression": {**progression, "execution": continuation}}
 
-    def _extract_local_paper_metadata(filename: str, content: bytes) -> Mapping[str, Any]:
-        return extract_local_pdf_metadata(filename=filename, content=content)
-
-    def _prepare_research_from_local_papers(payload: Mapping[str, Any], files: list[tuple[str, bytes]]) -> Mapping[str, Any]:
-        return prepare_research_question_from_local_papers(
-            initial_question=str(payload.get("question") or ""),
-            context=str(payload.get("context") or ""),
-            files=files,
-        )
-
-    def _start_research_from_local_papers(payload: Mapping[str, Any], files: list[tuple[str, bytes]], response: str) -> Mapping[str, Any]:
-        refined = parse_research_question_from_local_papers_response(response)
-        search_focus = list(refined.get("search_focus") or [])
-        refined_context = str(refined.get("context") or "").strip()
-        if search_focus:
-            refined_context = (refined_context + "\n\nNext literature search focus:\n- " + "\n- ".join(search_focus)).strip()
-        seed_meta = [extract_local_pdf_metadata(filename=name, content=content) for name, content in files]
-        created = ledger.create_research_question_thread(
-            question=str(refined["question"]),
-            source_type="local_papers",
-            rationale="연구자가 제공한 여러 seed 논문의 원문을 바탕으로 초기 질문과 맥락을 보강해 정의한 연구질문입니다.",
-            research_context=refined_context,
-            source_payload={
-                "researcher_comment": str(payload.get("context") or "").strip(),
-                "initial_question": str(payload.get("question") or "").strip(),
-                "refinement_note": str(refined.get("refinement_note") or "").strip(),
-                "search_focus": search_focus,
-                "seed_papers": [
-                    {"title": str(m.get("title") or ""), "authors": list(m.get("authors") or []), "publication_year": str(m.get("publication_year") or "")}
-                    for m in seed_meta
-                ],
-            },
-            status="interested",
-        )
-        rq_id = str(created.get("rq_id") or "")
-        ledger.add_research_question_change(
-            rq_id, "local_seed_refinement",
-            str(refined.get("refinement_note") or "로컬 seed 논문을 바탕으로 연구질문과 맥락을 보강했습니다."),
-        )
-        progression = start_research_question_progression(ledger, memory, created)
-        intent_ids = [
-            str(item.get("intent_id") or "")
-            for item in progression.get("dispatched_intents") or []
-            if str(item.get("intent_id") or "")
-        ]
-        seed_papers = []
-        for filename, content in files:
-            meta = extract_local_pdf_metadata(filename=filename, content=content)
-            seed_papers.append(add_local_pdf_to_research_question(
-                ledger, rq_id=rq_id, title=str(meta.get("title") or ""),
-                publication_year=str(meta.get("publication_year") or ""),
-                authors=list(meta.get("authors") or []), filename=filename, content=content,
-                storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY, workspace_keyword=WORKSPACE_KEY,
-            ))
-        continuation = advance_persistent_research(
-            ledger, memory, _persistent_runtime_bindings(), intent_ids=intent_ids,
-            max_m1_items=max(1, len(intent_ids)), consume_knowledge_updates=False,
-        )
-        return {**created, "refined": refined, "seed_papers": seed_papers, "progression": {**progression, "execution": continuation}}
-
-    def _add_local_paper_to_rq(rq_id: str, payload: Mapping[str, Any], filename: str, content: bytes) -> Mapping[str, Any]:
-        return add_local_pdf_to_research_question(
-            ledger,
-            rq_id=rq_id,
-            title=str(payload.get("title") or ""),
-            publication_year=str(payload.get("publication_year") or ""),
-            authors=str(payload.get("authors") or ""),
-            filename=filename,
-            content=content,
-            storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY,
-            workspace_keyword=WORKSPACE_KEY,
-        )
-
     def _prepare_external_advisory(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return prepare_external_advisory_interpretation(
             payload, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
@@ -1444,9 +1377,6 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         )
         return {**created, "execution": continuation}
 
-    def _submit_local_paper_review(review_context: Mapping[str, Any], response: str) -> Mapping[str, Any]:
-        return apply_local_pdf_review_response(ledger, review_context=review_context, response=response)
-
     def _update_paper_metadata(paper_id: str, labels: list[str] | str, note: str, full_text_url: str | None = None) -> Mapping[str, Any]:
         return update_paper_researcher_metadata(
             ledger, paper_id, labels=labels, researcher_note=note, full_text_url=full_text_url,
@@ -1461,7 +1391,7 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
     def _attach_paper_pdf(paper_id: str, filename: str, content: bytes) -> Mapping[str, Any]:
         return attach_paper_local_pdf(
             ledger, paper_id, filename=filename, content=content,
-            storage_root=DATA / "paper_pdfs" / WORKSPACE_KEY, workspace_keyword=WORKSPACE_KEY,
+            storage_root=TOPIC_DIR / "sources" / "papers", workspace_keyword=WORKSPACE_KEY,
         )
 
     def _enqueue_ontology_work() -> Mapping[str, Any]:
@@ -1520,11 +1450,6 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         system=system,
         developer_mode=developer_mode,
         research_submit_question=_submit_research_question,
-        research_prepare_from_local_papers=_prepare_research_from_local_papers,
-        research_start_from_local_papers=_start_research_from_local_papers,
-        research_extract_local_paper_metadata=_extract_local_paper_metadata,
-        research_add_local_paper_to_rq=_add_local_paper_to_rq,
-        research_submit_local_paper_review=_submit_local_paper_review,
         research_prepare_external_advisory=_prepare_external_advisory,
         research_submit_external_advisory=_submit_external_advisory,
         research_request_additional_literature=_request_additional_literature,

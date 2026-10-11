@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
+import unicodedata
 from typing import Any, Callable, Mapping
 
 from research_fellow.application.decision_interaction import apply_researcher_decision_resolutions
@@ -21,8 +23,61 @@ from research_fellow.infrastructure.workflow_checkpoint import JsonFileCheckpoin
 from research_fellow.memory import KnowledgeMemory, RelationMemory
 from research_fellow.storage import Ledger
 from research_fellow.application.paper_review_tasks import apply_paper_review_response
-from research_fellow.application.ontology_workflow import apply_ontology_task_response
 from research_fellow.application.literature_candidate_review import candidate_library_context
+
+
+def _paper_title_key(title: str) -> str:
+    """Conservative title identity; ignore punctuation/quotes, not words."""
+    normalized = unicodedata.normalize("NFKC", str(title or "")).casefold()
+    return "".join(ch for ch in normalized if ch.isalnum())
+
+
+def merge_seed_review_candidates(ledger: Ledger, *, rq_id: str, discovered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project local seed papers into the existing review queue, without a new round.
+
+    Only papers explicitly listed in this RQ's seed intake are eligible. A
+    discovered candidate takes precedence on duplicate titles, but inherits
+    the local shelf paper identity/full-text availability.
+    """
+    rq = ledger.research_question_thread(rq_id) or {}
+    seed_meta = (rq.get("source_payload") or {}).get("seed_papers") or []
+    if not isinstance(seed_meta, list):
+        return discovered
+    shelf_by_title = {}
+    for paper in ledger.shelf_papers():
+        key = _paper_title_key(paper.get("title"))
+        if key and key not in shelf_by_title:
+            shelf_by_title[key] = paper
+    merged = [dict(item) for item in discovered]
+    positions = {_paper_title_key(item.get("title")): i for i, item in enumerate(merged) if _paper_title_key(item.get("title"))}
+    for meta in seed_meta:
+        if not isinstance(meta, Mapping):
+            continue
+        key = _paper_title_key(meta.get("title"))
+        paper = shelf_by_title.get(key)
+        if not key or not paper:
+            continue
+        candidate = {
+            "title": paper.get("title") or meta.get("title"),
+            "source_id": paper.get("source_id") or "",
+            "paper_id": paper.get("paper_id") or "",
+            "authors": paper.get("authors") or meta.get("authors") or [],
+            "publication_year": paper.get("publication_year") or meta.get("publication_year") or "",
+            "pdf_url": paper.get("pdf_url") or "",
+            "full_text_url": paper.get("full_text_url") or "",
+            "intake_source": "researcher_local_pdf",
+            "seed_paper": True,
+        }
+        if key in positions:
+            old = merged[positions[key]]
+            # Keep discovery context, use the already-stored local source.
+            old.update({k: v for k, v in candidate.items() if k in ("paper_id", "seed_paper", "intake_source")})
+            if not old.get("source_id"):
+                old["source_id"] = candidate["source_id"]
+        else:
+            positions[key] = len(merged)
+            merged.append(candidate)
+    return merged
 
 
 @dataclass(frozen=True)
@@ -63,31 +118,15 @@ def interaction_inputs_for_attention_item(item: Mapping[str, Any], ledger: Ledge
     if source_type == "research_task" and interaction_id == "provide_external_llm_result":
         task = dict(payload)
         task_payload = dict(task.get("payload") or {})
-        subject_type = str(task.get("subject_type") or "")
-        if subject_type == "paper_first_review":
-            stage = "single_paper_first_review"
-            prompt_source = "durable_paper_review_task"
-            item_key = str(task_payload.get("paper_id") or task.get("subject_id") or "")
-            expected = str(task_payload.get("expected_output") or "JSON papers[] with executive_summary, source-grounded claims, and review_note")
-        elif subject_type in {
-            "ontology_type_suggestion",
-            "ontology_relation_suggestion",
-            "ontology_facet_suggestion",
-            "knowledge_relation_suggestion",
-        }:
-            stage = subject_type
-            prompt_source = "durable_ontology_task"
-            item_key = str(task.get("subject_id") or task.get("phenomenon_id") or "")
-            expected = str(task_payload.get("expected_output") or "JSON ontology proposal")
-        else:
+        if str(task.get("subject_type") or "") != "paper_first_review":
             return None
         return {"external_llm_task": {
             "task_id": str(task.get("phenomenon_id") or ""),
-            "stage": stage,
-            "item_key": item_key,
+            "stage": "single_paper_first_review",
+            "item_key": str(task_payload.get("paper_id") or task.get("subject_id") or ""),
             "prompt": str(task_payload.get("prompt") or ""),
-            "prompt_source": prompt_source,
-            "expected_output": expected,
+            "prompt_source": "durable_paper_review_task",
+            "expected_output": str(task_payload.get("expected_output") or "JSON papers[] with executive_summary, source-grounded claims, and review_note"),
         }}
 
     if source_type == "workflow_interaction":
@@ -102,7 +141,16 @@ def interaction_inputs_for_attention_item(item: Mapping[str, Any], ledger: Ledge
                     row = dict(candidate)
                     row.update(candidate_library_context(ledger, row))
                     candidates.append(row)
-                values["discovered_candidates"] = candidates
+                rq_id = str(item.get("rq_id") or payload.get("rq_id") or "")
+                if not rq_id:
+                    intent_id = str(item.get("intent_id") or payload.get("intent_id") or "")
+                    if intent_id:
+                        linked = ledger.research_questions_for_intent(intent_id)
+                        if linked:
+                            rq_id = str(linked[0].get("rq_id") or "")
+                values["discovered_candidates"] = merge_seed_review_candidates(
+                    ledger, rq_id=rq_id, discovered=candidates
+                ) if rq_id else candidates
             return values
 
     if source_type == "auto_research_failure" and interaction_id == "provide_external_llm_result":
@@ -277,24 +325,10 @@ def apply_attention_response(
         response = str(values.get("external_llm_response") or "").strip()
         if not response:
             raise ValueError("외부 LLM 응답이 비어 있습니다.")
-        subject_type = str(task.get("subject_type") or "")
-        if subject_type == "paper_first_review":
-            try:
-                outcome = apply_paper_review_response(ledger, task, response)
-            except Exception as error:
-                raise ValueError(f"논문 원문 리뷰 응답을 반영하지 못했습니다: {error}") from error
-        elif subject_type in {
-            "ontology_type_suggestion",
-            "ontology_relation_suggestion",
-            "ontology_facet_suggestion",
-            "knowledge_relation_suggestion",
-        }:
-            try:
-                outcome = apply_ontology_task_response(ledger, memory, task, response)
-            except Exception as error:
-                raise ValueError(f"Ontology 제안 응답을 반영하지 못했습니다: {error}") from error
-        else:
-            raise ValueError(f"지원하지 않는 research_task입니다: {subject_type}")
+        try:
+            outcome = apply_paper_review_response(ledger, task, response)
+        except Exception as error:
+            raise ValueError(f"논문 원문 리뷰 응답을 반영하지 못했습니다: {error}") from error
         return AttentionResolutionResult(str(item.get("attention_id") or ""), interaction_id, "completed", dict(outcome))
 
     if source_type == "workflow_interaction":

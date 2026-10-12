@@ -303,8 +303,9 @@ from research_fellow.workspace_profiles import (
 )
 from research_fellow.workspace_archive import build_workspace_archive, restore_workspace_archive
 from research_fellow.workspace_portable import restore_workspace_db_if_missing
-from research_fellow.topic_store import ensure_topic_directory
+from research_fellow.topic_store import ensure_topic_directory, mirror_paper_source
 from research_fellow.workspace_sync import AllWorkspacesSync, WorkspaceSync
+from research_fellow.topic_sync import reconcile_paper_paths_from_topic, sync_topic_directory
 from research_fellow.local_settings import get_workspace_sync_server_root, set_workspace_sync_server_root
 from research_fellow.ui.developer import render_developer_screen
 from research_fellow.ui.interaction import (
@@ -1103,20 +1104,32 @@ def _hydrate_current_workspace_from_server_once() -> dict[str, int]:
         or get_workspace_sync_server_root(DATA)
     )
     if not server_root_value:
-        return {"applied": 0, "conflicts": 0}
+        return {"applied": 0, "conflicts": 0, "topic_downloaded": 0, "topic_conflicts": 0}
+    server_root = Path(server_root_value).expanduser()
+    topic_result = sync_topic_directory(
+        TOPIC_DIR, server_root / "topics" / WORKSPACE_KEY, direction="pull", apply=True,
+    )
     server_db = (
-        Path(server_root_value).expanduser() / "workspaces" / WORKSPACE_KEY / WORKSPACE_PROFILE.server_db_filename
+        server_root / "workspaces" / WORKSPACE_KEY / WORKSPACE_PROFILE.server_db_filename
     )
     if not server_db.exists():
-        return {"applied": 0, "conflicts": 0}
+        reconciled = reconcile_paper_paths_from_topic(LOCAL_DB, TOPIC_DIR)
+        return {
+            "applied": 0, "conflicts": 0,
+            "topic_downloaded": topic_result.downloaded + reconciled,
+            "topic_conflicts": topic_result.conflicts,
+        }
     token = f"workspace-startup-pull::{WORKSPACE_KEY}::{server_db.resolve()}"
     cached = st.session_state.get(token)
     if isinstance(cached, dict):
-        return {"applied": int(cached.get("applied", 0)), "conflicts": int(cached.get("conflicts", 0))}
+        return {key: int(cached.get(key, 0)) for key in ("applied", "conflicts", "topic_downloaded", "topic_conflicts")}
     result = WorkspaceSync(LOCAL_DB, server_db).pull_from_server()
+    reconciled = reconcile_paper_paths_from_topic(LOCAL_DB, TOPIC_DIR)
     payload = {
         "applied": len([item for item in result.changes if item.direction == "server→local" and item.action != "conflict"]),
         "conflicts": len(result.conflicts),
+        "topic_downloaded": topic_result.downloaded + reconciled,
+        "topic_conflicts": topic_result.conflicts,
     }
     st.session_state[token] = payload
     return payload
@@ -3038,13 +3051,14 @@ def _store_manual_discovery_source(
     links=paper_access_links(paper);existing=shelf_match or {}
     published=str(paper.get("publication_year") or paper.get("published") or existing.get("publication_year") or "")[:4]
     source_id=str(paper.get("source_id") or existing.get("source_id") or document.document_id).strip()
-    return ledger.upsert_shelf_paper({
+    stored_path=store_paper_upload(upload,TOPIC_DIR / "sources" / "papers")
+    saved=ledger.upsert_shelf_paper({
         "paper_id":str(existing.get("paper_id") or paper.get("paper_id") or ""),
         "title":str(paper.get("title") or existing.get("title") or document.title or "Untitled paper").strip(),
         "authors":list(paper.get("authors") or existing.get("authors") or []),
         "publication_year":published if len(published)==4 else "",
         "source_url":str(links.get("html_url") or links.get("source_url") or existing.get("source_url") or ""),
-        "source_id":source_id,"pdf_path":store_paper_upload(upload,DATA / "paper_shelf"),
+        "source_id":source_id,"pdf_path":stored_path,
         "abstract":str(paper.get("summary") or paper.get("abstract") or existing.get("abstract") or "").strip(),
         "labels":list(paper.get("labels") or existing.get("labels") or build_paper_labels(paper)),
         "shelf_status":str(existing.get("shelf_status") or "reference"),
@@ -3052,6 +3066,13 @@ def _store_manual_discovery_source(
         "asset_type":"paper","intake_source":intake_source,
         "origin_links":paper.get("origin_links") or existing.get("origin_links") or [],
     })
+    mirror_paper_source(
+        paper_id=str(saved.get("paper_id") or ""), paper=saved,
+        content=extracted_document_text(document),
+        source_type="uploaded_pdf" if Path(str(upload.name)).suffix.lower()==".pdf" else "uploaded_text",
+        source_name=Path(stored_path).name, pdf_path=stored_path,
+    )
+    return saved
 
 
 def _discovery_reference_match(paper: dict[str, Any], references: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -4005,7 +4026,7 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 if pdf_url and not shelf_match:
                     if st.button(ui_text("PDF 내려받아 서재함에 보관", "Download PDF into shelf"), key=f"m1-discovery-save-pdf-{index}-{paper.get('source_id', '')}"):
                         try:
-                            local_pdf = download_discovery_pdf(paper, DATA / "paper_shelf")
+                            local_pdf = download_discovery_pdf(paper, TOPIC_DIR / "sources" / "papers")
                             saved = ledger.upsert_shelf_paper({
                                 "title": title,
                                 "authors": list(paper.get("authors", [])),
@@ -4021,6 +4042,16 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                                 "intake_source": "llm_discovery",
                                 "origin_links": paper.get("origin_links", []),
                             })
+                            local_document = extract_document(
+                                StoredPaperUpload(name=Path(local_pdf).name, content=Path(local_pdf).read_bytes()),
+                                cache_dir=EXTRACTION_CACHE,
+                            )
+                            mirror_paper_source(
+                                paper_id=str(saved.get("paper_id") or ""), paper=saved,
+                                content=extracted_document_text(local_document), source_type="remote_pdf",
+                                source_url=str(paper.get("pdf_url") or pdf_url),
+                                source_name=Path(local_pdf).name, pdf_path=local_pdf,
+                            )
                             st.success(ui_text(f"PDF를 내려받아 서재함에 보관했습니다: {saved['title']}", f"Downloaded the PDF into the shelf: {saved['title']}"))
                             st.rerun()
                         except Exception as error:
@@ -4113,12 +4144,19 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
             try:
                 document = extract_document(uploaded, cache_dir=EXTRACTION_CACHE)
                 bibliography = infer_bibliographic_metadata(document)
+                stored_path = store_paper_upload(uploaded, TOPIC_DIR / "sources" / "papers")
                 paper = ledger.upsert_shelf_paper({
                     "title": bibliography["title"], "authors": bibliography["authors"], "publication_year": bibliography["publication_year"],
-                    "source_id": document.document_id, "pdf_path": store_paper_upload(uploaded, DATA / "paper_shelf"),
+                    "source_id": document.document_id, "pdf_path": stored_path,
                     "shelf_status": "core" if core_paper else "reference", "reading_status": "unread",
                     "asset_type": "paper" if source_kind == "외부 논문" else "research_note", "intake_source": "upload",
                 })
+                mirror_paper_source(
+                    paper_id=str(paper.get("paper_id") or ""), paper=paper,
+                    content=extracted_document_text(document),
+                    source_type="uploaded_pdf" if Path(uploaded.name).suffix.lower() == ".pdf" else "uploaded_text",
+                    source_name=Path(stored_path).name, pdf_path=stored_path,
+                )
                 st.success(f"서재함에 추가했습니다: {paper['title']}")
             except Exception as error:
                 st.error(f"원문을 서재함에 보관하지 못했습니다: {error}")
@@ -4135,13 +4173,19 @@ def m1_screen(model: str, use_ollama: bool, semantic: bool, embedding_model: str
                 page = fetch_web_page(web_url)
                 stored = StoredPaperUpload(name="web-page.md", content=page.markdown.encode("utf-8"))
                 document = extract_document(stored, cache_dir=EXTRACTION_CACHE)
+                stored_path = store_paper_upload(stored, TOPIC_DIR / "sources" / "html")
                 paper = ledger.upsert_shelf_paper({
                     "title": page.title, "authors": [page.author] if page.author else [], "publication_year": page.publication_year,
                     "source_url": page.url, "source_id": document.document_id,
-                    "pdf_path": store_paper_upload(stored, DATA / "paper_shelf"),
+                    "pdf_path": stored_path,
                     "shelf_status": "core" if web_core else "reference", "reading_status": "unread",
                     "asset_type": "web_page", "intake_source": "web",
                 })
+                mirror_paper_source(
+                    paper_id=str(paper.get("paper_id") or ""), paper=paper,
+                    content=extracted_document_text(document), source_type="web_html",
+                    source_url=page.url, source_name=Path(stored_path).name, pdf_path=stored_path,
+                )
                 st.success(f"정제한 웹페이지를 서재함에 추가했습니다: {paper['title']}")
                 for warning in page.warnings:
                     st.warning(warning)
@@ -9275,7 +9319,7 @@ def external_advisory(model: str, use_ollama: bool, semantic: bool, embedding_mo
 def render_workspace_sync() -> None:
     """Synchronize every active local workspace with one shared server root."""
     with st.sidebar.expander(ui_text("작업공간 동기화", "Workspace Sync"), expanded=False):
-        st.caption("한 번의 동기화로 활성 워크스페이스의 DB와 다운로드한 논문 원문을 모두 통합합니다.")
+        st.caption("한 번의 동기화로 활성 Workspace의 DB와 Topic Directory 원문을 함께 통합합니다.")
         st.caption(f"활성 워크스페이스 · {len(WORKSPACE_PROFILES)}개")
         default_server = os.environ.get("RESEARCH_FELLOW_SERVER_DIR", "")
         if not default_server:
@@ -9292,7 +9336,7 @@ def render_workspace_sync() -> None:
             value=default_server,
             placeholder="예: ~/Library/Mobile Documents/com~apple~CloudDocs/ResearchFellow",
             key="workspace-sync-server-dir",
-            help="Google Drive, iCloud Drive, NAS 등에 위치한 공유 폴더입니다. 워크스페이스별 DB와 원문은 workspaces/<key>/ 아래에 보관됩니다.",
+            help="Google Drive, iCloud Drive, NAS 등에 위치한 공유 폴더입니다. DB는 workspaces/<key>/, Topic 파일은 topics/<key>/ 아래에 보관됩니다.",
         ).strip()
         if not server_value:
             st.info("서버 루트 디렉터리를 지정하면 전체 워크스페이스 동기화가 활성화됩니다.")
@@ -9306,7 +9350,7 @@ def render_workspace_sync() -> None:
         try:
             server_root = Path(server_value).expanduser()
             sync = AllWorkspacesSync(WORKSPACE_PROFILES, DATA, server_root)
-            st.caption(f"Server · {server_root / 'workspaces'}")
+            st.caption(f"Server · {server_root / 'workspaces'} · {server_root / 'topics'}")
             completed = st.session_state.pop("workspace-sync-batch-result", None)
             if completed:
                 st.success(completed["message"])
@@ -9321,11 +9365,15 @@ def render_workspace_sync() -> None:
                     "로컬로": item.download_changes,
                     "충돌": item.conflicts,
                     "초기 데이터": item.initialization_rows,
+                    "Topic 서버로": item.topic_upload_changes,
+                    "Topic 로컬로": item.topic_download_changes,
+                    "Topic 충돌": item.topic_conflicts,
                 }
                 for item in statuses
             ]
             st.dataframe(rows, use_container_width=True, hide_index=True, height=min(250, 38 + 35 * len(rows)))
             total_conflicts = sum(item.conflicts for item in statuses)
+            total_topic_conflicts = sum(item.topic_conflicts for item in statuses)
             if total_conflicts:
                 st.warning(f"양쪽에서 같은 레코드를 변경한 충돌 {total_conflicts}건은 자동으로 덮어쓰지 않고 보류합니다.")
                 review_enabled = st.checkbox(
@@ -9422,6 +9470,11 @@ def render_workspace_sync() -> None:
                     resolved_message = st.session_state.pop("workspace-sync-conflict-resolution-message", None)
                     if resolved_message:
                         st.success(resolved_message)
+            if total_topic_conflicts:
+                st.warning(
+                    f"Topic 파일 충돌 {total_topic_conflicts}건은 양쪽 버전을 각 Topic의 "
+                    "index/conflicts에 보존합니다. 일반 동기화는 로컬 파일을 기준으로 하고, 시작 시 복원은 서버 파일을 기준으로 합니다."
+                )
             if st.button("모든 워크스페이스 동기화", type="primary", use_container_width=True, key="workspace-sync-apply-all"):
                 results = sync.apply()
                 result_rows = []
@@ -9435,10 +9488,14 @@ def render_workspace_sync() -> None:
                         "원문 다운로드": item.assets.downloaded,
                         "원문 유지": item.assets.unchanged,
                         "원문 없음": item.assets.missing,
+                        "Topic 업로드": item.topic_assets.uploaded,
+                        "Topic 다운로드": item.topic_assets.downloaded,
+                        "Topic 충돌": item.topic_assets.conflicts,
                     })
                 unresolved = sum(item.conflicts for item in results)
+                topic_unresolved = sum(item.topic_assets.conflicts for item in results)
                 st.session_state["workspace-sync-batch-result"] = {
-                    "message": f"전체 동기화 완료 · {len(results)}개 Workspace · 보류 충돌 {unresolved}건",
+                    "message": f"전체 동기화 완료 · {len(results)}개 Workspace · DB 충돌 {unresolved}건 · Topic 충돌 {topic_unresolved}건",
                     "rows": result_rows,
                 }
                 st.rerun()
@@ -9480,10 +9537,20 @@ def main() -> None:
                 f"서버에서 누락된 Workspace 데이터 {startup_pull['applied']}건을 복원했습니다.",
                 f"Restored {startup_pull['applied']} missing workspace records from the server.",
             ))
+        if startup_pull.get("topic_downloaded"):
+            st.sidebar.success(ui_text(
+                f"서버 Topic에서 파일 {startup_pull['topic_downloaded']}개를 복원했습니다.",
+                f"Restored {startup_pull['topic_downloaded']} files from the server Topic.",
+            ))
         if startup_pull.get("conflicts"):
             st.sidebar.warning(ui_text(
                 f"서버/로컬 충돌 {startup_pull['conflicts']}건은 자동 복원하지 않았습니다. Workspace Sync에서 확인하세요.",
                 f"Left {startup_pull['conflicts']} server/local conflicts untouched. Review them in Workspace Sync.",
+            ))
+        if startup_pull.get("topic_conflicts"):
+            st.sidebar.warning(ui_text(
+                f"서버/로컬 Topic 파일 충돌 {startup_pull['topic_conflicts']}건을 index/conflicts에 보존했습니다. Workspace Sync에서 확인하세요.",
+                f"Preserved {startup_pull['topic_conflicts']} Topic conflicts under index/conflicts. Review them in Workspace Sync.",
             ))
     except Exception as exc:
         st.sidebar.warning(ui_text(f"시작 시 서버 데이터 복원 확인 실패: {exc}", f"Startup server hydration check failed: {exc}"))

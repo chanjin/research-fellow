@@ -1,0 +1,2285 @@
+{
+  "mode": "apply",
+  "results": [
+    {
+      "workspace": "agent_development",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_agent_development.db",
+      "status": "applied",
+      "paper_count": 48,
+      "source_files_found": 29,
+      "full_texts_written_or_available": 2,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-04d7122de343",
+          "title": "Process Reward Models for LLM Agents: Practical Framework and Directions",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-04d7122de343--fcbe3cd93c4c39a1-fb8c7dac9aff.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-04d7122de343--fcbe3cd93c4c39a1-fb8c7dac9aff.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-08687f387e8e",
+          "title": "Creator: Tool Creation for Disentangling Abstract and Concrete Reasoning of Large Language Models",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-08687f387e8e--2f4c46a861978389-9834c7882840.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-08687f387e8e--2f4c46a861978389-9834c7882840.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-0f93c3eec16e",
+          "title": "Cognitive Architectures for Language Agents - CoALA",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-13fff0b4d7ca",
+          "title": "A Survey on Large Language Model based Autonomous Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-16c3f679e74e",
+          "title": "Constitutional AI: Harmlessness from AI Feedback",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-16c3f679e74e--0b30236ffbbf04bb-12d85e6cb91b.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-16c3f679e74e--0b30236ffbbf04bb-12d85e6cb91b.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2230c0f1e199",
+          "title": "DSPy: Compiling Declarative Language Model Calls into State-of-the-Art Pipelines",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-260cad1f85ae",
+          "title": "Cascading Hallucination in Agentic RAG: The CHARM Framework for Detection and Mitigation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-260cad1f85ae--a929249f99c5dcf9-68419a1d6b7a.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-260cad1f85ae--a929249f99c5dcf9-68419a1d6b7a.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-34438d541718",
+          "title": "Multi-Agent Collaboration via Evolving Orchestration",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-34438d541718--2e8d602b7e4c2014-e12f269b4aff.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-34438d541718--2e8d602b7e4c2014-e12f269b4aff.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-378bb8f05cd2",
+          "title": "AgentScope: A Flexible yet Robust Multi-Agent Platform",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3ab2e0bace03",
+          "title": "SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3d46cfc522b7",
+          "title": "A Practical Guide for Designing, Developing, and Deploying Production-Grade Agentic AI Workflows",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-3d46cfc522b7--627b7426149a7919-59b9145e9e18.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-3d46cfc522b7--627b7426149a7919-59b9145e9e18.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3d5f8895c621",
+          "title": "Toolformer: Language Models Can Teach Themselves to Use Tools",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-3d5f8895c621--835afe057b05fafd-afd84dafe667.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-3d5f8895c621--835afe057b05fafd-afd84dafe667.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-415e21382f7b",
+          "title": "A Survey of Self-Evolving Agents: What, When, How, and Where to Evolve on the Path to Artificial Super Intelligence",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-415e21382f7b--6e30155c9d28d1ae-76a2adecae21.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-415e21382f7b--6e30155c9d28d1ae-76a2adecae21.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-526225d74b10",
+          "title": "LLMs Can't Plan, But Can Help Us Plan in LLM-Modulo Frameworks",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-5af48fe3b019",
+          "title": "A Survey on Agent Workflow– Status and Future",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/papers/paper-5af48fe3b019--f425377df3c13b5f-e36406e1b3b6.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/papers/paper-5af48fe3b019--f425377df3c13b5f-e36406e1b3b6.pdf",
+          "text_chars": 59575,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/text/paper-5af48fe3b019-e36406e1b3b6.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-62ebf5f84da3",
+          "title": "AgentVerse: Facilitating Multi-Agent Collaboration and Exploring Emergent Behaviors",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-62ebf5f84da3--2b22db5866904608-12cf0d58dafa.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-62ebf5f84da3--2b22db5866904608-12cf0d58dafa.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-634e1ae056ff",
+          "title": "A Model for Types and Levels of Human Interaction with Automation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/papers/paper-634e1ae056ff--8ad961e67a672408-f18b31e3bf47.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/papers/paper-634e1ae056ff--8ad961e67a672408-f18b31e3bf47.pdf",
+          "text_chars": 75688,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/text/paper-634e1ae056ff-f18b31e3bf47.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-654405cd9684",
+          "title": "Reflexion: Language Agents with Verbal Reinforcement Learning",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-654405cd9684--bfbd51ee1d099d7e-629f52ec2817.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-654405cd9684--bfbd51ee1d099d7e-629f52ec2817.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-65f43032fe79",
+          "title": "Internet of Agents: Weaving a Web of Heterogeneous Agents for Collaborative Intelligence",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-65f43032fe79--463aca25b157fc8f-4958ba0e847e.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-65f43032fe79--463aca25b157fc8f-4958ba0e847e.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-6ac80f230a1b",
+          "title": "Levels of Autonomy for AI Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-6f4d65caf84a",
+          "title": "ChatDev: Communicative Agents for Software Development",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-6f4d65caf84a--4da4945932e0802c-5ff6185de8ab.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-6f4d65caf84a--4da4945932e0802c-5ff6185de8ab.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-71a3f16cf3c1",
+          "title": "When Self-Evolution Backfires: Pre-Commit Gating against Skill Contamination in LLM Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-71a3f16cf3c1--18c49a49779139d3-a496e5cb848d.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-71a3f16cf3c1--18c49a49779139d3-a496e5cb848d.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-86dc55138b6f",
+          "title": "Voyager: An Open-Ended Embodied Agent with Large Language Models",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-89342e5816a6",
+          "title": "Generative Agents: Interactive Simulacra of Human Behavior",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-89342e5816a6--7417d765eb247e68-5b36588192cb.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-89342e5816a6--7417d765eb247e68-5b36588192cb.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-89b0f65ebfb5",
+          "title": "Self-Refine: Iterative Refinement with Self-Feedback",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8d4174005bbd",
+          "title": "AgentBench: Evaluating LLMs as Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9075ebd11622",
+          "title": "ToolLLM: Facilitating Large Language Models to Master 16000+ Real-world APIs",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-9075ebd11622--22925d4670002642-37e15da7ce18.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-9075ebd11622--22925d4670002642-37e15da7ce18.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-964d03ee855b",
+          "title": "AFlow: Automating Agentic Workflow Generation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-964d03ee855b--5854362ffa7d4883-dc5758a05b0a.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-964d03ee855b--5854362ffa7d4883-dc5758a05b0a.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-96a4ad769996",
+          "title": "Knowledge Engineering and Management: The CommonKADS Methodology",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-97006c24076b",
+          "title": "ToolGen: Unified Tool Retrieval and Calling via Generation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-97006c24076b--41f621d4f914f49c-14063dde7565.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-97006c24076b--41f621d4f914f49c-14063dde7565.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a42b57508d43",
+          "title": "The Rise and Potential of Large Language Model Based Agents: A Survey",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-ae8aa2ef83dd",
+          "title": "Mobile-Agent-E: Self-Evolving Mobile Assistant for Complex Tasks",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-ae8aa2ef83dd--9cec11252d1b772e-af6f15d33d84.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-ae8aa2ef83dd--9cec11252d1b772e-af6f15d33d84.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-b1be27a0ebaf",
+          "title": "Automated Design of Agentic Systems",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-b1be27a0ebaf--e2cc88d6fca7ad3c-497d8e426369.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-b1be27a0ebaf--e2cc88d6fca7ad3c-497d8e426369.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-bafc41752084",
+          "title": "Agent Workflow Memory",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-bafc41752084--f68bf529daeeac25-6e742a4be65c.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-bafc41752084--f68bf529daeeac25-6e742a4be65c.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c962e71a9c72",
+          "title": "CRITIC: Large Language Models Can Self-Correct with Tool-Interactive Critiquing",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-cc4ee6cc2531",
+          "title": "Understanding the Planning Approaches in Large Language Model-Based Agents: A Survey",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d6b8c16e39dc",
+          "title": "Agent Workflow Memory",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-d6b8c16e39dc--cf4b93df34458c56-0b41d7fe8986.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-d6b8c16e39dc--cf4b93df34458c56-0b41d7fe8986.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d94969c33a29",
+          "title": "Why Do Multi-Agent LLM Systems Fail?",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-dae56b5baea4",
+          "title": "MemGPT: Towards LLMs as Operating Systems",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-db2c7e1d6278",
+          "title": "OS-Copilot: Towards Generalist Computer Agents with Self-Improvement",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e24af2f88373",
+          "title": "ExpeL: LLM Agents Are Experiential Learners",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e493f215fbeb",
+          "title": "MetaGPT: Meta Programming for a Multi-Agent Collaborative Framework",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-e493f215fbeb--6b5a84fc92e88bf5-d392fc4afe55.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-e493f215fbeb--6b5a84fc92e88bf5-d392fc4afe55.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e8cb1d5c58c8",
+          "title": "Magentic-One: A Generalist Multi-Agent Systemfor Solving Complex Tasks",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-e8cb1d5c58c8--d40674d428f6155b-6c8e52805565.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-e8cb1d5c58c8--d40674d428f6155b-6c8e52805565.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-ec2607ab2319",
+          "title": "CAMEL: Communicative Agents for “Mind” Exploration of Large Language Model Society https://www.camel-ai.org",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-ec2607ab2319--84c52bcdf55467aa-c24e9a90c231.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-ec2607ab2319--84c52bcdf55467aa-c24e9a90c231.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f083d8e15614",
+          "title": "ReAct: Synergizing Reasoning and Acting in Language Models",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-f083d8e15614--987d4a185ad9c3c2-669c6df9cc71.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-f083d8e15614--987d4a185ad9c3c2-669c6df9cc71.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f1cb0a5e8588",
+          "title": "Language Agent Tree Search Unifies Reasoning, Acting, and Planning in Language Models",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f2eb6cdddefc",
+          "title": "AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-f2eb6cdddefc--f6663f2056902442-2341beab7503.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-f2eb6cdddefc--f6663f2056902442-2341beab7503.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f62e55a845c6",
+          "title": "SkillWeaver: Web Agents can Self-Improve by Discovering and Honing Skills",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-f62e55a845c6--c4185a6cf50ab160-d7f8cbb9981b.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_development/sources/html/paper-f62e55a845c6--c4185a6cf50ab160-d7f8cbb9981b.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "agent_se",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_se",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_agent_se.db",
+      "status": "applied",
+      "paper_count": 1,
+      "source_files_found": 0,
+      "full_texts_written_or_available": 0,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-ffa3533381cf",
+          "title": "Rethinking Software Engineering for Agentic AI Systems",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "agent_theory",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_agent_theory.db",
+      "status": "applied",
+      "paper_count": 25,
+      "source_files_found": 10,
+      "full_texts_written_or_available": 1,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-000d0513e679",
+          "title": "SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-0b3589dd8c48",
+          "title": "A Survey on Large Language Model based Autonomous Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-116ea4bf4d2c",
+          "title": "Reflexion: Language Agents with Verbal Reinforcement Learning",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-12443585800c",
+          "title": "Open X-Embodiment: Robotic Learning Datasets and RT-X Models",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-12443585800c--8103329e96511747-554bcaaf7a1d.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-12443585800c--8103329e96511747-554bcaaf7a1d.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-1e0aa97ef8fd",
+          "title": "AgentOps: Enabling Observability of LLM Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-245691e015b8",
+          "title": "𝜋_0: A Vision-Language-Action Flow Model for General Robot Control",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-245691e015b8--64176f259611f509-82f38fccc9fc.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-245691e015b8--64176f259611f509-82f38fccc9fc.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-25240ee810c6",
+          "title": "MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-259321517ff5",
+          "title": "Agent Design Pattern Catalogue: A Collection of Architectural Patterns for Foundation Model based Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-26e916da4b56",
+          "title": "ReAct: Synergizing Reasoning and Acting in Language Models",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-30ec6aa0af50",
+          "title": "A Path Towards Autonomous Machine Intelligence",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/papers/paper-30ec6aa0af50--5dda279009beae35-69fe69fedd9f.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/papers/paper-30ec6aa0af50--5dda279009beae35-69fe69fedd9f.pdf",
+          "text_chars": 150000,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/text/paper-30ec6aa0af50-69fe69fedd9f.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3689fe7a9b3e",
+          "title": "Language Agent Tree Search Unifies Reasoning, Acting, and Planning in Language Models",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-3689fe7a9b3e--2e6a878fff2e7036-6bbd6d64da2c.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-3689fe7a9b3e--2e6a878fff2e7036-6bbd6d64da2c.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-382d0fc18c0f",
+          "title": "Let’s Verify Step by Step",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-382d0fc18c0f--ca9a33bb30dc62ee-9fecc91ae3d6.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-382d0fc18c0f--ca9a33bb30dc62ee-9fecc91ae3d6.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-543ec43e905b",
+          "title": "AFlow: Automating Agentic Workflow Generation",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-5c87d42f8f16",
+          "title": "Agentic Design Patterns: A System-Theoretic Framework",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-6edf62c0ce13",
+          "title": "Reflexion: Language Agents with Verbal Reinforcement Learning",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-6edf62c0ce13--bfbd51ee1d099d7e-5deeb3670e16.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-6edf62c0ce13--bfbd51ee1d099d7e-5deeb3670e16.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-7c33a26f7d56",
+          "title": "Cognitive Architectures for Language Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8378d43292fb",
+          "title": "Language Agent Tree Search Unifies Reasoning, Acting, and Planning in Language Models",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8cef8cd2788d",
+          "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-8cef8cd2788d--3991b65ba7107ba2-3bd58a67b3bb.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-8cef8cd2788d--3991b65ba7107ba2-3bd58a67b3bb.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a09178a56e0e",
+          "title": "ChatDev: Communicative Agents for Software Development",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-af6c990e2f93",
+          "title": "Position: LLMs Can’t Plan,But Can Help Planning in LLM-Modulo Frameworks",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-af6c990e2f93--dda02835561b2ee7-71cb553bfb01.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-af6c990e2f93--dda02835561b2ee7-71cb553bfb01.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-bb0c77f808f8",
+          "title": "SWE-AGI: Benchmarking Specification-Driven Software Construction with MoonBit in the Era of Autonomous Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d139855908e5",
+          "title": "Evaluation-Driven Development and Operations of LLM Agents: A Process Model and Reference Architecture",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d7cc4ab28ca5",
+          "title": "CRITIC: Large Language Models Can Self-Correct with Tool-Interactive Critiquing",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-d7cc4ab28ca5--99cddb21414c1265-b798cef6c3c4.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-d7cc4ab28ca5--99cddb21414c1265-b798cef6c3c4.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e41c410ae138",
+          "title": "Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-e41c410ae138--db7fd5cc8f439784-6ca8ff17d826.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/agent_theory/sources/html/paper-e41c410ae138--db7fd5cc8f439784-6ca8ff17d826.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e5b8ab820440",
+          "title": "DSPy: Compiling Declarative Language Model Calls into Self-Improving Pipelines",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "ai_se_lecture",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/ai_se_lecture",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_ai_se_lecture.db",
+      "status": "applied",
+      "paper_count": 9,
+      "source_files_found": 0,
+      "full_texts_written_or_available": 0,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-14d376481eae",
+          "title": "MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-1ee418b6f8d4",
+          "title": "The Semi-Executable Stack: Agentic Software Engineering and the Expanding Scope of SE",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2b8a91fe4a1b",
+          "title": "AgentOps: Enabling Observability of LLM Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-32f8ab578bfd",
+          "title": "Agent Design Pattern Catalogue: A Collection of Architectural Patterns for Foundation Model based Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-7d48f73b8368",
+          "title": "Agentic Software Engineering: Foundational Pillars and a Research Roadmap",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8a5aed56da7d",
+          "title": "SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9d00de57e2d3",
+          "title": "Evaluation-Driven Development and Operations of LLM Agents: A Process Model and Reference Architecture",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-b41bd5642ce0",
+          "title": "Large Language Models for Software Engineering: A Systematic Literature Review",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-bbfca87ee42d",
+          "title": "SWE-bench: Can Language Models Resolve Real-World GitHub Issues?",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "ax_assessment",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_ax_assessment.db",
+      "status": "applied",
+      "paper_count": 14,
+      "source_files_found": 9,
+      "full_texts_written_or_available": 13,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-13d50452a271",
+          "title": "Developing a Generative AI Maturity Model for Supporting the Organizational Adoption Journey",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Developing-a-Generat-ax_assessment-7bc612713e58.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Developing-a-Generat-ax_assessment-7bc612713e58.pdf",
+          "text_chars": 18882,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-13d50452a271-7bc612713e58.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-16972f1b8c37",
+          "title": "Development and Evaluation of a Maturity Model for AI Deployment Capability of Manufacturing Companies",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/270aad66a7-Development-and-Evaluation-of-a-Matur-b8ecd13c19d5.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/270aad66a7-Development-and-Evaluation-of-a-Matur-b8ecd13c19d5.pdf",
+          "text_chars": 141692,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-16972f1b8c37-b8ecd13c19d5.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-209ad40d6e60",
+          "title": "Agentic AI in Industry: Adoption Level and Deployment Barriers",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-22065ffc0914",
+          "title": "Establishment of a maturity model to assess the development of industrial AI in smart manufacturing",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Establishment-of-a-m-ax_assessment-12ce5d5641a7.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Establishment-of-a-m-ax_assessment-12ce5d5641a7.pdf",
+          "text_chars": 80863,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-22065ffc0914-12ce5d5641a7.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2b7facc172b2",
+          "title": "Generative AI at Work",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 83103,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-2b7facc172b2-190d6425f7e4.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-40e3b04e7c7b",
+          "title": "Artificial intelligence maturity model: a systematic literature review",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Artificial-intellige-ax_assessment-a2b2445dc1e5.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Artificial-intellige-ax_assessment-a2b2445dc1e5.pdf",
+          "text_chars": 72801,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-40e3b04e7c7b-a2b2445dc1e5.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-5541e1d68e57",
+          "title": "Maturity Framework for Enhancing Machine Learning Quality",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 45921,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-5541e1d68e57-d08f20793ab0.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-5f2344e9f1f1",
+          "title": "MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 30849,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-5f2344e9f1f1-800d6fc4606e.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-7483e1bf5c9d",
+          "title": "A Comprehensive and Structured Maturity Model for Measuring AI Adoption Levels in Industry 4.0",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-A-Comprehensive-and--ax_assessment-ab4da7f1d713.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-A-Comprehensive-and--ax_assessment-ab4da7f1d713.pdf",
+          "text_chars": 38897,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-7483e1bf5c9d-ab4da7f1d713.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-7865472faf0c",
+          "title": "Navigating the Jagged Technological Frontier: Field Experimental Evidence of the Effects of AI on Knowledge Worker Productivity and Quality",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 99054,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-7865472faf0c-cdc5c8285824.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a91ab9fccf0b",
+          "title": "A Maturity Model for Trustworthy AI Software Development",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-A-Maturity-Model-for-ax_assessment-4c0154c6fa1e.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-A-Maturity-Model-for-ax_assessment-4c0154c6fa1e.pdf",
+          "text_chars": 65577,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-a91ab9fccf0b-4c0154c6fa1e.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c545f703d0bc",
+          "title": "The AI Adoption Maturity Model v1.0",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/6f6a073486-The_AI_Adoption_Maturity_Model-729de71c8a6c.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/6f6a073486-The_AI_Adoption_Maturity_Model-729de71c8a6c.pdf",
+          "text_chars": 150000,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-c545f703d0bc-729de71c8a6c.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d53c3f50f26a",
+          "title": "Towards MLOps: A Framework and Maturity Model",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Towards-MLOps-A-Fram-ax_assessment-15ac71fb4be5.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Towards-MLOps-A-Fram-ax_assessment-15ac71fb4be5.pdf",
+          "text_chars": 33555,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-d53c3f50f26a-15ac71fb4be5.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-eb461a283cd7",
+          "title": "Machine Learning Operations (MLOps): Overview, Definition, and Architecture",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Machine-Learning-Ope-ax_assessment-41f83289570b.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/papers/261005-Machine-Learning-Ope-ax_assessment-41f83289570b.pdf",
+          "text_chars": 81236,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ax_assessment/sources/text/paper-eb461a283cd7-41f83289570b.txt",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "general",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/general",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow.db",
+      "status": "applied",
+      "paper_count": 53,
+      "source_files_found": 45,
+      "full_texts_written_or_available": 17,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-085437773f57",
+          "title": "LLMs Can't Plan, But Can Help Us Plan in LLM-Modulo Frameworks",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-115653545158",
+          "title": "Your Agent May Misevolve: Emergent Risks in Self-evolving LLM Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-115653545158--4228f8ea437ff15e-b4ace4071670.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-115653545158--4228f8ea437ff15e-b4ace4071670.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-18c8c3bffd0f",
+          "title": "Don't Blame the Large Language Model: How Agent Harness Evolution Shapes Coding Agent Quality",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-18c8c3bffd0f--1f9100a54d1c3282-db2f8424d1c3.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-18c8c3bffd0f--1f9100a54d1c3282-db2f8424d1c3.pdf",
+          "text_chars": 150000,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-18c8c3bffd0f-db2f8424d1c3.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-1da8c61858c6",
+          "title": "Memento: Fine-tuning LLM Agents withoutFine-tuning LLMs",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-1da8c61858c6--936555ff16976588-773bfd665433.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-1da8c61858c6--936555ff16976588-773bfd665433.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-1ead37b4b006",
+          "title": "ExpeL: LLM Agents Are Experiential Learners",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-1ead37b4b006--5bdd994ec234dca9-806c351eed93.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-1ead37b4b006--5bdd994ec234dca9-806c351eed93.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-235adc7b82dd",
+          "title": "MemoryBank: Enhancing Large Language Models with Long-Term Memory",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-235adc7b82dd--55a15bb2b1423ad6-d3a4ca85ba2f.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-235adc7b82dd--55a15bb2b1423ad6-d3a4ca85ba2f.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2bc9e77103cc",
+          "title": "Large Language Models as Assistants in Software Architecture Design",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-2bc9e77103cc--3f87042c2e7c6067-f3bf9c7bcec0.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-2bc9e77103cc--3f87042c2e7c6067-f3bf9c7bcec0.pdf",
+          "text_chars": 37122,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-2bc9e77103cc-f3bf9c7bcec0.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-306f17068eaa",
+          "title": "PersonaGym: Evaluating Persona Agents and LLMs",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-306f17068eaa--3c9df42563b60801-66204edaf545.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-306f17068eaa--3c9df42563b60801-66204edaf545.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-389cd47ca235",
+          "title": "A Survey on Agent Workflow – Status and Future",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-389cd47ca235--f425377df3c13b5f-2bfc02580dfc.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-389cd47ca235--f425377df3c13b5f-2bfc02580dfc.pdf",
+          "text_chars": 59575,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-389cd47ca235-2bfc02580dfc.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3dc382a3050b",
+          "title": "In Memoriam: C.A.R. Hoare",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-3dc382a3050b--890d9e5b6f34e317-56a496ed3b2e.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-3dc382a3050b--890d9e5b6f34e317-56a496ed3b2e.pdf",
+          "text_chars": 13647,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-3dc382a3050b-56a496ed3b2e.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3e60c66a097f",
+          "title": "Pervasive Physical AI",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-3e60c66a097f--d10a924644976755-74e924b41fd5.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-3e60c66a097f--d10a924644976755-74e924b41fd5.pdf",
+          "text_chars": 10021,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-3e60c66a097f-74e924b41fd5.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-419094a28051",
+          "title": "Why Do Multi-Agent LLM Systems Fail?",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-42a082eb0c06",
+          "title": "Cognitive Architectures for Language Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-42a082eb0c06--783d2caa99a85ffe-7298d23ccdbb.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-42a082eb0c06--783d2caa99a85ffe-7298d23ccdbb.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-47403ded602c",
+          "title": "TestMap: Evidence Infrastructure for Foundation-Model-Assisted Test Generation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-47403ded602c--bf0c9d1cf1f4243a-ee37b88dfcf3.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-47403ded602c--bf0c9d1cf1f4243a-ee37b88dfcf3.pdf",
+          "text_chars": 59154,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-47403ded602c-ee37b88dfcf3.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-4dbf6c44baa0",
+          "title": "Measuring and Controlling Instruction (In)Stability in Language Model Dialogs",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-51e9553fbc69",
+          "title": "ProcMEM: Learning Reusable Procedural Memory from Experience via Non-Parametric PPO for LLM Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-51e9553fbc69--246ffda8df9fbbb2-04ca91a2ad6a.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-51e9553fbc69--246ffda8df9fbbb2-04ca91a2ad6a.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-582100a6e0bd",
+          "title": "A Survey on Large Language Model based Autonomous Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-582100a6e0bd--d655e2c17d90d917-739e6691bcb0.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-582100a6e0bd--d655e2c17d90d917-739e6691bcb0.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-5930c8595586",
+          "title": "agent-deployment",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-5930c8595586--c91ccc3715ee51db-2fc858206b42.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-5930c8595586--c91ccc3715ee51db-2fc858206b42.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-5ad9e31b9955",
+          "title": "Promptbreeder:Self-Referential Self-Improvementvia Prompt Evolution",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-5ad9e31b9955--4cc20d009684a0fd-4dc4a4359aa3.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-5ad9e31b9955--4cc20d009684a0fd-4dc4a4359aa3.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-631d902879fb",
+          "title": "TextGrad: Automatic “Differentiation” via Text",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-631d902879fb--7b437ed093db7df1-16037f0d14c6.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-631d902879fb--7b437ed093db7df1-16037f0d14c6.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-69a6c7a62e82",
+          "title": "Voyager: An Open-Ended Embodied Agentwith Large Language Models",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-69a6c7a62e82--d4e7977d4c2f72b0-bf61d31f124e.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-69a6c7a62e82--d4e7977d4c2f72b0-bf61d31f124e.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-7451a36d0407",
+          "title": "Toward Verified Artificial Intelligence",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-7a79a9dc794f",
+          "title": "AgentEvolver: Towards Efficient Self-Evolving Agent System",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-7a79a9dc794f--b43443b0bd7ebe3c-d29b2a127942.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-7a79a9dc794f--b43443b0bd7ebe3c-d29b2a127942.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-863d01b0869b",
+          "title": "Towards Adjustable Autonomy for the Real World",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-863d01b0869b--459eb3da82be130f-af14f4b9b841.txt",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-863d01b0869b--459eb3da82be130f-af14f4b9b841.txt",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8a47815ba3c1",
+          "title": "A Model for Types and Levels of Human Interaction with Automation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-8a47815ba3c1--8ad961e67a672408-bdfa45d00b71.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-8a47815ba3c1--8ad961e67a672408-bdfa45d00b71.pdf",
+          "text_chars": 75688,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-8a47815ba3c1-bdfa45d00b71.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8a512317ef8b",
+          "title": "Bootstrapping Coding Agents: The Specification Is the Program",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-8a512317ef8b--5cc7b69278e607e5-3b4b82343f60.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-8a512317ef8b--5cc7b69278e607e5-3b4b82343f60.pdf",
+          "text_chars": 17349,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-8a512317ef8b-3b4b82343f60.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-90d0feb2974a",
+          "title": "Agent Workflow Memory",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-90d0feb2974a--f68bf529daeeac25-484cea97b346.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-90d0feb2974a--f68bf529daeeac25-484cea97b346.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9402c61a92ac",
+          "title": "OpenClaw in the Wild: Security Analysis of Autonomous Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-9402c61a92ac--5fadad439788bfc5-8d337eb5f391.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-9402c61a92ac--5fadad439788bfc5-8d337eb5f391.pdf",
+          "text_chars": 123372,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-9402c61a92ac-8d337eb5f391.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9ab225d20d9e",
+          "title": "Prompt Infection: LLM-to-LLM Prompt Injection within Multi-Agent Systems",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-9ab225d20d9e--44cd62d881df0498-790318da0ab5.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-9ab225d20d9e--44cd62d881df0498-790318da0ab5.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9fff29574eb5",
+          "title": "Memory for Autonomous LLM Agents:Mechanisms, Evaluation, and Emerging Frontiers",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-9fff29574eb5--68b7059efdb1198f-e83b0e169f5b.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-9fff29574eb5--68b7059efdb1198f-e83b0e169f5b.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a53268266780",
+          "title": "Gödel Agent: A Self-Referential Framework for Agents Recursively Self-Improvement",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-a53268266780--26742ace86c39aa9-8addf2931aff.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-a53268266780--26742ace86c39aa9-8addf2931aff.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a796728fd400",
+          "title": "AI Transformation: Ready or Already?",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-a796728fd400--778e7d70986a2cb4-4db5c2b102e4.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-a796728fd400--778e7d70986a2cb4-4db5c2b102e4.pdf",
+          "text_chars": 20509,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-a796728fd400-4db5c2b102e4.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-af19f2a7df63",
+          "title": "Prompt Infection: LLM-to-LLM Prompt Injection within Multi-Agent Systems",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-af19f2a7df63--9b2c2c3a11c03fbd-c1e9afb82982.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-af19f2a7df63--9b2c2c3a11c03fbd-c1e9afb82982.pdf",
+          "text_chars": 44636,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-af19f2a7df63-c1e9afb82982.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c36004bb11f6",
+          "title": "Stop_Blaming_the_AI_How_Disciplined_Engineering_Makes_Generative_AI_Work",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-c36004bb11f6--d1f7116c8f5f6556-77c74f9ed5ce.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-c36004bb11f6--d1f7116c8f5f6556-77c74f9ed5ce.pdf",
+          "text_chars": 17605,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-c36004bb11f6-77c74f9ed5ce.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c3c53e0927e6",
+          "title": "Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c3c53e0927e6--f2f2aaae87bd3809-cbfd5f39c9a1.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c3c53e0927e6--f2f2aaae87bd3809-cbfd5f39c9a1.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c494d2549e06",
+          "title": "Levels of Autonomy for AI Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c494d2549e06--b586fd39c292cccb-ef765024c531.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c494d2549e06--b586fd39c292cccb-ef765024c531.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c6f028cb422f",
+          "title": "Generative Agents: Interactive Simulacra of Human Behavior",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c8d56eaaa7cc",
+          "title": "MemInsight: Autonomous Memory Augmentation for LLM Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c8d56eaaa7cc--5a987271a76998ad-36bbaad2218e.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c8d56eaaa7cc--5a987271a76998ad-36bbaad2218e.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c8eb7dcf2d39",
+          "title": "A Survey of Self-Evolving Agents: What, When, How, and Where to Evolve on the Path to Artificial Super Intelligence",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c8eb7dcf2d39--c7699fcf0a04bba1-a5a8c087f8d5.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-c8eb7dcf2d39--c7699fcf0a04bba1-a5a8c087f8d5.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-ced938e44897",
+          "title": "Reflexion: Language Agents with Verbal Reinforcement Learning",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-ced938e44897--bfbd51ee1d099d7e-9e315a30cb75.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-ced938e44897--bfbd51ee1d099d7e-9e315a30cb75.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d1f56e9fab0d",
+          "title": "MAAD: Automate Software Architecture Design through Knowledge-Driven Multi-Agent Collaboration",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-d1f56e9fab0d--ebac655ba78fef6a-1f8f176ceb71.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-d1f56e9fab0d--ebac655ba78fef6a-1f8f176ceb71.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d3f93d7d6057",
+          "title": "AI_That_Learns_Thinks_and_Acts_The_Next_Frontier_of_Generative_AI",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-d3f93d7d6057--b35754c3db4ed0ba-f38406de4d08.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-d3f93d7d6057--b35754c3db4ed0ba-f38406de4d08.pdf",
+          "text_chars": 54240,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-d3f93d7d6057-f38406de4d08.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e266a257193f",
+          "title": "MetaGPT: Meta Programming for a Multi-Agent Collaborative Framework",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-e266a257193f--6b5a84fc92e88bf5-7570dd91d302.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-e266a257193f--6b5a84fc92e88bf5-7570dd91d302.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e3e8b8ffb38d",
+          "title": "LLM-Based Multi-Agent Systems for Software Engineering: Literature Review, Vision and the Road Ahead",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-e3e8b8ffb38d--e158eaad8b2fab8b-a215c03b6e3a.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-e3e8b8ffb38d--e158eaad8b2fab8b-a215c03b6e3a.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e638ae120887",
+          "title": "Role-Play with Large Language Models",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-ec418a7f6cae",
+          "title": "Safe Reinforcement Learning via Shielding",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-ee95908fe75e",
+          "title": "RoleLLM: Benchmarking, Eliciting, and Enhancing Role-Playing Abilities of Large Language Models",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-ee95908fe75e--86938d79524268bc-24f8a4c1ff42.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-ee95908fe75e--86938d79524268bc-24f8a4c1ff42.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-ef2e2d59f27a",
+          "title": "Character-LLM: A Trainable Agent for Role-Playing",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-ef2e2d59f27a--b61bef7f458eaba9-d97e388bad85.md",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/html/paper-ef2e2d59f27a--b61bef7f458eaba9-d97e388bad85.md",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-efdcfd7098c3",
+          "title": "The Agentic Economy",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-efdcfd7098c3--9d2c2ee3cf543553-9c1620219828.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-efdcfd7098c3--9d2c2ee3cf543553-9c1620219828.pdf",
+          "text_chars": 23212,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-efdcfd7098c3-9c1620219828.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f1fb01a41a5a",
+          "title": "Towards Engineering LLM-Enhanced Multi-agent Systems: A Critical Examination of Roles",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-f1fb01a41a5a--288c4f9faa4c304e-3f533189ab09.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-f1fb01a41a5a--288c4f9faa4c304e-3f533189ab09.pdf",
+          "text_chars": 60735,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-f1fb01a41a5a-3f533189ab09.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f5b9f3c2c9fa",
+          "title": "Towards Adaptive, Scalable, and Robust Coordination of LLM Agents: A Dynamic Ad-Hoc Networking Perspective",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-f5b9f3c2c9fa--1fc3f9e42ed300e3-77894d88e63a.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-f5b9f3c2c9fa--1fc3f9e42ed300e3-77894d88e63a.pdf",
+          "text_chars": 85406,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-f5b9f3c2c9fa-77894d88e63a.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f65756a56eff",
+          "title": "From Large Language Models to Reasoning and Agents",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-f65756a56eff--1bc25b27a5ac3a15-dd041910c1b5.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/papers/paper-f65756a56eff--1bc25b27a5ac3a15-dd041910c1b5.pdf",
+          "text_chars": 18997,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/general/sources/text/paper-f65756a56eff-dd041910c1b5.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f68cf06cbc14",
+          "title": "Identifying the Risks of LM Agents with an LM-Emulated Sandbox",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "ind_ax",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_ind_ax.db",
+      "status": "applied",
+      "paper_count": 24,
+      "source_files_found": 18,
+      "full_texts_written_or_available": 24,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-0a14219c49e3",
+          "title": "Performance prediction of sintered NdFeB magnet using multi-head attention regression models",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Performance-predicti-ind_ax-d13af92c5288.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Performance-predicti-ind_ax-d13af92c5288.pdf",
+          "text_chars": 36139,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-0a14219c49e3-d13af92c5288.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-0c174016a7ac",
+          "title": "AutoEIS: Automated Bayesian model selection and analysis for electrochemical impedance spectroscopy",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-AutoEIS-Automated-Ba-ind_ax-d72daa0597d8.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-AutoEIS-Automated-Ba-ind_ax-d72daa0597d8.pdf",
+          "text_chars": 52324,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-0c174016a7ac-d72daa0597d8.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2dcd5d4a26e5",
+          "title": "Joint stiffness identification of robots based on the kinetoelastic model with a multiple-point contact measuring instrument",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Joint-stiffness-iden-ind_ax-743ab133b7ff.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Joint-stiffness-iden-ind_ax-743ab133b7ff.pdf",
+          "text_chars": 40801,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-2dcd5d4a26e5-743ab133b7ff.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2f5592d1ec75",
+          "title": "Method for improving robotic surface milling accuracy by stiffness optimization and force-induced error compensation",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Method-for-improving-ind_ax-0b0d6c034745.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Method-for-improving-ind_ax-0b0d6c034745.pdf",
+          "text_chars": 51580,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-2f5592d1ec75-0b0d6c034745.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2fc1e44678bc",
+          "title": "A Robotic Calibration Method Using a Model-Based Identification Technique and an Invasive Weed Optimization Neural Network Compensator",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261010-A-Robotic-Calibratio-ind_ax-a6af7dab1671.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261010-A-Robotic-Calibratio-ind_ax-a6af7dab1671.pdf",
+          "text_chars": 41089,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-2fc1e44678bc-a6af7dab1671.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-477af52c1e61",
+          "title": "Machine Learning-Guided Design of High-Entropy FeCoCrMnCu Layered Double Hydroxides for Efficient Oxygen Evolution in Alkaline Media",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Machine-Learning-Gui-ind_ax-06f746fd3d7b.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Machine-Learning-Gui-ind_ax-06f746fd3d7b.pdf",
+          "text_chars": 51180,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-477af52c1e61-06f746fd3d7b.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-4b8a3346be56",
+          "title": "iTransformer: Inverted Transformers Are Effective for Time Series Forecasting",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 36238,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-4b8a3346be56-1c04de4dd01e.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-4cacf159b019",
+          "title": "A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-A-Gentle-Introductio-ind_ax-cc9231b25bb4.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-A-Gentle-Introductio-ind_ax-cc9231b25bb4.pdf",
+          "text_chars": 97298,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-4cacf159b019-cc9231b25bb4.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-57f5f7488f64",
+          "title": "Fourier Neural Operator for Parametric Partial Differential Equations",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Fourier-Neural-Opera-ind_ax-4e4c8d3ba180.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Fourier-Neural-Opera-ind_ax-4e4c8d3ba180.pdf",
+          "text_chars": 35074,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-57f5f7488f64-4e4c8d3ba180.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-6498418cbd34",
+          "title": "A Hybrid Neural Network Approach for Increasing the Absolute Accuracy of Industrial Robots",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-A-Hybrid-Neural-Netw-ind_ax-55ab06415e1f.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-A-Hybrid-Neural-Netw-ind_ax-55ab06415e1f.pdf",
+          "text_chars": 29569,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-6498418cbd34-55ab06415e1f.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-6eeb4b3fb1c7",
+          "title": "High-coercivity ultrafine-grained anisotropic Nd–Fe–B magnets processed by hot deformation and the Nd–Cu grain boundary diﬀusion process",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-High-coercivity-ultr-ind_ax-a66d6792d4d5.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-High-coercivity-ultr-ind_ax-a66d6792d4d5.pdf",
+          "text_chars": 38749,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-6eeb4b3fb1c7-a66d6792d4d5.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-6f085c46818d",
+          "title": "Conformalized Quantile Regression",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 46104,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-6f085c46818d-076f34d36d6d.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-71a01dc37599",
+          "title": "Are Transformers Effective for Time Series Forecasting?",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 53914,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-71a01dc37599-409e440deb55.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-72adc064e681",
+          "title": "Physics-informed machine learning in intelligent manufacturing: a review",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261010-Physics-informed-mac-ind_ax-f9788aedfae8.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261010-Physics-informed-mac-ind_ax-f9788aedfae8.pdf",
+          "text_chars": 116694,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-72adc064e681-f9788aedfae8.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-74d4e46ce74d",
+          "title": "A Time Series is Worth 64 Words- Long-term Forecasting with Transformers",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-A-Time-Series-is-Wor-ind_ax-5be9063ec505.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-A-Time-Series-is-Wor-ind_ax-5be9063ec505.pdf",
+          "text_chars": 37880,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-74d4e46ce74d-5be9063ec505.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-7efb612f0e66",
+          "title": "Conformal Prediction for Time Series",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 76357,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-7efb612f0e66-242c87575d4c.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8887c7e28ea1",
+          "title": "Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Physics-informed-neu-ind_ax-160a6247a11b.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Physics-informed-neu-ind_ax-160a6247a11b.pdf",
+          "text_chars": 76280,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-8887c7e28ea1-160a6247a11b.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-98d12154e92e",
+          "title": "Physics-informed machine learning",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Physics-informed-mac-ind_ax-a75b76e516c5.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Physics-informed-mac-ind_ax-a75b76e516c5.pdf",
+          "text_chars": 130068,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-98d12154e92e-a75b76e516c5.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a5f6a1ed42ea",
+          "title": "Conformal Decision Theory: Safe Autonomous Decisions from Imperfect Predictions",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 40953,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-a5f6a1ed42ea-fa4c05d54346.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a61b8c99cb5f",
+          "title": "Digital twin for smart manufacturing, A review",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Digital-twin-for-sma-ind_ax-9134d7657c45.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Digital-twin-for-sma-ind_ax-9134d7657c45.pdf",
+          "text_chars": 63842,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-a61b8c99cb5f-9134d7657c45.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-b68c8ebefab8",
+          "title": "Optimization of direct extrusion process for Nd-Fe-B magnets using active learning assisted by machine learning and Bayesian optimization",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Optimization-of-dire-ind_ax-76a9738376eb.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Optimization-of-dire-ind_ax-76a9738376eb.pdf",
+          "text_chars": 23817,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-b68c8ebefab8-76a9738376eb.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-bb43b092abca",
+          "title": "Prediction of the Temperature of Liquid Aluminum and the Dissolved Hydrogen Content in Liquid Aluminum with a Machine Learning Approach",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Prediction-of-the-Te-ind_ax-71bf10e4f98c.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Prediction-of-the-Te-ind_ax-71bf10e4f98c.pdf",
+          "text_chars": 62730,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-bb43b092abca-71bf10e4f98c.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e4a69cf196d2",
+          "title": "Adaptive Conformal Inference Under Distribution Shift",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 46589,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-e4a69cf196d2-e26e077123b4.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-fa49ee479859",
+          "title": "Conformal Prediction",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Conformal-Prediction-ind_ax-def3d48d5fb0.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/papers/261009-Conformal-Prediction-ind_ax-def3d48d5fb0.pdf",
+          "text_chars": 44721,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/ind_ax/sources/text/paper-fa49ee479859-def3d48d5fb0.txt",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "industrial_ai",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/industrial_ai",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_industrial_ai.db",
+      "status": "applied",
+      "paper_count": 20,
+      "source_files_found": 1,
+      "full_texts_written_or_available": 1,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-0bc893038cb4",
+          "title": "Fourier Neural Operator for Parametric Partial Differential Equations",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-0e2006f5002f",
+          "title": "The MVTec Anomaly Detection Dataset: A Comprehensive Real-World Dataset for Unsupervised Anomaly Detection",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-178f2ab383dd",
+          "title": "Time-LLM: Time Series Forecasting by Reprogramming Large Language Models",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2d79e2704407",
+          "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-367216de6b3f",
+          "title": "TimesNet: Temporal 2D-Variation Modeling for General Time Series Analysis",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3bc33ff8b600",
+          "title": "Physics-informed neural networks for heat transfer problems",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3c16c7078c27",
+          "title": "UniTS: Building a Unified Time Series Model",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-43ea9e6bcc9c",
+          "title": "Physics-Informed Machine Learning",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-66fd9ed5af25",
+          "title": "FastFlow: Unsupervised Anomaly Detection and Localization via 2D Normalizing Flows",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-8ff05a75ba82",
+          "title": "Artificial Intelligence in manufacturing: State of the art, perspectives, and future directions",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/industrial_ai/sources/papers/paper-8ff05a75ba82--45240454375e3aeb-9ef6b837fa57.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/industrial_ai/sources/papers/paper-8ff05a75ba82--45240454375e3aeb-9ef6b837fa57.pdf",
+          "text_chars": 150000,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/industrial_ai/sources/text/paper-8ff05a75ba82-9ef6b837fa57.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9c45216f4e94",
+          "title": "WinCLIP: Zero-/Few-Shot Anomaly Classification and Segmentation",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9d974e579ef1",
+          "title": "AnomalyGPT: Detecting Industrial Anomalies Using Large Vision-Language Models",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c6ca45c23dce",
+          "title": "Towards Total Recall in Industrial Anomaly Detection",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-d09d4f60858f",
+          "title": "TranAD: Deep Transformer Networks for Anomaly Detection in Multivariate Time Series Data",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-da47b546eeab",
+          "title": "Chronos: Learning the Language of Time Series",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-e9152f6b38d8",
+          "title": "A Time Series is Worth 64 Words: Long-term Forecasting with Transformers",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-ee1b52911235",
+          "title": "Physics-Informed Neural Networks (PINNs) for Fluid Mechanics: A Review",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-efae17c6cee7",
+          "title": "ChemCrow: Augmenting Large-Language Models with Chemistry Tools",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f92e9ce7f35a",
+          "title": "Multivariate Time-Series Anomaly Detection via Graph Attention Network",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-faf2ad403de8",
+          "title": "Learning Nonlinear Operators via DeepONet Based on the Universal Approximation Theorem of Operators",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "llm_arch",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_llm_arch.db",
+      "status": "applied",
+      "paper_count": 10,
+      "source_files_found": 0,
+      "full_texts_written_or_available": 10,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-042efe166449",
+          "title": "RepoCoder: Repository-Level Code Completion with Retrieval-Augmented Generation",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 41673,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-042efe166449-1c6ae817db0e.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-1264800f9f53",
+          "title": "SynCode: LLM Generation with Context-Free Grammar Directed Search",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 105202,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-1264800f9f53-ab6709ce74db.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2e1b59e66533",
+          "title": "An Empirical Evaluation of GitHub Copilot's Code Suggestions",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 24987,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-2e1b59e66533-64cbdb0a6d81.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3299681f7873",
+          "title": "Software Architecture in the Age of Generative AI",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 149999,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-3299681f7873-3cda0d3d0bc6.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-613f1a91b29a",
+          "title": "CrossCodeEval: A Diverse and Multilingual Benchmark for Cross-File Code Completion",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 38080,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-613f1a91b29a-1821bc985e59.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-6931acc29b71",
+          "title": "RepoAgent: An LLM-Powered Open-Source Framework for Repository-level Code Documentation",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 83121,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-6931acc29b71-7aebc8015706.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-909c572d6ae6",
+          "title": "Large Language Models for Software Engineering: A Systematic Literature Review",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 150000,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-909c572d6ae6-6787b02f23a8.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-a5c64bbcafe8",
+          "title": "Reading Between the Lines: Modeling User Behavior and Costs in AI-Assisted Programming",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 64991,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-a5c64bbcafe8-7742c4638923.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-bfbfbfcc6a37",
+          "title": "CodePlan: Repository-Level Coding using Planned Multi-Step Edits and Program Analysis",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 103019,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-bfbfbfcc6a37-c4b99ef8ce62.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-cfa13da40462",
+          "title": "SWE-bench: Can Language Models Resolve Real-World GitHub Issues?",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 149999,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/llm_arch/sources/text/paper-cfa13da40462-bb563269c322.txt",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "physics_ai",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/physics_ai",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_physics_ai.db",
+      "status": "applied",
+      "paper_count": 4,
+      "source_files_found": 0,
+      "full_texts_written_or_available": 0,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-5196e70a1c76",
+          "title": "Optimising entire lifetime economy of heat exchanger networks",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-933ff64803fb",
+          "title": "Dynamic modeling and optimal control strategy of waste heat recovery Organic Rankine Cycles",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-956deeb4eb4a",
+          "title": "Physics-Informed Neural Networks for Heat Transfer Problems",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-bcd6593cacd9",
+          "title": "Physics-informed machine learning",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "se4ai_ai4se",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_se4ai_ai4se.db",
+      "status": "applied",
+      "paper_count": 18,
+      "source_files_found": 10,
+      "full_texts_written_or_available": 10,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-1ed16f87d299",
+          "title": "The Humble Programmer",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-200337dd1bbb",
+          "title": "Reflections on Trusting Trust",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-200337dd1bbb--8ab9d339a2c27813-fcd3340251f0.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-200337dd1bbb--8ab9d339a2c27813-fcd3340251f0.pdf",
+          "text_chars": 11609,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-200337dd1bbb-fcd3340251f0.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-2ca2240a10b4",
+          "title": "Software Engineering: Report on a conference sponsored by the NATO Science Committee",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-2ca2240a10b4--b8bddafa5e597eb5-3ab23716d074.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-2ca2240a10b4--b8bddafa5e597eb5-3ab23716d074.pdf",
+          "text_chars": 150000,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-2ca2240a10b4-3ab23716d074.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3573a46f5d9e",
+          "title": "Foundations for the Study of Software Architecture",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-3573a46f5d9e--c99ff9e4fc049e94-114d44c859ed.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-3573a46f5d9e--c99ff9e4fc049e94-114d44c859ed.pdf",
+          "text_chars": 64503,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-3573a46f5d9e-114d44c859ed.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-3c13d6c9cdb6",
+          "title": "Go To Statement Considered Harmful",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-3c13d6c9cdb6--f2951867e85a5148-a5fe64a53eb4.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-3c13d6c9cdb6--f2951867e85a5148-a5fe64a53eb4.pdf",
+          "text_chars": 9008,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-3c13d6c9cdb6-a5fe64a53eb4.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-45f2b6ff1fca",
+          "title": "On the Criteria To Be Used in Decomposing Systems into Modules",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-45f2b6ff1fca--b3eafb67d5a9f91d-b0ffc61ea9c1.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-45f2b6ff1fca--b3eafb67d5a9f91d-b0ffc61ea9c1.pdf",
+          "text_chars": 28659,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-45f2b6ff1fca-b0ffc61ea9c1.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-4a1cf9f5b3da",
+          "title": "Agentic Software Engineering: Foundational Pillars and a Research Roadmap",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-582226e64692",
+          "title": "No Silver Bullet—Essence and Accidents of Software Engineering",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-627ad32e5984",
+          "title": "Large Language Models for Software Engineering: A Systematic Literature Review",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-661fa851880c",
+          "title": "Programming as Theory Building",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-661fa851880c--9e49676ccaf78ba6-83338a267895.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-661fa851880c--9e49676ccaf78ba6-83338a267895.pdf",
+          "text_chars": 43227,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-661fa851880c-83338a267895.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-76a503c95f01",
+          "title": "SWE-bench: Can Language Models Resolve Real-World GitHub Issues?",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-883dba7f5ee8",
+          "title": "Architectural Blueprints—The \"4+1\" View Model of Software Architecture",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-883dba7f5ee8--78529698ed328969-5960d343696f.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-883dba7f5ee8--78529698ed328969-5960d343696f.pdf",
+          "text_chars": 39252,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-883dba7f5ee8-5960d343696f.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-94fa85902406",
+          "title": "Agent Design Pattern Catalogue: A Collection of Architectural Patterns for Foundation Model based Agents",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-99da653e4377",
+          "title": "A Rational Design Process: How and Why to Fake It",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-99da653e4377--fa32030764533776-0d277c751596.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-99da653e4377--fa32030764533776-0d277c751596.pdf",
+          "text_chars": 34959,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-99da653e4377-0d277c751596.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-9a6d922558bf",
+          "title": "The World and the Machine",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-9a6d922558bf--48c6ab4b1e17360a-066d10f08e39.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-9a6d922558bf--48c6ab4b1e17360a-066d10f08e39.pdf",
+          "text_chars": 49180,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-9a6d922558bf-066d10f08e39.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-b9f03fcc18b1",
+          "title": "Evaluation-Driven Development and Operations of LLM Agents: A Process Model and Reference Architecture",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c995a11821fe",
+          "title": "The Semi-Executable Stack: Agentic Software Engineering and the Expanding Scope of SE",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-fcde76aa776a",
+          "title": "Managing the Development of Large Software Systems",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-fcde76aa776a--9f7db065bd1c911a-755237a97c31.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/papers/paper-fcde76aa776a--9f7db065bd1c911a-755237a97c31.pdf",
+          "text_chars": 19751,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/se4ai_ai4se/sources/text/paper-fcde76aa776a-755237a97c31.txt",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "workspace": "vision_ai",
+      "topic_dir": "/Users/chanjinpark/projects/research-fellow/data/topics/vision_ai",
+      "database": "/Users/chanjinpark/projects/research-fellow/data/research_fellow_vision_ai.db",
+      "status": "applied",
+      "paper_count": 10,
+      "source_files_found": 1,
+      "full_texts_written_or_available": 1,
+      "missing_sources": [],
+      "database_backup": "",
+      "items": [
+        {
+          "paper_id": "paper-0d3d9f75b87a",
+          "title": "Deep learning for quality prediction in high-pressure die casting",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-0d7069a0c1ad",
+          "title": "EfficientAD: Accurate Visual Anomaly Detection at Millisecond-Level Latencies",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-10e24978f6e9",
+          "title": "CutPaste: Self-Supervised Learning for Anomaly Detection and Localization",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-132129cf3f2e",
+          "title": "WinCLIP: Zero-/Few-Shot Anomaly Detection and Reasoning",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-415af3f8fef8",
+          "title": "Aluminum casting inspection using deep learning: a method based on simulated defects",
+          "source": "/Users/chanjinpark/projects/research-fellow/data/topics/vision_ai/sources/papers/paper-415af3f8fef8--48be62f0ef26d1b4-d47316c2352f.pdf",
+          "topic_pdf": "/Users/chanjinpark/projects/research-fellow/data/topics/vision_ai/sources/papers/paper-415af3f8fef8--48be62f0ef26d1b4-d47316c2352f.pdf",
+          "text_chars": 50199,
+          "text_path": "/Users/chanjinpark/projects/research-fellow/data/topics/vision_ai/sources/text/paper-415af3f8fef8-d47316c2352f.txt",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-54e77ea88a8a",
+          "title": "RealNet: A Feature Selection Network with Realistic Synthetic Anomaly for Anomaly Detection",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-66eaacb5b072",
+          "title": "A Unified Model for Multi-class Anomaly Detection",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-aa28d80482d1",
+          "title": "Deep Industrial Image Anomaly Detection: A Survey",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-c42ec0f88fbc",
+          "title": "Detection and Segmentation of Manufacturing Defects with Convolutional Neural Networks and Transfer Learning",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        },
+        {
+          "paper_id": "paper-f6df203fe2df",
+          "title": "Towards Total Recall in Industrial Anomaly Detection",
+          "source": "",
+          "topic_pdf": "",
+          "text_chars": 0,
+          "text_path": "",
+          "status": "ready"
+        }
+      ]
+    }
+  ]
+}

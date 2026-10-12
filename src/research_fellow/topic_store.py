@@ -43,6 +43,7 @@ def ensure_topic_directory(
     root = topic_dir(data_dir, topic_key)
     for relative in (
         "sources/papers",
+        "sources/html",
         "sources/text",
         "literature",
         "reviews",
@@ -80,6 +81,12 @@ def ensure_topic_directory(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+    sources_manifest = root / "sources" / "sources.json"
+    if not sources_manifest.exists():
+        sources_manifest.write_text(
+            json.dumps({"format": TOPIC_FORMAT, "sources": {}}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return root
 
 

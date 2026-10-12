@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .storage import Ledger
+from .topic_store import topic_dir
+from .topic_sync import TopicSyncResult, reconcile_paper_paths_from_topic, sync_topic_directory
 
 
 SYNC_TABLES = (
@@ -155,10 +157,18 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sync_paper_assets(local_db: str | Path, server_db: str | Path, local_asset_dir: str | Path, server_asset_dir: str | Path) -> AssetSyncResult:
+def sync_paper_assets(
+    local_db: str | Path,
+    server_db: str | Path,
+    local_asset_dir: str | Path,
+    server_asset_dir: str | Path,
+    *,
+    topic_dir: str | Path | None = None,
+) -> AssetSyncResult:
     """Safely exchange paper files using versioned, content-addressed names."""
     local_db, server_db = Path(local_db), Path(server_db)
     local_asset_dir, server_asset_dir = Path(local_asset_dir), Path(server_asset_dir)
+    managed_topic = Path(topic_dir).expanduser().resolve() if topic_dir else None
     local_asset_dir.mkdir(parents=True, exist_ok=True)
     server_asset_dir.mkdir(parents=True, exist_ok=True)
     uploaded = downloaded = unchanged = missing = 0
@@ -169,6 +179,13 @@ def sync_paper_assets(local_db: str | Path, server_db: str | Path, local_asset_d
         paper_id = str(row["paper_id"])
         safe_paper_id = re.sub(r"[^A-Za-z0-9._-]+", "_", paper_id)[:100] or "paper"
         local_path = Path(str(row["pdf_path"] or "")).expanduser() if str(row["pdf_path"] or "").strip() else None
+        if local_path and managed_topic:
+            try:
+                local_path.resolve().relative_to(managed_topic)
+                unchanged += 1
+                continue
+            except ValueError:
+                pass
         if local_path and local_path.is_file():
             digest = _file_sha256(local_path)
             suffix = local_path.suffix.lower() if local_path.suffix else ".bin"
@@ -632,6 +649,9 @@ class WorkspaceBatchStatus:
     download_changes: int
     conflicts: int
     initialization_rows: int
+    topic_upload_changes: int
+    topic_download_changes: int
+    topic_conflicts: int
 
 
 @dataclass
@@ -641,6 +661,7 @@ class WorkspaceBatchResult:
     applied: int
     conflicts: int
     assets: AssetSyncResult
+    topic_assets: TopicSyncResult
 
 
 class AllWorkspacesSync:
@@ -659,10 +680,17 @@ class AllWorkspacesSync:
         server_assets = server_workspace / "assets" / "paper_shelf"
         return local_db, server_db, local_assets, server_assets
 
+    def _topic_paths(self, key: str) -> tuple[Path, Path]:
+        local_topic = topic_dir(self.data_dir, key)
+        server_topic = topic_dir(self.server_root, key)
+        return local_topic, server_topic
+
     def preview(self) -> list[WorkspaceBatchStatus]:
         statuses: list[WorkspaceBatchStatus] = []
         for key, profile in self.profiles.items():
             local_db, server_db, _, _ = self._paths(key, profile)
+            local_topic, server_topic = self._topic_paths(key)
+            topic_preview = sync_topic_directory(local_topic, server_topic, apply=False)
             sync = WorkspaceSync(local_db, server_db)
             if sync.server_exists:
                 preview = sync.preview()
@@ -679,6 +707,9 @@ class AllWorkspacesSync:
                 server_exists=sync.server_exists, upload_changes=upload,
                 download_changes=download, conflicts=conflicts,
                 initialization_rows=initialization_rows,
+                topic_upload_changes=topic_preview.uploaded,
+                topic_download_changes=topic_preview.downloaded,
+                topic_conflicts=topic_preview.conflicts,
             ))
         return statuses
 
@@ -686,6 +717,8 @@ class AllWorkspacesSync:
         results: list[WorkspaceBatchResult] = []
         for key, profile in self.profiles.items():
             local_db, server_db, local_assets, server_assets = self._paths(key, profile)
+            local_topic, server_topic = self._topic_paths(key)
+            topic_assets = sync_topic_directory(local_topic, server_topic, apply=True)
             sync = WorkspaceSync(local_db, server_db)
             initialized = not sync.server_exists
             if initialized:
@@ -696,9 +729,12 @@ class AllWorkspacesSync:
                 result = sync.apply()
                 applied = len(result.actionable)
                 conflicts = len(result.conflicts)
-            assets = sync_paper_assets(local_db, server_db, local_assets, server_assets)
+            reconcile_paper_paths_from_topic(local_db, local_topic)
+            assets = sync_paper_assets(
+                local_db, server_db, local_assets, server_assets, topic_dir=local_topic,
+            )
             results.append(WorkspaceBatchResult(
                 key=key, initialized=initialized, applied=applied,
-                conflicts=conflicts, assets=assets,
+                conflicts=conflicts, assets=assets, topic_assets=topic_assets,
             ))
         return results

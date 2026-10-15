@@ -265,6 +265,13 @@ from research_fellow.application.research_intake import (
     submit_external_advisory_interpretation,
     submit_research_question,
 )
+from research_fellow.application.local_paper_intake import (
+    add_local_pdf_to_research_question,
+    apply_local_pdf_review_response,
+    extract_local_pdf_metadata,
+    prepare_research_question_from_local_papers,
+    start_research_question_from_local_papers,
+)
 from research_fellow.application.research_question_progression import start_research_question_progression
 from research_fellow.application.research_actions import request_additional_literature, request_initial_answer, request_answer_update
 from research_fellow.application.research_answer import latest_research_answer
@@ -1343,6 +1350,65 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         )
         return {**created, "progression": {**progression, "execution": continuation}}
 
+    def _prepare_research_question_from_local_papers(
+        payload: Mapping[str, Any], files: list[tuple[str, bytes]],
+    ) -> Mapping[str, Any]:
+        return prepare_research_question_from_local_papers(
+            initial_question=str(payload.get("question") or ""),
+            context=str(payload.get("context") or ""),
+            files=files,
+        )
+
+    def _start_research_question_from_local_papers(
+        payload: Mapping[str, Any], files: list[tuple[str, bytes]], response: str,
+    ) -> Mapping[str, Any]:
+        created = start_research_question_from_local_papers(
+            ledger,
+            initial_question=str(payload.get("question") or ""),
+            initial_context=str(payload.get("context") or ""),
+            files=files,
+            response=response,
+            storage_root=TOPIC_DIR / "sources" / "papers",
+            workspace_keyword=WORKSPACE_KEY,
+        )
+        progression = start_research_question_progression(ledger, memory, created)
+        intent_ids = [
+            str(item.get("intent_id") or "")
+            for item in progression.get("dispatched_intents") or []
+            if str(item.get("intent_id") or "")
+        ]
+        continuation = advance_persistent_research(
+            ledger, memory, _persistent_runtime_bindings(),
+            intent_ids=intent_ids, max_m1_items=max(1, len(intent_ids)),
+            consume_knowledge_updates=False,
+        )
+        return {**created, "progression": {**progression, "execution": continuation}}
+
+    def _extract_local_pdf_metadata(filename: str, content: bytes) -> Mapping[str, Any]:
+        return extract_local_pdf_metadata(filename=filename, content=content)
+
+    def _add_local_paper_to_research_question(
+        rq_id: str, metadata: Mapping[str, Any], filename: str, content: bytes,
+    ) -> Mapping[str, Any]:
+        return add_local_pdf_to_research_question(
+            ledger,
+            rq_id=rq_id,
+            title=str(metadata.get("title") or ""),
+            publication_year=str(metadata.get("publication_year") or ""),
+            authors=str(metadata.get("authors") or ""),
+            filename=filename,
+            content=content,
+            storage_root=TOPIC_DIR / "sources" / "papers",
+            workspace_keyword=WORKSPACE_KEY,
+        )
+
+    def _submit_local_paper_review(
+        review_context: Mapping[str, Any], response: str,
+    ) -> Mapping[str, Any]:
+        return apply_local_pdf_review_response(
+            ledger, review_context=review_context, response=response,
+        )
+
     def _prepare_external_advisory(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return prepare_external_advisory_interpretation(
             payload, draft_fn=lambda prompt: llm_draft(prompt, model, use_ollama),
@@ -1463,6 +1529,11 @@ def operating_desk(model: str, use_ollama: bool, semantic: bool, embedding_model
         system=system,
         developer_mode=developer_mode,
         research_submit_question=_submit_research_question,
+        research_prepare_from_local_papers=_prepare_research_question_from_local_papers,
+        research_start_from_local_papers=_start_research_question_from_local_papers,
+        research_extract_local_paper_metadata=_extract_local_pdf_metadata,
+        research_add_local_paper_to_rq=_add_local_paper_to_research_question,
+        research_submit_local_paper_review=_submit_local_paper_review,
         research_prepare_external_advisory=_prepare_external_advisory,
         research_submit_external_advisory=_submit_external_advisory,
         research_request_additional_literature=_request_additional_literature,

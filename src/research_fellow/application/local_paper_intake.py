@@ -301,6 +301,65 @@ def parse_research_question_from_local_papers_response(response: str) -> dict[st
         "search_focus": [str(x).strip() for x in (data.get("search_focus") or []) if str(x).strip()],
     }
 
+
+def start_research_question_from_local_papers(
+    ledger: Any,
+    *,
+    initial_question: str,
+    initial_context: str,
+    files: list[tuple[str, bytes]],
+    response: str,
+    storage_root: Path,
+    workspace_keyword: str,
+) -> dict[str, Any]:
+    """Create an RQ from a refined response and attach all researcher seed PDFs."""
+    if not files:
+        raise ValueError("하나 이상의 PDF 논문을 선택해 주세요.")
+    refined = parse_research_question_from_local_papers_response(response)
+    prepared: list[tuple[str, bytes, dict[str, Any]]] = []
+    for filename, content in files:
+        payload = bytes(content or b"")
+        metadata = extract_local_pdf_metadata(filename=filename, content=payload)
+        prepared.append((str(filename), payload, metadata))
+
+    source_papers = [
+        {
+            "filename": filename,
+            "title": str(metadata.get("title") or Path(filename).stem),
+            "authors": list(metadata.get("authors") or []),
+            "publication_year": str(metadata.get("publication_year") or ""),
+        }
+        for filename, _, metadata in prepared
+    ]
+    rq = ledger.create_research_question_thread(
+        question=refined["question"],
+        source_type="local_paper",
+        rationale="연구자가 제공한 seed 논문을 바탕으로 보강한 연구질문입니다.",
+        research_context=refined["context"] or str(initial_context or "").strip(),
+        source_payload={
+            "initial_question": str(initial_question or "").strip(),
+            "initial_context": str(initial_context or "").strip(),
+            "refinement_note": refined["refinement_note"],
+            "search_focus": refined["search_focus"],
+            "seed_papers": source_papers,
+        },
+        status="interested",
+    )
+    attached: list[dict[str, Any]] = []
+    for filename, payload, metadata in prepared:
+        attached.append(add_local_pdf_to_research_question(
+            ledger,
+            rq_id=str(rq.get("rq_id") or ""),
+            title=str(metadata.get("title") or Path(filename).stem),
+            filename=filename,
+            content=payload,
+            storage_root=storage_root,
+            workspace_keyword=workspace_keyword,
+            publication_year=str(metadata.get("publication_year") or ""),
+            authors=list(metadata.get("authors") or []),
+        ))
+    return {**rq, "refined": refined, "seed_papers": attached}
+
 def start_research_question_from_local_pdf(
     ledger: Any,
     *,
